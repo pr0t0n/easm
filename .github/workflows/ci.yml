@@ -64,6 +64,36 @@ jobs:
       - name: Build production bundle
         run: npm run build
 
+  # BAS real agent: build.sh must keep cross-compiling clean for all three
+  # targets. This does NOT auto-publish backend/bas_agent_dist/ (Go build
+  # artifacts aren't guaranteed byte-reproducible across environments, so a
+  # binary diff here would be flaky) -- it's a compilation gate only. After
+  # changing bas-agent/*.go, rebuild with build.sh and re-commit the binaries
+  # into backend/bas_agent_dist/ by hand (see bas-agent/build.sh's header).
+  bas-agent:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: bas-agent
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go 1.22
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache-dependency-path: bas-agent/go.sum
+
+      - name: Cross-compile linux/windows/darwin
+        run: sh build.sh
+
+      - name: Verify all three binaries were produced
+        run: |
+          test -s dist/bas-agent-linux
+          test -s dist/bas-agent-windows.exe
+          test -s dist/bas-agent-darwin-arm64
+          file dist/*
+
   # P22 — prova que todas as migrations aplicam num Postgres pgvector limpo
   # (mesma imagem da compose) e que o downgrade do head é reversível.
   migrations:

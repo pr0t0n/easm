@@ -29,6 +29,7 @@ type enrollResponse struct {
 	ClientCertPEM string `json:"client_cert_pem"`
 	CACertPEM     string `json:"ca_cert_pem"`
 	MTLSPort      int    `json:"mtls_port"`
+	RelayPort     int    `json:"relay_port"`
 }
 
 // enroll runs over the platform's existing PLAIN HTTP port -- this is the

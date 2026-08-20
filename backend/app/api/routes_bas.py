@@ -196,6 +196,7 @@ def enroll_agent(payload: AgentEnrollRequest, db: Session = Depends(get_db)):
         response["client_cert_pem"] = client_cert_pem
         response["ca_cert_pem"] = bas_ca.ca_cert_pem()
         response["mtls_port"] = settings.bas_mtls_external_port
+        response["relay_port"] = settings.bas_relay_external_port
         # Stamped server-side, from cryptographic proof (a CA-signed cert
         # this agent actually obtained) -- never a client-declared flag.
         # This is what "simulated" vs real downstream (Finding.details,
@@ -222,7 +223,7 @@ def list_agents(db: Session = Depends(get_db), current_user: User = Depends(get_
     return [
         {
             "id": a.id, "label": a.label, "hostname": a.hostname, "os": a.os,
-            "os_version": a.os_version, "status": a.status,
+            "os_version": a.os_version, "status": a.status, "kind": a.kind,
             "last_heartbeat_at": a.last_heartbeat_at, "last_seen_ip": a.last_seen_ip,
             "created_at": a.created_at,
         }
@@ -249,11 +250,32 @@ def patch_agent(agent_id: int, payload: AgentPatch, db: Session = Depends(get_db
     return {"id": agent.id, "label": agent.label, "status": agent.status}
 
 
+@router.get("/agents/{agent_id}/revocation-status")
+def agent_revocation_status(agent_id: int, db: Session = Depends(get_db)):
+    """Called by bas-relay (never by a user/browser) to enforce revocation
+    on the reverse-tunnel path -- the mTLS handshake alone only proves the
+    agent holds a CA-signed cert, it says nothing about whether that agent
+    has since been revoked. No auth here: this is internal docker-network
+    traffic (relay -> backend), and the only thing it reveals is a single
+    agent id's revoked bool, which is not sensitive. Deliberately does NOT
+    404 on an unknown agent_id -- bas-relay should treat "unknown" the same
+    as "revoked" (fail closed), so this returns revoked=True either way."""
+    agent = db.query(BasAgent).filter(BasAgent.id == agent_id).first()
+    revoked = agent is None or str(agent.status or "") == "revoked"
+    return {"agent_id": agent_id, "revoked": revoked}
+
+
 # ── Technique catalog ────────────────────────────────────────────────────────
 
 @router.get("/techniques")
 def techniques(current_user: User = Depends(get_current_user)):
     return list_techniques()
+
+
+@router.get("/chains")
+def chains(current_user: User = Depends(get_current_user)):
+    from app.services.bas_chain_catalog import list_chains
+    return list_chains()
 
 
 # ── Schedules ("cardápio") ───────────────────────────────────────────────────
@@ -265,6 +287,13 @@ class ScheduleCreate(BaseModel):
     agent_id: int
     target_hint: str = ""
     technique_keys: list[str] = []
+    # When set, technique_keys above is ignored -- the server stamps the
+    # ordered sequence from bas_chain_catalog.py instead (an operator never
+    # supplies a chain's step order directly), and stop_on_failure is forced
+    # True: a chain models a real kill-chain process, so a genuine failure
+    # partway through should stop it, not silently keep firing later steps
+    # whose premise (the earlier step succeeding) no longer holds.
+    chain_key: str | None = None
     frequency: str = "daily"
     run_time: str = "00:00"
     day_of_week: str | None = None
@@ -273,16 +302,48 @@ class ScheduleCreate(BaseModel):
     authorization_attested: bool = False
 
 
-def _schedule_to_dict(s: BasSchedule) -> dict[str, Any]:
+def _resolve_chain_technique_keys(chain_key: str, requested_keys: list[str]) -> tuple[list[str], bool]:
+    """Returns (technique_keys, stop_on_failure) for a schedule. A chain_key
+    always wins over any client-supplied technique_keys -- the sequence is a
+    trusted, code-reviewed catalog property (bas_chain_catalog.py), not
+    something a request body should be able to override."""
+    from app.services.bas_chain_catalog import get_chain
+
+    if not chain_key:
+        return requested_keys, False
+    chain = get_chain(chain_key)
+    if chain is None:
+        raise HTTPException(status_code=400, detail=f"Chain desconhecida: {chain_key}")
+    return list(chain["technique_keys"]), True
+
+
+def _schedule_to_dict(s: BasSchedule, db: Session | None = None) -> dict[str, Any]:
+    last_job = None
+    if db is not None:
+        last_job = (
+            db.query(BasJob)
+            .filter(BasJob.schedule_id == s.id)
+            .order_by(BasJob.created_at.desc())
+            .first()
+        )
     return {
         "id": s.id, "name": s.name, "agent_id": s.agent_id, "target_hint": s.target_hint,
-        "technique_keys": s.technique_keys, "frequency": s.frequency, "run_time": s.run_time,
+        "technique_keys": s.technique_keys, "chain_key": s.chain_key, "stop_on_failure": s.stop_on_failure,
+        "frequency": s.frequency, "run_time": s.run_time,
         "day_of_week": s.day_of_week, "day_of_month": s.day_of_month, "enabled": s.enabled,
         "max_authorized_risk_tier": s.max_authorized_risk_tier,
         "authorization_attested": s.authorization_attested,
         "authorization_attested_by_id": s.authorization_attested_by_id,
         "authorization_attested_at": s.authorization_attested_at,
         "last_run_at": s.last_run_at,
+        # Surfaces WHY the last dispatch failed instead of leaving it as an
+        # opaque timestamp -- a schedule targeting a blocked/unreachable
+        # host (e.g. 127.0.0.1) previously just looked "run" with no visible
+        # explanation anywhere in the UI.
+        "last_job_status": last_job.status if last_job else None,
+        "last_job_error": (last_job.last_error if last_job else None) or (
+            (last_job.result or {}).get("dispatch_error") if last_job else None
+        ),
     }
 
 
@@ -295,13 +356,17 @@ def create_schedule(payload: ScheduleCreate, db: Session = Depends(get_db), curr
     if not agent:
         raise HTTPException(status_code=404, detail="Agente não encontrado")
 
+    technique_keys, stop_on_failure = _resolve_chain_technique_keys(payload.chain_key, payload.technique_keys)
+
     schedule = BasSchedule(
         owner_id=current_user.id,
         access_group_id=access_group_id,
         name=payload.name,
         agent_id=payload.agent_id,
         target_hint=payload.target_hint,
-        technique_keys=payload.technique_keys,
+        technique_keys=technique_keys,
+        chain_key=payload.chain_key,
+        stop_on_failure=stop_on_failure,
         frequency=payload.frequency,
         run_time=payload.run_time,
         day_of_week=payload.day_of_week,
@@ -314,19 +379,25 @@ def create_schedule(payload: ScheduleCreate, db: Session = Depends(get_db), curr
     db.add(schedule)
     db.commit()
     db.refresh(schedule)
-    return _schedule_to_dict(schedule)
+    return _schedule_to_dict(schedule, db)
 
 
 @router.get("/schedules")
 def list_schedules(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     schedules = apply_company_scope(db.query(BasSchedule), current_user, BasSchedule).order_by(BasSchedule.created_at.desc()).all()
-    return [_schedule_to_dict(s) for s in schedules]
+    return [_schedule_to_dict(s, db) for s in schedules]
 
 
 class SchedulePatch(BaseModel):
     name: str | None = None
     target_hint: str | None = None
     technique_keys: list[str] | None = None
+    # Providing a chain_key here always switches the schedule to that
+    # chain's sequence server-side, overriding any technique_keys in the
+    # same request -- see ScheduleCreate.chain_key. There is no way to CLEAR
+    # a chain back to a flat list via patch in this phase; delete and
+    # recreate the schedule instead.
+    chain_key: str | None = None
     frequency: str | None = None
     run_time: str | None = None
     day_of_week: str | None = None
@@ -341,7 +412,14 @@ def patch_schedule(schedule_id: int, payload: SchedulePatch, db: Session = Depen
     schedule = apply_company_scope(db.query(BasSchedule), current_user, BasSchedule).filter(BasSchedule.id == schedule_id).first()
     if not schedule:
         raise HTTPException(status_code=404, detail="Agendamento não encontrado")
+    if payload.chain_key is not None:
+        technique_keys, stop_on_failure = _resolve_chain_technique_keys(payload.chain_key, payload.technique_keys or [])
+        schedule.chain_key = payload.chain_key
+        schedule.technique_keys = technique_keys
+        schedule.stop_on_failure = stop_on_failure
     for field in ("name", "target_hint", "technique_keys", "frequency", "run_time", "day_of_week", "day_of_month", "enabled", "max_authorized_risk_tier"):
+        if payload.chain_key is not None and field == "technique_keys":
+            continue  # already stamped from the chain above -- don't let a raw list overwrite it
         value = getattr(payload, field)
         if value is not None:
             setattr(schedule, field, value)
@@ -352,7 +430,7 @@ def patch_schedule(schedule_id: int, payload: SchedulePatch, db: Session = Depen
         schedule.authorization_attested_at = datetime.now() if payload.authorization_attested else None
     db.commit()
     db.refresh(schedule)
-    return _schedule_to_dict(schedule)
+    return _schedule_to_dict(schedule, db)
 
 
 @router.delete("/schedules/{schedule_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -474,6 +552,7 @@ def operations_center(db: Session = Depends(get_db), current_user: User = Depend
         "crown_jewels": bas_reporting.crown_jewels_view(db, group_ids=group_ids),
         "attack_heatmap": bas_reporting.attack_heatmap(db, group_ids=group_ids),
         "risk_score": bas_reporting.risk_score(db, group_ids=group_ids),
+        "chain_attack_paths": bas_reporting.chain_attack_path(db, group_ids=group_ids),
     }
 
 

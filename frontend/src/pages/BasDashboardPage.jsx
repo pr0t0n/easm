@@ -69,7 +69,7 @@ export default function BasDashboardPage() {
     <main className="dpage space-y-4">
       <div className="page-intro">
         <h2>BAS — Breach &amp; Attack Simulation.</h2>
-        <div className="sub">agentes instalados, credenciais de enrollment e status da rede interna simulada</div>
+        <div className="sub">agentes instalados, credenciais de enrollment e status da rede interna (real ou simulada, conforme o agente)</div>
       </div>
 
       {summary && (
@@ -96,6 +96,11 @@ export default function BasDashboardPage() {
           <li>Gere um token de enrollment abaixo (ele só é mostrado uma vez).</li>
           <li>Execute o instalador — ele vai pedir <strong>usuário</strong>, <strong>senha</strong>, <strong>token</strong>, <strong>IP</strong> e <strong>porta de conexão</strong>.</li>
           <li>Use o IP/porta mostrados no bloco de credenciais abaixo — é o endereço da própria plataforma.</li>
+          <li>
+            Para rodar como serviço persistente (sobrevive a reinício/logout): <code className="mono-sm">./bas-agent install</code>.
+            Para remover: <code className="mono-sm">./bas-agent uninstall</code>.
+            No Windows, o instalador imprime os comandos <code className="mono-sm">sc.exe</code> equivalentes (sem serviço nativo embutido nesta fase).
+          </li>
         </ol>
       </section>
 

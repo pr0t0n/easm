@@ -38,6 +38,51 @@ def _create_shadow_scan_job(db: Session, schedule: BasSchedule) -> ScanJob:
     return shadow
 
 
+def _extract_key_findings(technique_key: str, category: str, result: dict[str, Any]) -> list[str]:
+    """Pulls the actually meaningful lines out of a real tool's raw stdout
+    instead of leaving the report to show just a title/status -- this is
+    what "mostrar as vulnerabilidades" needs: what the tool actually
+    observed, not that it merely ran. Deliberately conservative/best-effort
+    per output shape; falls back to a short, honest "no signal" message
+    rather than guessing when a tool's output doesn't match any known
+    pattern here."""
+    stdout = str(result.get("stdout") or "")
+    lines = [ln.strip() for ln in stdout.splitlines() if ln.strip()]
+    if not lines:
+        return []
+
+    if technique_key == "owasp_web_app_scan":
+        return [ln for ln in lines if ln.startswith("+ [")][:15]
+    if technique_key in ("port_service_scan", "firewall_segmentation_test", "network_share_discovery"):
+        return [ln for ln in lines if "open" in ln.lower() and ("/tcp" in ln or "share" in ln.lower())][:15]
+    if technique_key in ("pipeline_secrets_harvesting", "source_code_secrets_scan"):
+        hits = [ln for ln in lines if not ln.upper().startswith("EXIT_CODE") and "no leaks found" not in ln.lower()]
+        return hits[:15]
+    if technique_key == "netlogon_zerologon_check":
+        return [ln for ln in lines if "vulnerable" in ln.lower()][:5]
+    # Generic fallback: last few non-boilerplate lines, so the report never
+    # shows literally nothing for a technique with no dedicated extractor.
+    return [ln for ln in lines if not ln.upper().startswith("EXIT_CODE")][-5:]
+
+
+def _derive_severity(technique_key: str, key_findings: list[str]) -> str:
+    """Real content in, real severity out -- never a blanket "info" once
+    there's an actual positive signal in what the tool observed. Stays
+    "info" (no issue found / nothing to escalate) when key_findings is
+    empty or the technique has no severity-worthy signal defined here."""
+    if not key_findings:
+        return "info"
+    if technique_key == "netlogon_zerologon_check":
+        return "critical"  # a real, unauthenticated domain-controller takeover primitive
+    if technique_key in ("pipeline_secrets_harvesting", "source_code_secrets_scan"):
+        return "high"  # a real exposed credential/token
+    if technique_key == "owasp_web_app_scan":
+        return "medium"  # real misconfiguration-class findings (headers, CORS, etc.)
+    if technique_key in ("port_service_scan", "firewall_segmentation_test", "network_share_discovery"):
+        return "low"  # real reachability/exposure, not itself a vulnerability
+    return "info"
+
+
 def _finding_from_job_result(
     db: Session, job: BasJob, schedule: BasSchedule, technique: dict[str, Any], agent: BasAgent,
 ) -> Finding | None:
@@ -50,10 +95,15 @@ def _finding_from_job_result(
     result is real and counts like any other Finding."""
     result = job.result or {}
     is_stub = agent.kind != "real"
+    # Real content in, real severity/findings out -- a stub dispatch never
+    # had real content to begin with, so it never gets to claim a real
+    # vulnerability was observed regardless of what its canned text says.
+    key_findings = [] if is_stub else _extract_key_findings(technique["technique_key"], technique["category"], result)
+    severity = "info" if is_stub else _derive_severity(technique["technique_key"], key_findings)
     finding = Finding(
         scan_job_id=job.scan_job_id,
         title=f"BAS: {technique['display_name']}" + (" (simulado)" if is_stub else ""),
-        severity="info",
+        severity=severity,
         tool="bas-agent",
         verification_status="hypothesis",
         confidence_score=min(20, 20),
@@ -70,6 +120,9 @@ def _finding_from_job_result(
             "category": technique["category"],
             "mode": technique["mode"],
             "risk_tier": technique["risk_tier"],
+            "mitre_refs": technique.get("mitre_refs", []),
+            "recommendation": technique.get("recommendation", ""),
+            "key_findings": key_findings,
             "phase": "phase_1_stub" if is_stub else "real_agent",
             "command": result.get("command"),
             "status": result.get("status"),
@@ -150,6 +203,16 @@ def fire_schedule(db: Session, schedule: BasSchedule) -> dict[str, Any]:
             job.finding_id = finding.id
         job_ids.append(job.id)
         db.commit()
+
+        if schedule.stop_on_failure and job.status == "failed":
+            remaining = schedule.technique_keys[schedule.technique_keys.index(technique_key) + 1:]
+            for remaining_key in remaining:
+                skipped.append({"technique_key": remaining_key, "reason": "chain_stopped_after_failure"})
+            logger.info(
+                "bas_scheduler: chain stopped after technique=%s failed, skipping %d remaining step(s) schedule=%s",
+                technique_key, len(remaining), schedule.id,
+            )
+            break
 
     shadow.status = "completed"
     schedule.last_run_at = datetime.now()

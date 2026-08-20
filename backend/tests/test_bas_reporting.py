@@ -93,7 +93,7 @@ def test_exposure_summary_counts_real_tunnel_roundtrips_as_completed_jobs_only()
 def test_bas_findings_view_marks_every_row_simulated():
     db = MagicMock()
     finding = SimpleNamespace(
-        id=1, title="BAS: test (simulado)", created_at="now",
+        id=1, title="BAS: test (simulado)", created_at="now", severity="info",
         details={"technique_key": "smb_enum_cme", "category": "smb", "risk_tier": "safe"},
     )
     db.query.return_value = _query_chain([finding])
@@ -211,13 +211,15 @@ def test_executive_report_narrative_reflects_zero_resolved_jobs():
          patch.object(bas_reporting, "attack_heatmap", return_value=[
              {"technique_key": "smb_enum_cme", "times_tested": 0}, {"technique_key": "ad_kerberoast", "times_tested": 0},
          ]), \
-         patch.object(bas_reporting, "bas_findings_view", return_value=[]):
+         patch.object(bas_reporting, "bas_findings_view", return_value=[]), \
+         patch.object(bas_reporting, "chain_attack_path", return_value=[]):
         result = bas_reporting.executive_report(db)
 
     assert "Nenhum job BAS foi resolvido" in result["narrative"]
     assert result["risk_score"]["score"] is None
     assert result["total_techniques"] > 0
     assert result["tested_techniques"] == 0
+    assert result["chain_attack_paths"] == []
 
 
 def test_executive_report_narrative_reflects_real_resolved_jobs():
@@ -232,9 +234,70 @@ def test_executive_report_narrative_reflects_real_resolved_jobs():
          patch.object(bas_reporting, "attack_heatmap", return_value=[
              {"technique_key": "smb_enum_cme", "times_tested": 2}, {"technique_key": "ad_kerberoast", "times_tested": 0},
          ]), \
-         patch.object(bas_reporting, "bas_findings_view", return_value=[{"id": 1, "title": "BAS: smb_enum_cme"}]):
+         patch.object(bas_reporting, "bas_findings_view", return_value=[
+             {"id": 1, "title": "BAS: smb_enum_cme", "severity": "info", "simulated": False},
+         ]), \
+         patch.object(bas_reporting, "chain_attack_path", return_value=[]):
         result = bas_reporting.executive_report(db)
 
     assert result["risk_score"]["resolved_total"] == 2
     assert "50" in result["narrative"]
     assert result["tested_techniques"] == 1
+    assert "Nenhum achado real indicou risco concreto" in result["narrative"]
+
+
+def test_executive_report_narrative_calls_out_real_vulnerable_findings():
+    db = MagicMock()
+    with patch.object(bas_reporting, "framework_coverage", return_value={}), \
+         patch.object(bas_reporting, "exposure_summary", return_value={
+             "distinct_targets_tested": 1, "categories_tested": ["web"], "total_dispatches": 1,
+             "real_tunnel_roundtrips": 1, "failed_dispatches": 0,
+         }), \
+         patch.object(bas_reporting, "risk_score", return_value={"score": 100, "worked": 1, "blocked": 0, "resolved_total": 1}), \
+         patch.object(bas_reporting, "crown_jewels_view", return_value=[]), \
+         patch.object(bas_reporting, "attack_heatmap", return_value=[]), \
+         patch.object(bas_reporting, "bas_findings_view", return_value=[
+             {"id": 1, "title": "BAS: OWASP Web Application Scan", "severity": "medium", "simulated": False},
+             {"id": 2, "title": "BAS: stub finding", "severity": "critical", "simulated": True},  # must NOT count
+         ]), \
+         patch.object(bas_reporting, "chain_attack_path", return_value=[{"chain_key": "web_to_secrets_chain"}]):
+        result = bas_reporting.executive_report(db)
+
+    assert result["severity_counts"]["medium"] == 1
+    assert result["severity_counts"]["critical"] == 0  # the stub one is excluded
+    assert "1 achado(s) real(is) indicam risco concreto" in result["narrative"]
+    assert result["chain_attack_paths"] == [{"chain_key": "web_to_secrets_chain"}]
+
+
+def test_chain_attack_path_groups_steps_by_the_shadow_scan_job_in_order():
+    from datetime import datetime
+
+    db = MagicMock()
+    agent = SimpleNamespace(id=13, kind="real")
+    schedule = SimpleNamespace(
+        id=6, name="Web chain", chain_key="web_to_secrets_chain", agent_id=13, target_hint="192.168.1.65:8001",
+    )
+    jobs = [
+        SimpleNamespace(scan_job_id=42, technique_key="port_service_scan", status="completed",
+                         risk_tier="safe", finding_id=101, created_at=datetime(2026, 8, 19, 18, 48, 49)),
+        SimpleNamespace(scan_job_id=42, technique_key="owasp_web_app_scan", status="completed",
+                         risk_tier="safe", finding_id=102, created_at=datetime(2026, 8, 19, 18, 48, 50)),
+    ]
+    rows = [(jobs[0], schedule, agent), (jobs[1], schedule, agent)]
+
+    query = MagicMock()
+    query.join.return_value = query
+    query.filter.return_value = query
+    query.order_by.return_value = query
+    query.all.return_value = rows
+    db.query.return_value = query
+
+    paths = bas_reporting.chain_attack_path(db)
+
+    assert len(paths) == 1
+    path = paths[0]
+    assert path["scan_job_id"] == 42
+    assert path["chain_key"] == "web_to_secrets_chain"
+    assert path["simulated"] is False
+    assert [s["technique_key"] for s in path["steps"]] == ["port_service_scan", "owasp_web_app_scan"]
+    assert path["steps"][1]["mitre_refs"]  # populated from the real technique catalog

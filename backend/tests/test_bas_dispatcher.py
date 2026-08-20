@@ -35,17 +35,22 @@ def test_dispatch_calls_execute_via_kali_with_the_catalogs_dispatch_key():
 
 
 def test_dispatch_calls_execute_via_kali_for_new_discovery_techniques():
+    # (expected_tool, expected_normalized_target) -- a bare "10.10.10.5" input
+    # is reshaped per each technique's own target_format (see
+    # test_bas_technique_target_normalization.py for the normalization rules
+    # themselves): "url"-format techniques get "http://" prepended, others
+    # pass the bare host through unchanged.
     cases = {
-        "network_share_discovery": "smbmap-bas",
-        "ad_scouting_ldap": "ldapsearch-bas",
-        "cloud_directory_scouting": "curl-clouddir-bas",
-        "port_service_scan": "nmap-portscan-bas",
-        "chat_webhook_discovery": "curl-chatwebhook-bas",
-        "owasp_web_app_scan": "nikto-owasp-bas",
-        "pipeline_secrets_harvesting": "curl-pipelinelogs-bas",
-        "source_code_secrets_scan": "gitleaks-bas",
+        "network_share_discovery": ("smbmap-bas", "10.10.10.5"),
+        "ad_scouting_ldap": ("ldapsearch-bas", "10.10.10.5"),
+        "cloud_directory_scouting": ("curl-clouddir-bas", "10.10.10.5"),
+        "port_service_scan": ("nmap-portscan-bas", "10.10.10.5"),
+        "chat_webhook_discovery": ("curl-chatwebhook-bas", "http://10.10.10.5"),
+        "owasp_web_app_scan": ("nikto-owasp-bas", "10.10.10.5"),
+        "pipeline_secrets_harvesting": ("curl-pipelinelogs-bas", "http://10.10.10.5"),
+        "source_code_secrets_scan": ("gitleaks-bas", "http://10.10.10.5"),
     }
-    for technique_key, expected_tool in cases.items():
+    for technique_key, (expected_tool, expected_target) in cases.items():
         with patch("app.services.bas_dispatcher.execute_via_kali", return_value={"status": "executed"}) as mock_exec:
             outcome = dispatch_bas_technique(
                 technique_key=technique_key,
@@ -55,14 +60,15 @@ def test_dispatch_calls_execute_via_kali_for_new_discovery_techniques():
                 schedule=_schedule(),
             )
         assert outcome["dispatched"] is True, technique_key
-        mock_exec.assert_called_once_with(expected_tool, "10.10.10.5", scan_id=42, scan_mode="unit", env_vars=_STUB_ENV_VARS)
+        mock_exec.assert_called_once_with(expected_tool, expected_target, scan_id=42, scan_mode="unit", env_vars=_STUB_ENV_VARS)
 
 
-def test_dispatch_routes_a_real_kind_agent_through_host_docker_internal():
-    """A real (non-stub) agent's dispatch must target the host machine it's
-    actually installed on -- host.docker.internal in this phase -- never the
-    stub's fixed bas_agent_stub address, and must carry the agent's own
-    reported SOCKS port."""
+def test_dispatch_routes_a_real_kind_agent_through_the_relay():
+    """A real (non-stub) agent's dispatch must go through bas-relay's
+    per-agent forwarding port (20000 + agent_id), never bas_agent_stub's
+    fixed address and never the agent's own (irrelevant, possibly
+    unreachable) self-reported tunnel_host -- this is what makes a real
+    agent NOT need to be on the same host as the dev stack."""
     real_agent = SimpleNamespace(id=9, kind="real", tunnel_host="some-macs-hostname.local", tunnel_port=1080)
     with patch("app.services.bas_dispatcher.execute_via_kali", return_value={"status": "executed"}) as mock_exec:
         outcome = dispatch_bas_technique(
@@ -77,11 +83,13 @@ def test_dispatch_routes_a_real_kind_agent_through_host_docker_internal():
     assert outcome["agent_kind"] == "real"
     mock_exec.assert_called_once_with(
         "smbmap-bas", "127.0.0.1", scan_id=42, scan_mode="unit",
-        env_vars={"BAS_TUNNEL_HOST": "host.docker.internal", "BAS_TUNNEL_PORT": "1080"},
+        env_vars={"BAS_TUNNEL_HOST": "bas_relay", "BAS_TUNNEL_PORT": "20009"},
     )
 
 
-def test_dispatch_uses_agents_own_tunnel_port_when_not_default():
+def test_dispatch_relay_port_is_derived_from_agent_id_not_tunnel_port():
+    """Unlike the stub path, a real agent's OWN tunnel_port is irrelevant --
+    bas-relay's forwarding port is a deterministic function of agent_id."""
     real_agent = SimpleNamespace(id=10, kind="real", tunnel_host="whatever", tunnel_port=1081)
     with patch("app.services.bas_dispatcher.execute_via_kali", return_value={"status": "executed"}) as mock_exec:
         dispatch_bas_technique(
@@ -90,7 +98,7 @@ def test_dispatch_uses_agents_own_tunnel_port_when_not_default():
         )
     mock_exec.assert_called_once_with(
         "smbmap-bas", "127.0.0.1", scan_id=42, scan_mode="unit",
-        env_vars={"BAS_TUNNEL_HOST": "host.docker.internal", "BAS_TUNNEL_PORT": "1081"},
+        env_vars={"BAS_TUNNEL_HOST": "bas_relay", "BAS_TUNNEL_PORT": "20010"},
     )
 
 

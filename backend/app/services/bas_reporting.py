@@ -120,9 +120,16 @@ def bas_findings_view(db: Session, *, group_ids: list[int] | None = None, limit:
     return [
         {
             "id": f.id, "title": f.title, "created_at": f.created_at,
+            "severity": f.severity,
             "technique_key": (f.details or {}).get("technique_key"),
             "category": (f.details or {}).get("category"),
             "risk_tier": (f.details or {}).get("risk_tier"),
+            "mitre_refs": (f.details or {}).get("mitre_refs", []),
+            "recommendation": (f.details or {}).get("recommendation", ""),
+            # Real content extracted from the tool's actual output (see
+            # bas_scheduler._extract_key_findings) -- empty for a stub
+            # dispatch or a real one that genuinely found nothing.
+            "key_findings": (f.details or {}).get("key_findings", []),
             # Per-dispatch, not a blanket constant -- see bas_exclusion.py.
             "simulated": bool((f.details or {}).get("simulated", True)),
         }
@@ -213,6 +220,62 @@ def attack_heatmap(db: Session, *, group_ids: list[int] | None = None) -> list[d
     return sorted(rows, key=lambda r: (-r["times_tested"], r["mitre_id"]))
 
 
+def chain_attack_path(db: Session, *, group_ids: list[int] | None = None, limit: int = 10) -> list[dict[str, Any]]:
+    """The actual kill-chain path for each fired chain schedule (BasSchedule.
+    chain_key set) -- a real, ordered sequence of what was attempted and what
+    genuinely happened at each step, grouped by the shadow ScanJob one
+    fire_schedule() call created. This is deliberately BAS-specific rather
+    than feeding into the platform's general attack_path.py graph: that
+    graph is selected by picking a real external Scan, and BAS shadow
+    ScanJobs (mode="bas") are intentionally hidden from that scan list (see
+    routes_scans.py) so they never clutter it -- this is the dedicated view
+    for exactly that data instead."""
+    from app.services.bas_technique_catalog import get_technique
+
+    query = (
+        db.query(BasJob, BasSchedule, BasAgent)
+        .join(BasSchedule, BasSchedule.id == BasJob.schedule_id)
+        .join(BasAgent, BasAgent.id == BasSchedule.agent_id)
+        .filter(BasSchedule.chain_key.isnot(None))
+    )
+    if group_ids is not None:
+        query = query.filter(BasJob.access_group_id.in_(group_ids))
+    rows = query.order_by(BasJob.created_at.asc()).all()
+
+    from app.services.bas_chain_catalog import get_chain
+
+    paths_by_scan_job: dict[int, dict[str, Any]] = {}
+    for job, schedule, agent in rows:
+        entry = paths_by_scan_job.get(job.scan_job_id)
+        if entry is None:
+            chain = get_chain(schedule.chain_key) or {}
+            entry = {
+                "scan_job_id": job.scan_job_id,
+                "schedule_id": schedule.id,
+                "schedule_name": schedule.name,
+                "chain_key": schedule.chain_key,
+                "chain_display_name": chain.get("display_name", schedule.chain_key),
+                "agent_id": schedule.agent_id,
+                "simulated": agent.kind != "real",
+                "target_hint": schedule.target_hint,
+                "fired_at": job.created_at,
+                "steps": [],
+            }
+            paths_by_scan_job[job.scan_job_id] = entry
+        technique = get_technique(job.technique_key) or {}
+        entry["steps"].append({
+            "technique_key": job.technique_key,
+            "display_name": technique.get("display_name", job.technique_key),
+            "mitre_refs": technique.get("mitre_refs", []),
+            "status": job.status,
+            "risk_tier": job.risk_tier,
+            "finding_id": job.finding_id,
+        })
+
+    paths = sorted(paths_by_scan_job.values(), key=lambda p: p["fired_at"], reverse=True)
+    return paths[:limit]
+
+
 def executive_report(db: Session, *, group_ids: list[int] | None = None) -> dict[str, Any]:
     """Assembles the "Relatório BAS" document payload from the panels above --
     no new computation beyond a short narrative summary string built from
@@ -225,10 +288,16 @@ def executive_report(db: Session, *, group_ids: list[int] | None = None) -> dict
     jewels = crown_jewels_view(db, group_ids=group_ids)
     heatmap = attack_heatmap(db, group_ids=group_ids)
     findings = bas_findings_view(db, group_ids=group_ids, limit=50)
+    chain_paths = chain_attack_path(db, group_ids=group_ids)
 
     total_techniques = len(list_techniques())
     tested_techniques = sum(1 for row in heatmap if row["times_tested"] > 0)
     jewels_touched = sum(1 for j in jewels if j["jobs_run"] > 0)
+
+    real_findings = [f for f in findings if not f["simulated"]]
+    severity_order = ["critical", "high", "medium", "low", "info"]
+    severity_counts = {sev: sum(1 for f in real_findings if f["severity"] == sev) for sev in severity_order}
+    vulnerable_findings = [f for f in real_findings if f["severity"] != "info"]
 
     if score["resolved_total"] == 0:
         narrative = (
@@ -236,12 +305,20 @@ def executive_report(db: Session, *, group_ids: list[int] | None = None) -> dict
             f"{tested_techniques}/{total_techniques} técnicas catalogadas já foram disparadas ao menos uma vez."
         )
     else:
+        risk_clause = (
+            f"{len(vulnerable_findings)} achado(s) real(is) indicam risco concreto "
+            f"({severity_counts['critical']} crítico(s), {severity_counts['high']} alto(s), {severity_counts['medium']} médio(s), "
+            f"{severity_counts['low']} baixo(s))."
+            if vulnerable_findings
+            else "Nenhum achado real indicou risco concreto até agora -- os alvos testados responderam de forma esperada."
+        )
         narrative = (
             f"Neste escopo, {tested_techniques}/{total_techniques} técnicas catalogadas foram disparadas, "
             f"cobrindo {len(exposure['categories_tested'])} categoria(s) em {exposure['distinct_targets_tested']} alvo(s) interno(s). "
             f"Dos {score['resolved_total']} disparo(s) com resultado resolvido, {score['worked']} completaram o round-trip real do "
             f"túnel ({score['score']}/100) e {score['blocked']} falharam/foram bloqueados. "
-            f"{jewels_touched}/{len(jewels)} alvo(s) de alto valor já foram testados ao menos uma vez."
+            f"{jewels_touched}/{len(jewels)} alvo(s) de alto valor já foram testados ao menos uma vez. "
+            f"{risk_clause}"
         )
 
     return {
@@ -249,9 +326,11 @@ def executive_report(db: Session, *, group_ids: list[int] | None = None) -> dict
         "total_techniques": total_techniques,
         "tested_techniques": tested_techniques,
         "risk_score": score,
+        "severity_counts": severity_counts,
         "framework_coverage": coverage,
         "exposure": exposure,
         "crown_jewels": jewels,
         "attack_heatmap": heatmap,
         "findings": findings,
+        "chain_attack_paths": chain_paths,
     }

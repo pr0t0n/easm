@@ -6,9 +6,14 @@ import "../styles/dashboard.css";
    Cada achado carrega seu próprio flag `simulated`: só é simulado quando a
    técnica foi disparada via um agente stub (bas_agent_stub) -- um agente
    real (certificado mTLS assinado pela CA da plataforma) produz tráfego e
-   resultado reais, e conta normalmente. */
+   resultado reais, e conta normalmente. Severidade/recomendação/achados-chave
+   vêm do conteúdo REAL observado (bas_scheduler._extract_key_findings /
+   _derive_severity) -- nunca um valor fixo. */
 
 const FW_LABEL_ORDER = ["nist", "iso27001", "pci", "cis_v8"];
+const SEV_ORDER = ["critical", "high", "medium", "low", "info"];
+const SEV_LABEL = { critical: "Crítico", high: "Alto", medium: "Médio", low: "Baixo", info: "Info" };
+const SEV_COLOR = { critical: "#d64545", high: "#e0793a", medium: "#d4a500", low: "#4a90d9", info: "var(--ink-soft)" };
 
 function riskScoreTone(score) {
   if (score == null) return "neutral";
@@ -21,6 +26,7 @@ export default function BasReportPage() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [expandedFindingId, setExpandedFindingId] = useState(null);
 
   useEffect(() => {
     setLoading(true);
@@ -44,7 +50,12 @@ export default function BasReportPage() {
   const jewels = data?.crown_jewels || [];
   const heatmap = data?.attack_heatmap || [];
   const findings = data?.findings || [];
+  const chainPaths = data?.chain_attack_paths || [];
+  const severityCounts = data?.severity_counts || {};
   const tone = riskScoreTone(score.score);
+
+  const vulnerableFindings = findings.filter((f) => !f.simulated && f.severity !== "info");
+  const maxSevCount = Math.max(1, ...SEV_ORDER.map((s) => severityCounts[s] || 0));
 
   const heatmapByCategory = {};
   for (const row of heatmap) {
@@ -64,9 +75,10 @@ export default function BasReportPage() {
         <header className="report-head">
           <div>
             <div className="sk-eyebrow" style={{ color: "var(--brand-700)" }}>Relatório BAS · Breach &amp; Attack Simulation · confidencial</div>
-            <h1>Cobertura e resiliência frente às técnicas de simulação de ataque</h1>
+            <h1>Cobertura, risco e caminhos de ataque reais observados</h1>
             <p className="report-meta sk-mono">
-              {data?.total_techniques || 0} técnica(s) catalogada(s) · {data?.tested_techniques || 0} já disparada(s)
+              {data?.total_techniques || 0} técnica(s) catalogada(s) · {data?.tested_techniques || 0} já disparada(s) ·
+              {" "}{vulnerableFindings.length} achado(s) real(is) com risco
             </p>
           </div>
           <div className="report-rating">
@@ -87,15 +99,36 @@ export default function BasReportPage() {
           </div>
           <p className="report-sub" style={{ marginTop: 10 }}>
             Só é simulado o que rodou via um agente stub (bas_agent_stub) — um agente real relaya tráfego e resultado
-            de verdade, e conta como qualquer outro achado da plataforma. Veja a coluna "Real/Simulado" na tabela de
-            achados abaixo.
+            de verdade, e conta como qualquer outro achado da plataforma.
           </p>
+        </section>
+
+        <section className="report-section">
+          <div className="sk-eyebrow">02 · Vulnerabilidades por severidade</div>
+          <span className="report-sub">severidade derivada do conteúdo real observado por técnica — nunca um valor fixo</span>
+          <div style={{ display: "grid", gap: 8, marginTop: 12 }}>
+            {SEV_ORDER.filter((s) => s !== "info").map((sev) => {
+              const count = severityCounts[sev] || 0;
+              return (
+                <div key={sev} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <span style={{ width: 60, fontSize: 12, color: SEV_COLOR[sev], fontWeight: 700 }}>{SEV_LABEL[sev]}</span>
+                  <div style={{ flex: 1, height: 10, borderRadius: 5, background: "var(--surface-soft)", overflow: "hidden" }}>
+                    <div style={{ height: "100%", width: `${(count / maxSevCount) * 100}%`, background: SEV_COLOR[sev], minWidth: count ? 3 : 0 }} />
+                  </div>
+                  <span className="sk-mono" style={{ width: 24, textAlign: "right", fontSize: 13 }}>{count}</span>
+                </div>
+              );
+            })}
+          </div>
+          {vulnerableFindings.length === 0 && (
+            <div className="report-empty" style={{ marginTop: 10 }}>Nenhum achado real com severidade acima de "info" até agora.</div>
+          )}
         </section>
 
         <div className="report-two-col">
           <section className="report-section">
-            <div className="sk-eyebrow">02 · Cobertura por framework</div>
-            <span className="report-sub">técnicas relevantes já testadas ao menos uma vez</span>
+            <div className="sk-eyebrow">03 · Cobertura por framework</div>
+            <span className="report-sub">técnicas relevantes já testadas por um agente real</span>
             <div style={{ display: "grid", gap: 10, marginTop: 10 }}>
               {FW_LABEL_ORDER.filter((k) => coverage[k]).map((key) => {
                 const fw = coverage[key];
@@ -116,7 +149,7 @@ export default function BasReportPage() {
           </section>
 
           <section className="report-section">
-            <div className="sk-eyebrow">03 · Exposição / superfície testada</div>
+            <div className="sk-eyebrow">04 · Exposição / superfície testada</div>
             <div className="report-kpis">
               <div><span>Categorias testadas</span><strong className="sk-mono">{(exposure.categories_tested || []).length}</strong></div>
               <div><span>Disparos totais</span><strong className="sk-mono">{exposure.total_dispatches || 0}</strong></div>
@@ -130,7 +163,48 @@ export default function BasReportPage() {
         </div>
 
         <section className="report-section">
-          <div className="sk-eyebrow">04 · Joias da coroa em risco</div>
+          <div className="sk-eyebrow">05 · Attack Path (chains disparadas)</div>
+          <span className="report-sub">sequência real de cada chain disparada — o que foi tentado, em ordem, e o que de fato aconteceu em cada etapa</span>
+          {chainPaths.length === 0 ? (
+            <div className="report-empty" style={{ marginTop: 10 }}>Nenhuma chain disparada ainda — veja a página de Testes/Agendamento BAS.</div>
+          ) : (
+            <div style={{ display: "grid", gap: 16, marginTop: 12 }}>
+              {chainPaths.map((path) => (
+                <div key={path.scan_job_id} style={{ border: "1px solid var(--line)", borderRadius: 10, padding: "12px 14px" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 10 }}>
+                    <div>
+                      <b style={{ fontSize: 13 }}>{path.chain_display_name}</b>
+                      <span className="sk-mono muted" style={{ marginLeft: 8, fontSize: 11 }}>alvo: {path.target_hint}</span>
+                    </div>
+                    <span style={{ fontSize: 10.5, fontWeight: 700, color: path.simulated ? "#d4a500" : "#229160" }}>
+                      {path.simulated ? "SIMULADO" : "REAL"}
+                    </span>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                    {path.steps.map((step, i) => (
+                      <Fragment key={step.technique_key + i}>
+                        <div style={{
+                          padding: "6px 10px", borderRadius: 8, fontSize: 11.5,
+                          border: `1px solid ${step.status === "completed" ? "rgba(34,145,96,0.4)" : step.status === "failed" ? "rgba(214,69,69,0.4)" : "var(--line)"}`,
+                          background: step.status === "completed" ? "rgba(34,145,96,0.08)" : step.status === "failed" ? "rgba(214,69,69,0.08)" : "var(--surface-soft)",
+                        }}>
+                          <div style={{ fontWeight: 700 }}>{step.display_name}</div>
+                          <div className="sk-mono muted" style={{ fontSize: 9.5, marginTop: 2 }}>
+                            {(step.mitre_refs || []).join(", ") || "—"} · {step.status}
+                          </div>
+                        </div>
+                        {i < path.steps.length - 1 && <span style={{ color: "var(--ink-soft)" }}>→</span>}
+                      </Fragment>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+
+        <section className="report-section">
+          <div className="sk-eyebrow">06 · Joias da coroa em risco</div>
           {jewels.length === 0 ? (
             <div className="report-empty">Nenhuma joia da coroa identificada nos alvos internos configurados.</div>
           ) : (
@@ -146,7 +220,7 @@ export default function BasReportPage() {
         </section>
 
         <section className="report-section">
-          <div className="sk-eyebrow">05 · Attack Heat Map (MITRE ATT&amp;CK)</div>
+          <div className="sk-eyebrow">07 · Attack Heat Map (MITRE ATT&amp;CK)</div>
           <span className="report-sub">técnicas nunca disparadas são lacunas de cobertura, não "sem risco"</span>
           <div style={{ display: "grid", gap: 14, marginTop: 10 }}>
             {Object.entries(heatmapByCategory).map(([category, rows]) => (
@@ -172,23 +246,52 @@ export default function BasReportPage() {
         </section>
 
         <section className="report-section">
-          <div className="sk-eyebrow">06 · Achados (BAS)</div>
-          <span className="report-sub">simulado só quando disparado via agente stub — um achado real conta para score/superfície principal</span>
+          <div className="sk-eyebrow">08 · Achados, vulnerabilidades e recomendações</div>
+          <span className="report-sub">clique num achado real para ver o que foi observado de fato e como corrigir</span>
           <div className="attack-table-wrap">
             <table className="attack-table report-plan">
-              <thead><tr><th>Achado</th><th>Técnica</th><th>Categoria</th><th>Risco</th><th>Real/Simulado</th><th>Data</th></tr></thead>
+              <thead><tr><th>Achado</th><th>Técnica</th><th>Severidade</th><th>MITRE</th><th>Real/Simulado</th><th>Data</th></tr></thead>
               <tbody>
                 {findings.length === 0 && <tr><td colSpan={6}>Nenhum achado BAS registrado ainda.</td></tr>}
-                {findings.map((f) => (
-                  <tr key={f.id}>
-                    <td>{f.title}</td>
-                    <td className="sk-mono">{f.technique_key}</td>
-                    <td>{f.category}</td>
-                    <td><span className="evidence-pill">{f.risk_tier}</span></td>
-                    <td>{f.simulated ? "Simulado" : "Real"}</td>
-                    <td className="sk-mono">{f.created_at}</td>
-                  </tr>
-                ))}
+                {findings.map((f) => {
+                  const expanded = expandedFindingId === f.id;
+                  const canExpand = !f.simulated && (f.key_findings?.length > 0 || f.recommendation);
+                  return (
+                    <Fragment key={f.id}>
+                      <tr
+                        style={{ cursor: canExpand ? "pointer" : "default" }}
+                        onClick={() => canExpand && setExpandedFindingId(expanded ? null : f.id)}
+                      >
+                        <td>{canExpand ? (expanded ? "▾ " : "▸ ") : ""}{f.title}</td>
+                        <td className="sk-mono">{f.technique_key}</td>
+                        <td><span style={{ fontSize: 11, fontWeight: 700, color: SEV_COLOR[f.severity] || "inherit" }}>{SEV_LABEL[f.severity] || f.severity}</span></td>
+                        <td className="sk-mono" style={{ fontSize: 11 }}>{(f.mitre_refs || []).join(", ") || "—"}</td>
+                        <td>{f.simulated ? "Simulado" : "Real"}</td>
+                        <td className="sk-mono">{f.created_at}</td>
+                      </tr>
+                      {expanded && (
+                        <tr>
+                          <td colSpan={6} style={{ background: "var(--surface-soft)" }}>
+                            {f.key_findings?.length > 0 && (
+                              <div style={{ marginBottom: 8 }}>
+                                <b style={{ fontSize: 12 }}>O que foi observado:</b>
+                                <ul style={{ margin: "6px 0 0", paddingLeft: 18, fontSize: 12 }}>
+                                  {f.key_findings.map((line, i) => <li key={i} className="sk-mono">{line}</li>)}
+                                </ul>
+                              </div>
+                            )}
+                            {f.recommendation && (
+                              <div>
+                                <b style={{ fontSize: 12 }}>Recomendação:</b>
+                                <p style={{ margin: "4px 0 0", fontSize: 12 }}>{f.recommendation}</p>
+                              </div>
+                            )}
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
+                  );
+                })}
               </tbody>
             </table>
           </div>

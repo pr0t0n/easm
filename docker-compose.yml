@@ -138,6 +138,35 @@ services:
     # No host port mapping: only kali_runner (inside the compose network)
     # needs to reach this tunnel, never the host or the public internet.
 
+  # Reverse-tunnel relay for REAL (non-stub) BAS agents. An agent dials OUT
+  # to this service's registration port (works even from a genuinely remote
+  # customer network -- outbound is always allowed, unlike dialing IN to
+  # wherever the agent happens to be) and bas-relay exposes a per-agent
+  # forwarding port (20000 + agent_id, internal-only) that kali_runner's
+  # proxychains connects to instead. See bas-relay/main.go, bas-agent/relay.go.
+  bas_relay:
+    build:
+      context: ./bas-relay
+      dockerfile: Dockerfile
+    container_name: scriptkiddo_bas_relay
+    restart: unless-stopped
+    profiles: ["dev", "prod"]
+    depends_on:
+      bas_ca_init:
+        condition: service_completed_successfully
+    environment:
+      BAS_CA_DIR: "/app/bas_ca"
+      BAS_RELAY_PORT: "8446"
+      TZ: America/Sao_Paulo
+    ports:
+      # Registration port only -- a real agent anywhere (including a
+      # genuinely remote network) must reach this to register. The
+      # per-agent forwarding ports (20000+) stay internal-only: only
+      # kali_runner (same docker network) ever needs to reach those.
+      - "${BAS_RELAY_HOST_PORT:-8446}:8446"
+    volumes:
+      - bas_ca_data:/app/bas_ca:ro
+
   # ─────────────────────────────────────────────────────────────────
   # Kali Runner — single source of truth for offensive tools
   # All workers dispatch jobs HERE via HTTP (POST /jobs).

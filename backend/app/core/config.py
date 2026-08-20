@@ -34,6 +34,22 @@ class Settings(BaseSettings):
     # docker-compose.yml). This is what enroll/install-config hand back,
     # since a real downloadable agent is always external by definition.
     bas_mtls_external_port: int = 8444
+    # bas-relay's agent-registration port (see bas-relay/main.go). A real
+    # agent dials OUT to this (from wherever it's actually installed --
+    # solves NAT/firewall for a genuinely remote customer network) and stays
+    # connected; kali_runner then reaches that agent through bas-relay's
+    # internal per-agent forwarding port, never by dialing the agent
+    # directly. This is what makes a real agent NOT need to be on the same
+    # host as the dev stack, unlike the old host.docker.internal shortcut.
+    bas_relay_external_port: int = 8446
+    # Extra hostnames the mTLS server cert must also cover (comma-separated),
+    # beyond the always-included "backend"/"localhost". A real remote agent
+    # reaches the platform by whatever public DNS name/IP it's actually
+    # configured with -- confirmed live that a plain Docker Desktop dev
+    # agent reaching in via host.docker.internal fails TLS hostname
+    # verification without this. Set this to the platform's real external
+    # hostname/IP for an actual deployment.
+    bas_mtls_extra_sans: str = "host.docker.internal"
     bas_agent_cert_valid_days: int = 365
     admin_email: str = "admin@example.com"
     admin_password: str = "admin123"

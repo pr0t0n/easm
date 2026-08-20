@@ -1343,6 +1343,12 @@ class BasSchedule(Base):
     agent_id: Mapped[int] = mapped_column(ForeignKey("bas_agents.id"), index=True)
     target_hint: Mapped[str] = mapped_column(String(255), default="")
     technique_keys: Mapped[list] = mapped_column(JSONB, default=list)
+    # When set, technique_keys is stamped FROM bas_chain_catalog.py server-side
+    # (routes_bas.py) -- an ordered kill-chain sequence, not an independently
+    # dispatched flat list. stop_on_failure is forced True whenever a chain is
+    # selected (see bas_scheduler.fire_schedule's early-stop gating).
+    chain_key: Mapped[str | None] = mapped_column(String(60), nullable=True, index=True)
+    stop_on_failure: Mapped[bool] = mapped_column(Boolean, default=False)
     frequency: Mapped[str] = mapped_column(String(20), default="daily")
     run_time: Mapped[str] = mapped_column(String(5), default="00:00")
     day_of_week: Mapped[str | None] = mapped_column(String(10), nullable=True)

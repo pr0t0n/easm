@@ -20,6 +20,7 @@ CA private key never leaves this module / the bas_ca_dir volume.
 from __future__ import annotations
 
 import datetime
+import ipaddress
 import os
 import threading
 
@@ -27,6 +28,26 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
+
+from app.core.config import settings
+
+
+def _server_cert_sans() -> list[x509.GeneralName]:
+    """Always covers "backend" (the internal docker service name) and
+    "localhost" (a host-installed agent reaching in via the mapped port),
+    plus whatever settings.bas_mtls_extra_sans configures -- a real remote
+    agent reaches the platform by its actual public hostname/IP, which is
+    neither of the first two. Values that parse as an IP get an
+    x509.IPAddress SAN entry instead of DNSName (hostname verification
+    requires the right SAN type for each)."""
+    names: list[x509.GeneralName] = [x509.DNSName("backend"), x509.DNSName("localhost")]
+    extra = [v.strip() for v in (settings.bas_mtls_extra_sans or "").split(",") if v.strip()]
+    for value in extra:
+        try:
+            names.append(x509.IPAddress(ipaddress.ip_address(value)))
+        except ValueError:
+            names.append(x509.DNSName(value))
+    return names
 
 from app.core.config import settings
 
@@ -121,7 +142,7 @@ def _generate_server_cert(ca_key_path: str, ca_cert_path: str, server_key_path: 
         .not_valid_before(now - datetime.timedelta(days=1))
         .not_valid_after(now + datetime.timedelta(days=825))
         .add_extension(
-            x509.SubjectAlternativeName([x509.DNSName("backend"), x509.DNSName("localhost")]),
+            x509.SubjectAlternativeName(_server_cert_sans()),
             critical=False,
         )
         .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)

@@ -18,6 +18,26 @@ import (
 
 func main() {
 	log.SetFlags(log.LstdFlags)
+
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "install":
+			fmt.Println("ScriptKidd.o BAS Agent (Go, smoke-test build) — installing as a persistent service")
+			runInstall()
+			return
+		case "uninstall":
+			fmt.Println("ScriptKidd.o BAS Agent (Go, smoke-test build) — uninstalling service")
+			runUninstall()
+			return
+		case "-h", "--help", "help":
+			fmt.Println("Usage: bas-agent [install|uninstall]")
+			fmt.Println("  (no args)  run in the foreground -- prompts for enrollment on first run")
+			fmt.Println("  install    register this binary to run persistently (launchd/systemd; prints sc.exe steps on Windows)")
+			fmt.Println("  uninstall  stop and remove the persistent registration")
+			return
+		}
+	}
+
 	fmt.Println("ScriptKidd.o BAS Agent (Go, smoke-test build)")
 
 	cfg, ok := loadConfig()
@@ -36,7 +56,7 @@ func main() {
 			log.Fatalf("bas-agent: server did not return an mTLS client certificate -- cannot configure heartbeat")
 		}
 		cfg = &Config{
-			Host: input.Host, Port: input.Port, MTLSPort: resp.MTLSPort,
+			Host: input.Host, Port: input.Port, MTLSPort: resp.MTLSPort, RelayPort: resp.RelayPort,
 			AgentID: resp.AgentID, AgentJWT: resp.AgentJWT,
 			ClientCertPEM: resp.ClientCertPEM, ClientKeyPEM: keyPEM, CACertPEM: resp.CACertPEM,
 			SocksPort: 1080,
@@ -50,5 +70,6 @@ func main() {
 	}
 
 	go heartbeatLoop(cfg)
+	go relayLoop(cfg)
 	serveSocks5("0.0.0.0", cfg.SocksPort)
 }

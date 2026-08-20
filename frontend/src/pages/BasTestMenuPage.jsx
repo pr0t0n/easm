@@ -8,18 +8,31 @@ const fieldStyle = {
   fontSize: 13, color: "var(--ink)",
 };
 
-const AVAILABILITY_LABEL = {
-  available: "disponível",
-  simulated: "simulado (tráfego real, resultado simulado)",
+// "available"/"simulated" here is the CATALOG's static field -- it means
+// "dispatchable through the tunnel mechanism", NOT "the result will be
+// fake". Whether a given run is real or simulated depends entirely on which
+// AGENT is selected (BasAgent.kind), so these two must be resolved against
+// the currently-selected agent, never shown as a fixed label. Only
+// "planned"/"disabled"/"future_agent_required" are agent-independent truths.
+const TUNNELABLE_AVAILABILITY = new Set(["available", "simulated"]);
+const FIXED_AVAILABILITY_LABEL = {
   planned: "planejado — ferramenta ainda não integrada",
   disabled: "desabilitado",
   future_agent_required: "requer agente real (fase futura)",
 };
 
+function availabilityLabel(technique, selectedAgent) {
+  if (!TUNNELABLE_AVAILABILITY.has(technique.availability)) {
+    return FIXED_AVAILABILITY_LABEL[technique.availability] || technique.availability;
+  }
+  if (!selectedAgent) return "selecione um agente para ver se será real ou simulado";
+  return selectedAgent.kind === "real" ? "REAL (agente real selecionado)" : "simulado (agente stub selecionado)";
+}
+
 const RISK_BADGE = { safe: "b-low", elevated: "b-medium", high_risk: "b-critical" };
 
 const emptyForm = {
-  name: "", agent_id: "", target_hint: "", technique_keys: [],
+  name: "", agent_id: "", target_hint: "", technique_keys: [], chain_key: null,
   frequency: "daily", run_time: "00:00", day_of_week: "monday", day_of_month: 1,
   max_authorized_risk_tier: "safe", authorization_attested: false,
 };
@@ -27,19 +40,22 @@ const emptyForm = {
 export default function BasTestMenuPage() {
   const [agents, setAgents] = useState([]);
   const [techniques, setTechniques] = useState([]);
+  const [chains, setChains] = useState([]);
   const [schedules, setSchedules] = useState([]);
   const [form, setForm] = useState(emptyForm);
   const [editingId, setEditingId] = useState(null);
 
   const load = async () => {
     try {
-      const [{ data: a }, { data: t }, { data: s }] = await Promise.all([
+      const [{ data: a }, { data: t }, { data: c }, { data: s }] = await Promise.all([
         client.get("/api/bas/agents"),
         client.get("/api/bas/techniques"),
+        client.get("/api/bas/chains"),
         client.get("/api/bas/schedules"),
       ]);
       setAgents(a);
       setTechniques(t);
+      setChains(c);
       setSchedules(s);
     } catch (error) {
       const detail = error?.response?.data?.detail;
@@ -97,7 +113,8 @@ export default function BasTestMenuPage() {
     setEditingId(row.id);
     setForm({
       name: row.name || "", agent_id: row.agent_id, target_hint: row.target_hint || "",
-      technique_keys: row.technique_keys || [], frequency: row.frequency, run_time: row.run_time,
+      technique_keys: row.technique_keys || [], chain_key: row.chain_key || null,
+      frequency: row.frequency, run_time: row.run_time,
       day_of_week: row.day_of_week || "monday", day_of_month: row.day_of_month || 1,
       max_authorized_risk_tier: row.max_authorized_risk_tier, authorization_attested: row.authorization_attested,
     });
@@ -140,14 +157,32 @@ export default function BasTestMenuPage() {
           <input style={fieldStyle} placeholder="Nome do agendamento" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
           <select style={fieldStyle} value={form.agent_id} onChange={(e) => setForm({ ...form, agent_id: Number(e.target.value) })}>
             <option value="">Selecione o agente</option>
-            {agents.map((a) => <option key={a.id} value={a.id}>{a.label || a.hostname || `agente #${a.id}`} ({a.status})</option>)}
+            {agents.map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.label || a.hostname || `agente #${a.id}`} ({a.status} · {a.kind === "real" ? "real" : "stub"})
+              </option>
+            ))}
           </select>
           <input
             style={{ ...fieldStyle, gridColumn: "1 / -1" }}
-            placeholder="Alvo interno (IP recomendado nesta fase — ex: 10.10.10.5)"
+            placeholder="Alvo interno (IP alcançável PELO AGENTE — ex: 10.10.10.5). Nunca use 127.0.0.1: é bloqueado como alvo inseguro."
             value={form.target_hint}
             onChange={(e) => setForm({ ...form, target_hint: e.target.value })}
           />
+          {(() => {
+            const selectedAgent = agents.find((a) => a.id === form.agent_id);
+            if (!selectedAgent) return null;
+            return selectedAgent.kind === "real" ? (
+              <div className="mono-sm muted" style={{ gridColumn: "1 / -1", marginTop: -6 }}>
+                Agente real: o alvo deve ser alcançável a partir de onde o agente está instalado (ex: o próprio IP de
+                rede do agente, nunca 127.0.0.1/loopback — bloqueado pelo kali_runner como alvo inseguro).
+              </div>
+            ) : (
+              <div className="mono-sm muted" style={{ gridColumn: "1 / -1", marginTop: -6 }}>
+                Agente stub: o resultado é sempre simulado, independente do alvo informado.
+              </div>
+            );
+          })()}
 
           <div style={{ gridColumn: "1 / -1" }}>
             <div className="mono-sm muted" style={{ marginBottom: 6 }}>Nível de risco autorizado neste agendamento</div>
@@ -165,13 +200,47 @@ export default function BasTestMenuPage() {
           </div>
 
           <div style={{ gridColumn: "1 / -1" }}>
-            <div className="mono-sm muted" style={{ marginBottom: 8 }}>Técnicas</div>
+            <div className="mono-sm muted" style={{ marginBottom: 6 }}>Chain (processo de ataque ordenado, opcional)</div>
+            <select
+              style={fieldStyle}
+              value={form.chain_key || ""}
+              onChange={(e) => {
+                const chainKey = e.target.value || null;
+                const chain = chains.find((c) => c.chain_key === chainKey);
+                setForm((prev) => ({
+                  ...prev,
+                  chain_key: chainKey,
+                  technique_keys: chain ? chain.technique_keys : prev.technique_keys,
+                }));
+              }}
+            >
+              <option value="">Nenhuma — selecionar técnicas manualmente abaixo</option>
+              {chains.map((c) => <option key={c.chain_key} value={c.chain_key}>{c.display_name}</option>)}
+            </select>
+            {form.chain_key && (() => {
+              const chain = chains.find((c) => c.chain_key === form.chain_key);
+              if (!chain) return null;
+              return (
+                <div className="mono-sm muted" style={{ marginTop: 6 }}>
+                  {chain.description} Ordem: {chain.technique_keys.join(" → ")}. Para automaticamente na primeira falha real.
+                </div>
+              );
+            })()}
+          </div>
+
+          <div style={{ gridColumn: "1 / -1", opacity: form.chain_key ? 0.45 : 1, pointerEvents: form.chain_key ? "none" : "auto" }}>
+            <div className="mono-sm muted" style={{ marginBottom: 8 }}>
+              Técnicas {form.chain_key ? "(desabilitado — chain selecionada define a sequência)" : ""}
+            </div>
             {Object.entries(grouped).map(([category, items]) => (
               <div key={category} style={{ marginBottom: 12 }}>
                 <div style={{ fontSize: 11.5, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--ink-soft)", marginBottom: 6 }}>{category}</div>
                 <div style={{ display: "grid", gap: 6 }}>
                   {items.map((t) => {
                     const selectable = techniqueSelectable(t);
+                    const selectedAgent = agents.find((a) => a.id === form.agent_id);
+                    const label = availabilityLabel(t, selectedAgent);
+                    const isRealNow = TUNNELABLE_AVAILABILITY.has(t.availability) && selectedAgent?.kind === "real";
                     return (
                       <label key={t.technique_key} style={{
                         display: "flex", alignItems: "center", gap: 10, padding: "8px 10px",
@@ -186,7 +255,7 @@ export default function BasTestMenuPage() {
                         />
                         <span style={{ flex: 1, fontSize: 13 }}>{t.display_name}</span>
                         <span className={`b ${RISK_BADGE[t.risk_tier] || "b-neutral"}`}>{t.risk_tier}</span>
-                        <span className="mono-sm muted">{AVAILABILITY_LABEL[t.availability] || t.availability}</span>
+                        <span className="mono-sm muted" style={isRealNow ? { color: "var(--sev-low, #229160)", fontWeight: 700 } : undefined}>{label}</span>
                       </label>
                     );
                   })}
@@ -233,10 +302,21 @@ export default function BasTestMenuPage() {
               </div>
             </div>
             <div className="mono-sm muted" style={{ marginTop: 5 }}>
-              alvo: {row.target_hint || "—"} · técnicas: {(row.technique_keys || []).join(", ") || "—"}
+              alvo: {row.target_hint || "—"} · técnicas: {(row.technique_keys || []).join(" → ") || "—"}
+              {row.chain_key && (
+                <span className="b b-medium" style={{ marginLeft: 8 }}>
+                  chain{row.stop_on_failure ? " · para na 1ª falha" : ""}
+                </span>
+              )}
             </div>
             <div className="mono-sm muted" style={{ marginTop: 3 }}>
               horário {row.run_time} · último disparo: {row.last_run_at || "nunca"}
+              {row.last_job_status && (
+                <span style={{ marginLeft: 8, color: row.last_job_status === "completed" ? "var(--sev-low, #229160)" : row.last_job_status === "failed" ? "var(--sev-critical, #d64545)" : "inherit" }}>
+                  · último job: {row.last_job_status}
+                  {row.last_job_status === "failed" && row.last_job_error ? ` (${row.last_job_error})` : ""}
+                </span>
+              )}
             </div>
           </div>
         ))}

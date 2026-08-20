@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"golang.org/x/term"
 )
 
 // Config is persisted locally after a successful enroll so the agent doesn't
@@ -18,6 +20,12 @@ type Config struct {
 	Host          string `json:"host"`
 	Port          int    `json:"port"`
 	MTLSPort      int    `json:"mtls_port"`
+	// RelayPort: bas-relay's agent-registration port. This agent dials OUT
+	// to it (solves NAT -- works even when this agent is on a real, remote
+	// customer network with no inbound path) and stays connected, so
+	// kali_runner can reach it without needing this agent's host to be the
+	// same machine as the dev stack. See relay.go.
+	RelayPort     int    `json:"relay_port"`
 	AgentID       int    `json:"agent_id"`
 	AgentJWT      string `json:"agent_jwt"`
 	ClientCertPEM string `json:"client_cert_pem"`
@@ -70,10 +78,26 @@ func saveConfig(cfg *Config) error {
 	return os.WriteFile(configPath(), data, 0600)
 }
 
+// askPassword masks input when stdin is a real terminal (term.ReadPassword);
+// falls back to plain-echo reading when it isn't (piped stdin -- automated
+// installs, CI, or this project's own smoke tests), since ReadPassword
+// requires an actual TTY file descriptor and would otherwise hang/fail.
+func askPassword(reader *bufio.Reader, label string) string {
+	fd := int(os.Stdin.Fd())
+	if term.IsTerminal(fd) {
+		fmt.Print(label + ": ")
+		bytePw, err := term.ReadPassword(fd)
+		fmt.Println()
+		if err == nil {
+			return strings.TrimSpace(string(bytePw))
+		}
+	}
+	fmt.Print(label + ": ")
+	text, _ := reader.ReadString('\n')
+	return strings.TrimSpace(text)
+}
+
 // promptSetup collects the interactive installer's credentials from stdin.
-// NOTE: password entry is plain-echo in this smoke-test build (no
-// golang.org/x/term dependency) -- acceptable for Phase 1, a hardening pass
-// for a later phase should mask it.
 func promptSetup() *EnrollInput {
 	reader := bufio.NewReader(os.Stdin)
 	ask := func(label string) string {
@@ -84,7 +108,7 @@ func promptSetup() *EnrollInput {
 	fmt.Println("=== ScriptKidd.o BAS Agent — instalação ===")
 	fmt.Println("(dados mostrados no dashboard BAS da plataforma)")
 	username := ask("Usuário")
-	password := ask("Senha")
+	password := askPassword(reader, "Senha")
 	code := ask("Token / código de enrollment")
 	host := ask("IP da plataforma")
 	portStr := ask("Porta da plataforma")

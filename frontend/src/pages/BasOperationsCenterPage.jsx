@@ -66,6 +66,7 @@ export default function BasOperationsCenterPage() {
   const findings = center?.findings || [];
   const crownJewels = center?.crown_jewels || [];
   const heatmap = center?.attack_heatmap || [];
+  const chainPaths = center?.chain_attack_paths || [];
   const riskScore = center?.risk_score || {};
   const scoreValue = riskScore.score;
   const scoreColor = scoreValue == null ? TV.muted : scoreValue >= 60 ? "#e96363" : scoreValue >= 30 ? "#d4a500" : "#7fe0b0";
@@ -231,6 +232,36 @@ export default function BasOperationsCenterPage() {
                 </div>
               );
             })}
+          </div>
+        </TvPanel>
+
+        <TvPanel title="Attack Path (chains)" right={`${chainPaths.length} chain(s) disparada(s)`} span={3}>
+          <div style={{ display: "grid", gap: 10 }}>
+            {chainPaths.length === 0 && <div style={{ fontSize: 11, color: TV.muted }}>Nenhuma chain disparada ainda.</div>}
+            {chainPaths.map((path) => (
+              <div key={path.scan_job_id} style={{ background: TV.surface2, borderRadius: 8, padding: "9px 12px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+                  <span style={{ fontSize: 11.5, fontWeight: 700, color: TV.text }}>{path.chain_display_name}</span>
+                  <span style={{ fontSize: 9.5, fontWeight: 700, color: path.simulated ? "#d4a500" : "#7fe0b0" }}>
+                    {path.simulated ? "SIMULADO" : "REAL"}
+                  </span>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
+                  {path.steps.map((step, i) => (
+                    <span key={step.technique_key + i} style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                      <span style={{
+                        fontSize: 10, padding: "3px 7px", borderRadius: 6,
+                        color: step.status === "completed" ? "#7fe0b0" : step.status === "failed" ? "#e96363" : TV.muted,
+                        border: `1px solid ${TV.border}`,
+                      }}>
+                        {step.display_name}
+                      </span>
+                      {i < path.steps.length - 1 && <span style={{ color: TV.muted, fontSize: 10 }}>→</span>}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            ))}
           </div>
         </TvPanel>
       </div>

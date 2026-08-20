@@ -103,3 +103,50 @@ def test_server_cert_is_signed_by_the_ca_and_not_a_ca_itself(bas_ca):
     assert server_cert.issuer == ca_cert.subject
     basic_constraints = server_cert.extensions.get_extension_for_class(x509.BasicConstraints).value
     assert basic_constraints.ca is False
+
+
+def test_server_cert_san_always_covers_backend_and_localhost(bas_ca):
+    """Confirmed live: an agent reaching in via a hostname NOT in this list
+    (e.g. host.docker.internal, before it was added to settings.bas_mtls_extra_sans)
+    fails TLS hostname verification outright -- these two are the minimum
+    every deployment of this dev stack needs."""
+    cert_path, _key_path, _ca_path = bas_ca.server_cert_paths()
+    with open(cert_path, "rb") as fh:
+        cert = x509.load_pem_x509_certificate(fh.read())
+    san = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+    dns_names = san.get_values_for_type(x509.DNSName)
+    assert "backend" in dns_names
+    assert "localhost" in dns_names
+
+
+def test_server_cert_san_includes_configured_extra_hostnames(tmp_path, monkeypatch):
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "bas_ca_dir", str(tmp_path / "bas_ca"))
+    monkeypatch.setattr(settings, "bas_mtls_extra_sans", "host.docker.internal,bas.example.com")
+    import importlib
+    from app.services import bas_ca as module
+    importlib.reload(module)
+
+    cert_path, _key_path, _ca_path = module.server_cert_paths()
+    with open(cert_path, "rb") as fh:
+        cert = x509.load_pem_x509_certificate(fh.read())
+    san = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+    dns_names = san.get_values_for_type(x509.DNSName)
+    assert "host.docker.internal" in dns_names
+    assert "bas.example.com" in dns_names
+
+
+def test_server_cert_san_treats_an_ip_valued_extra_san_as_ipaddress_not_dnsname(tmp_path, monkeypatch):
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "bas_ca_dir", str(tmp_path / "bas_ca"))
+    monkeypatch.setattr(settings, "bas_mtls_extra_sans", "203.0.113.7")
+    import importlib
+    from app.services import bas_ca as module
+    importlib.reload(module)
+
+    cert_path, _key_path, _ca_path = module.server_cert_paths()
+    with open(cert_path, "rb") as fh:
+        cert = x509.load_pem_x509_certificate(fh.read())
+    san = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+    ip_addresses = [str(ip) for ip in san.get_values_for_type(x509.IPAddress)]
+    assert "203.0.113.7" in ip_addresses

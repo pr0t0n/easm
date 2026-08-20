@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 from typing import Any
+from urllib.parse import urlparse
 
 from app.services.bas_guardrail_policy import check_bas_authorization
 from app.services.bas_technique_catalog import get_technique
@@ -27,25 +28,50 @@ from app.services.kali_executor import execute_via_kali
 
 logger = logging.getLogger(__name__)
 
-# Real agents in this phase are assumed to run on the same host as the dev
-# stack (installed for smoke-testing, exactly like the "instale um agente na
-# minha máquina" flow) -- kali_runner reaches that host via Docker's built-in
-# host.docker.internal DNS name, never the agent's own self-reported OS
-# hostname (which isn't resolvable from inside the kali_runner container). A
-# genuinely remote, customer-network-installed agent needs a different
-# addressing/registration scheme -- out of scope until the real Rust agent
-# phase (see the BAS plan doc).
-_REAL_AGENT_TUNNEL_HOST = "host.docker.internal"
+# Real agents route through bas-relay's reverse tunnel (see bas-relay/main.go
+# and bas-agent/relay.go): the agent dials OUT to bas-relay from wherever
+# it's actually installed (solves NAT/firewall -- works for a genuinely
+# remote customer network, not just this same host), and bas-relay exposes a
+# per-agent forwarding port (20000 + agent_id) on the internal docker
+# network that kali_runner connects to. No same-host assumption anymore --
+# the agent's own tunnel_host is irrelevant here; only its id matters.
+_RELAY_HOST = "bas_relay"
+_RELAY_FORWARD_PORT_BASE = 20000
 _DEFAULT_SOCKS_PORT = 1080
 
 
 def _tunnel_env_vars(bas_agent: Any) -> dict[str, str]:
-    port = getattr(bas_agent, "tunnel_port", None) or _DEFAULT_SOCKS_PORT
     if getattr(bas_agent, "kind", "stub") == "real":
-        host = _REAL_AGENT_TUNNEL_HOST
+        host = _RELAY_HOST
+        port = _RELAY_FORWARD_PORT_BASE + int(getattr(bas_agent, "id"))
     else:
         host = getattr(bas_agent, "tunnel_host", None) or "bas_agent_stub"
+        port = getattr(bas_agent, "tunnel_port", None) or _DEFAULT_SOCKS_PORT
     return {"BAS_TUNNEL_HOST": str(host), "BAS_TUNNEL_PORT": str(port)}
+
+
+def _normalize_target(target_hint: str, target_format: str) -> str:
+    """Reshapes ONE shared target_hint (a schedule, and especially a chain,
+    supplies a single string for every step) to match each step's own
+    declared target_format -- confirmed live that skipping this makes a
+    tool silently misinterpret its target: nmap given "192.168.1.65:8001"
+    for a "host"-only step resolved to a bogus multicast address instead of
+    scanning the intended IP."""
+    raw = str(target_hint or "").strip()
+    if not raw:
+        return raw
+
+    has_scheme = "://" in raw
+    parsed = urlparse(raw if has_scheme else f"//{raw}")
+    host = parsed.hostname or raw.split("/")[0].split(":")[0]
+    port = parsed.port
+
+    if target_format == "url":
+        return raw if has_scheme else f"http://{raw}"
+    if target_format == "host_port":
+        return f"{host}:{port}" if port else host
+    # "host" and "domain" both mean bare host, no scheme/port/path.
+    return host
 
 
 def dispatch_bas_technique(
@@ -79,10 +105,13 @@ def dispatch_bas_technique(
         return {"dispatched": False, "reason": "no_kali_tool_mapped"}
 
     env_vars = _tunnel_env_vars(bas_agent)
+    normalized_target = _normalize_target(target_hint, technique.get("target_format", "host"))
     logger.info(
-        "bas_dispatcher: dispatching technique=%s tool=%s agent_id=%s agent_kind=%s tunnel=%s:%s target_hint=%s scan_id=%s",
+        "bas_dispatcher: dispatching technique=%s tool=%s agent_id=%s agent_kind=%s tunnel=%s:%s "
+        "target_hint=%s target_format=%s normalized_target=%s scan_id=%s",
         technique_key, kali_tool_name, getattr(bas_agent, "id", None), getattr(bas_agent, "kind", "stub"),
-        env_vars["BAS_TUNNEL_HOST"], env_vars["BAS_TUNNEL_PORT"], target_hint, scan_id,
+        env_vars["BAS_TUNNEL_HOST"], env_vars["BAS_TUNNEL_PORT"],
+        target_hint, technique.get("target_format", "host"), normalized_target, scan_id,
     )
-    result = execute_via_kali(kali_tool_name, target_hint, scan_id=scan_id, scan_mode="unit", env_vars=env_vars)
+    result = execute_via_kali(kali_tool_name, normalized_target, scan_id=scan_id, scan_mode="unit", env_vars=env_vars)
     return {"dispatched": True, "result": result, "agent_kind": getattr(bas_agent, "kind", "stub")}

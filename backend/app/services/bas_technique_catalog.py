@@ -63,6 +63,20 @@ def _technique(
     requires_real_agent: bool = False,
     requires_privileged_agent: bool = False,
     is_simulated_in_phase_1: bool = False,
+    # What shape of target string this technique's underlying tool actually
+    # expects -- "host" (bare host/IP, no scheme/port), "host_port"
+    # (host[:port], tool defaults the port itself if omitted), "url" (needs
+    # a scheme), "domain" (bare domain, no scheme/port/path). A schedule (or
+    # a chain, which shares ONE target_hint across every step) supplies a
+    # single target_hint regardless of which techniques it drives -- see
+    # bas_dispatcher._normalize_target, which reshapes that one string to
+    # match each step's own declared format instead of passing it through
+    # verbatim (confirmed live: nmap silently misresolved a "host:port"
+    # string meant for a "host"-only step in the web_to_secrets_chain test).
+    target_format: str = "host",
+    # Generic, technique-level remediation guidance shown in the BAS report
+    # when this technique produces a real (non-simulated) finding.
+    recommendation: str = "",
 ) -> dict[str, Any]:
     return {
         "technique_key": technique_key,
@@ -83,6 +97,8 @@ def _technique(
         "requires_real_agent": requires_real_agent,
         "requires_privileged_agent": requires_privileged_agent,
         "is_simulated_in_phase_1": is_simulated_in_phase_1,
+        "target_format": target_format,
+        "recommendation": recommendation,
     }
 
 
@@ -102,6 +118,7 @@ BAS_TECHNIQUE_CATALOG: list[dict[str, Any]] = [
         kali_tool_name="crackmapexec-bas", kali_profile="crackmapexec_smb_bas_tunnel",
         availability="simulated", execution_backend="kali_proxychains",
         requires_tcp=True, is_simulated_in_phase_1=True,
+        target_format="host", recommendation="Restrinja acesso a compartilhamentos SMB anonimo/autenticado; desative SMBv1; segmente hosts com dados sensiveis do acesso geral da rede.",
     ),
     _technique(
         "smb_enum_enum4linux",
@@ -112,6 +129,7 @@ BAS_TECHNIQUE_CATALOG: list[dict[str, Any]] = [
         kali_tool_name="enum4linux-ng-bas", kali_profile="enum4linux_ng_basic",
         availability="simulated", execution_backend="kali_proxychains",
         requires_tcp=True, is_simulated_in_phase_1=True,
+        target_format="host", recommendation="Desative null sessions RPC/SMB; restrinja enumeracao anonima de usuarios/RIDs; audite ACLs de compartilhamentos expostos.",
     ),
     _technique(
         "ad_bloodhound_collect",
@@ -122,6 +140,7 @@ BAS_TECHNIQUE_CATALOG: list[dict[str, Any]] = [
         kali_tool_name="bloodhound-python-bas", kali_profile="bloodhound_python_collect",
         availability="simulated", execution_backend="kali_proxychains",
         requires_tcp=True, is_simulated_in_phase_1=True,
+        target_format="host", recommendation="Revise ACLs de Active Directory alcancaveis via LDAP anonimo/autenticado; monitore volumes anormais de consultas LDAP vindos de contas de baixo privilegio.",
     ),
     _technique(
         "ad_kerberoast",
@@ -132,6 +151,7 @@ BAS_TECHNIQUE_CATALOG: list[dict[str, Any]] = [
         kali_tool_name="getuserspns-bas", kali_profile="impacket_kerberoast",
         availability="simulated", execution_backend="kali_proxychains",
         requires_tcp=True, is_simulated_in_phase_1=True,
+        target_format="host", recommendation="Use senhas longas e aleatorias para contas de servico; habilite criptografia AES para tickets Kerberos; monitore requisicoes de TGS em massa (indicativo de kerberoasting).",
     ),
     _technique(
         "ntlm_relay_smb",
@@ -142,6 +162,7 @@ BAS_TECHNIQUE_CATALOG: list[dict[str, Any]] = [
         kali_tool_name="ntlmrelayx-bas", kali_profile="impacket_ntlmrelayx",
         availability="simulated", execution_backend="kali_proxychains",
         requires_tcp=True, is_simulated_in_phase_1=True,
+        target_format="host", recommendation="Habilite SMB signing em todos os hosts; desative NTLM quando possivel em favor de Kerberos; segmente a rede para reduzir superficie de relay.",
     ),
 
     # ── Requires a real agent on the customer's L2 segment -- never run as
@@ -163,6 +184,7 @@ BAS_TECHNIQUE_CATALOG: list[dict[str, Any]] = [
         availability="simulated", execution_backend="kali_direct_no_tunnel_effect",
         requires_udp=True, requires_l2=True, requires_real_agent=True,
         requires_privileged_agent=True, is_simulated_in_phase_1=True,
+        target_format="host", recommendation="Desative LLMNR e NBT-NS via GPO onde nao forem necessarios; monitore respostas de poisoning na rede; use SMB signing para mitigar relay de hashes capturados.",
     ),
     _technique(
         "mdns_poisoning",
@@ -178,6 +200,7 @@ BAS_TECHNIQUE_CATALOG: list[dict[str, Any]] = [
         availability="simulated", execution_backend="kali_direct_no_tunnel_effect",
         requires_udp=True, requires_l2=True, requires_real_agent=True,
         requires_privileged_agent=True, is_simulated_in_phase_1=True,
+        target_format="host", recommendation="Restrinja mDNS a segmentos de rede confiaveis; monitore respostas mDNS anomalas; eduque usuarios sobre prompts de credencial inesperados.",
     ),
     _technique(
         "arp_poisoning",
@@ -188,6 +211,7 @@ BAS_TECHNIQUE_CATALOG: list[dict[str, Any]] = [
         kali_tool_name=None, kali_profile=None,
         availability="future_agent_required", execution_backend=None,
         requires_l2=True, requires_real_agent=True, requires_privileged_agent=True,
+        target_format="host", recommendation="Habilite DHCP snooping/dynamic ARP inspection nos switches; monitore tabelas ARP por anomalias; considere 802.1X para autenticacao de porta.",
     ),
     _technique(
         "dhcp_spoofing",
@@ -199,6 +223,7 @@ BAS_TECHNIQUE_CATALOG: list[dict[str, Any]] = [
         availability="future_agent_required", execution_backend=None,
         requires_udp=True, requires_l2=True, requires_real_agent=True,
         requires_privileged_agent=True,
+        target_format="host", recommendation="Habilite DHCP snooping nos switches; restrinja quem pode responder a requisicoes DHCP na rede; monitore servidores DHCP nao autorizados.",
     ),
 
     # ── Phase 2: VMware/Firewall onboarded onto the existing tunnel (curl and
@@ -213,6 +238,7 @@ BAS_TECHNIQUE_CATALOG: list[dict[str, Any]] = [
         kali_tool_name="curl-vmware-bas", kali_profile="vmware_vcenter_default_creds_check",
         availability="simulated", execution_backend="kali_proxychains",
         requires_tcp=True, is_simulated_in_phase_1=True,
+        target_format="host", recommendation="Troque credenciais padrao de root/vmware imediatamente; force troca de senha no primeiro login; restrinja acesso a API REST do vCenter/ESXi por IP.",
     ),
     _technique(
         "firewall_segmentation_test",
@@ -223,6 +249,7 @@ BAS_TECHNIQUE_CATALOG: list[dict[str, Any]] = [
         kali_tool_name="nmap-firewall-bas", kali_profile="firewall_segmentation_probe",
         availability="simulated", execution_backend="kali_proxychains",
         requires_tcp=True, is_simulated_in_phase_1=True,
+        target_format="host", recommendation="Revise regras de firewall/ACLs entre segmentos; o alcance encontrado indica que a segmentacao presumida nao esta de fato aplicada na rede.",
     ),
 
     # ── Added on request: network/AD/cloud/web discovery + supply-chain
@@ -237,6 +264,7 @@ BAS_TECHNIQUE_CATALOG: list[dict[str, Any]] = [
         kali_tool_name="smbmap-bas", kali_profile="smbmap_share_discovery",
         availability="simulated", execution_backend="kali_proxychains",
         requires_tcp=True, is_simulated_in_phase_1=True,
+        target_format="host", recommendation="Restrinja permissoes de compartilhamentos SMB ao minimo necessario; remova acesso 'Everyone'/anonimo; audite compartilhamentos com dados sensiveis.",
     ),
     _technique(
         "ad_scouting_ldap",
@@ -247,6 +275,7 @@ BAS_TECHNIQUE_CATALOG: list[dict[str, Any]] = [
         kali_tool_name="ldapsearch-bas", kali_profile="ad_ldap_scouting",
         availability="simulated", execution_backend="kali_proxychains",
         requires_tcp=True, is_simulated_in_phase_1=True,
+        target_format="host", recommendation="Desative bind anonimo LDAP no controlador de dominio; restrinja consultas LDAP nao autenticadas; monitore volumes de consulta anomalos.",
     ),
     _technique(
         "cloud_directory_scouting",
@@ -257,6 +286,7 @@ BAS_TECHNIQUE_CATALOG: list[dict[str, Any]] = [
         kali_tool_name="curl-clouddir-bas", kali_profile="cloud_directory_scouting_check",
         availability="simulated", execution_backend="kali_proxychains",
         requires_tcp=True, is_simulated_in_phase_1=True,
+        target_format="domain", recommendation="Revise o que a resposta de discovery do provedor de identidade expoe publicamente (tipo de federacao, tenant); considere respostas genericas para dominios nao gerenciados.",
     ),
     _technique(
         "port_service_scan",
@@ -267,6 +297,7 @@ BAS_TECHNIQUE_CATALOG: list[dict[str, Any]] = [
         kali_tool_name="nmap-portscan-bas", kali_profile="port_service_scan",
         availability="simulated", execution_backend="kali_proxychains",
         requires_tcp=True, is_simulated_in_phase_1=True,
+        target_format="host", recommendation="Feche portas/servicos desnecessariamente expostos; confirme que a segmentacao de rede presumida realmente bloqueia o alcance encontrado.",
     ),
     _technique(
         "chat_webhook_discovery",
@@ -277,6 +308,7 @@ BAS_TECHNIQUE_CATALOG: list[dict[str, Any]] = [
         kali_tool_name="curl-chatwebhook-bas", kali_profile="chat_webhook_discovery_check",
         availability="simulated", execution_backend="kali_proxychains",
         requires_tcp=True, is_simulated_in_phase_1=True,
+        target_format="url", recommendation="Trate URLs de webhook como segredo; rotacione se vazadas; restrinja quem pode postar validando um token/assinatura na propria automacao que recebe o webhook.",
     ),
     _technique(
         "netlogon_zerologon_check",
@@ -287,6 +319,7 @@ BAS_TECHNIQUE_CATALOG: list[dict[str, Any]] = [
         kali_tool_name="zerologon-bas", kali_profile="netlogon_zerologon_check",
         availability="simulated", execution_backend="kali_proxychains",
         requires_tcp=True, is_simulated_in_phase_1=True,
+        target_format="host", recommendation="Aplique a correcao do CVE-2020-1472 (Zerologon); force 'FullSecureChannelProtection' no controlador de dominio; monitore falhas de autenticacao Netlogon.",
     ),
     _technique(
         "owasp_web_app_scan",
@@ -297,6 +330,7 @@ BAS_TECHNIQUE_CATALOG: list[dict[str, Any]] = [
         kali_tool_name="nikto-owasp-bas", kali_profile="owasp_web_app_scan",
         availability="simulated", execution_backend="kali_proxychains",
         requires_tcp=True, is_simulated_in_phase_1=True,
+        target_format="host_port", recommendation="Corrija os achados especificos listados no resultado real (ex: headers de seguranca ausentes, CORS permissivo); rode o scan completo (nuclei/zap) para cobertura OWASP Top 10 completa.",
     ),
     _technique(
         "pipeline_secrets_harvesting",
@@ -307,6 +341,7 @@ BAS_TECHNIQUE_CATALOG: list[dict[str, Any]] = [
         kali_tool_name="curl-pipelinelogs-bas", kali_profile="pipeline_secrets_harvest",
         availability="simulated", execution_backend="kali_proxychains",
         requires_tcp=True, is_simulated_in_phase_1=True,
+        target_format="url", recommendation="Nunca deixe segredos em texto claro em logs de build; use mascaramento nativo do CI/CD; rotacione qualquer segredo que ja tenha aparecido em log publico.",
     ),
     _technique(
         "source_code_secrets_scan",
@@ -317,6 +352,7 @@ BAS_TECHNIQUE_CATALOG: list[dict[str, Any]] = [
         kali_tool_name="gitleaks-bas", kali_profile="source_code_secrets_scan",
         availability="simulated", execution_backend="kali_proxychains",
         requires_tcp=True, is_simulated_in_phase_1=True,
+        target_format="url", recommendation="Rotacione imediatamente qualquer segredo encontrado no historico do git; adicione gitleaks/pre-commit hooks no pipeline; nunca versione arquivos .env/credenciais.",
     ),
 
     # ── Host-based -- require literal code execution / filesystem access ON
@@ -337,6 +373,7 @@ BAS_TECHNIQUE_CATALOG: list[dict[str, Any]] = [
         kali_tool_name=None, kali_profile=None,
         availability="future_agent_required", execution_backend=None,
         requires_real_agent=True, requires_privileged_agent=True,
+        target_format="host", recommendation="Habilite Credential Guard/LSA Protection no Windows; restrinja privilegios administrativos locais; monitore acesso ao processo LSASS.",
     ),
     _technique(
         "dotfile_config_harvesting",
@@ -347,6 +384,7 @@ BAS_TECHNIQUE_CATALOG: list[dict[str, Any]] = [
         kali_tool_name=None, kali_profile=None,
         availability="future_agent_required", execution_backend=None,
         requires_real_agent=True, requires_privileged_agent=True,
+        target_format="host", recommendation="Nunca grave credenciais em texto claro em arquivos de configuracao locais; use um gerenciador de segredos (Vault, AWS Secrets Manager); restrinja permissoes de leitura desses arquivos.",
     ),
     _technique(
         "kubeconfig_theft",
@@ -357,6 +395,7 @@ BAS_TECHNIQUE_CATALOG: list[dict[str, Any]] = [
         kali_tool_name=None, kali_profile=None,
         availability="future_agent_required", execution_backend=None,
         requires_real_agent=True, requires_privileged_agent=True,
+        target_format="host", recommendation="Use autenticacao de curta duracao para kubeconfig (OIDC/exec plugin) em vez de tokens estaticos de longa duracao; restrinja permissoes de leitura em ~/.kube/config.",
     ),
 ]
 
