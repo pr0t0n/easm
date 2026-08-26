@@ -19,6 +19,7 @@ from app.models.models import Finding, ScanJob, ScanLog
 from app.services.offensive_operator_core import (
     BACKEND_LOCAL_TOOL_NAMES,
     MCPToolExecutor,
+    PhaseValidator,
     PHASE_CONTRACTS,
     PHASE_ORDER,
     ReportBuilder,
@@ -1687,6 +1688,49 @@ def _run_lab_browser_capture_once(db, job: ScanJob, target: str) -> dict[str, An
         return {"error": str(exc)[:500]}
 
 
+def _run_browser_request_harvester_once(db, job: ScanJob, target: str, identity_key: str = "") -> dict[str, Any]:
+    """Runs the real-body-capturing browser harvester (Épico 3) once per
+    target during P08, for EVERY scan mode -- not gated behind
+    _is_lab_fast_scan like _run_lab_browser_capture_once above. Additive to
+    whatever P08's normal tool dispatch (linkfinder/chromium-capture/katana)
+    already does; does not replace it."""
+    state = dict(job.state_data or {})
+    dedup_key = f"{target}|{identity_key or ''}"
+    done = set(state.get("_browser_harvester_done_targets") or [])
+    if dedup_key in done:
+        return {"skipped": True, "reason": "already_harvested"}
+    try:
+        from app.services.browser_request_harvester import harvest_target
+
+        result = harvest_target(db, job, target, identity_key=identity_key)
+        done.add(dedup_key)
+        state = dict(job.state_data or {})
+        state["_browser_harvester_done_targets"] = sorted(done)
+        job.state_data = state
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="offensive-operator",
+            level="INFO",
+            message=(
+                f"browser_request_harvester target={target} identity={identity_key or 'anonymous'} "
+                f"status={result.get('status')} captured={result.get('requests_captured', 0)} "
+                f"persisted={result.get('requests_persisted', 0)}"
+            ),
+        ))
+        db.commit()
+        return result
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="offensive-operator",
+            level="WARNING",
+            message=f"browser_request_harvester_failed target={target} error={exc!s}"[:2000],
+        ))
+        db.commit()
+        return {"status": "error", "reason": str(exc)[:500]}
+
+
 def _record_lab_fast_phase(
     db,
     job: ScanJob,
@@ -3005,6 +3049,9 @@ def run_offensive_operator_scan(
                 _phase_units_this_task += 1
                 continue
 
+            if phase_id == "P08":
+                _run_browser_request_harvester_once(db, job, _effective_target)
+
             events.append(create_operation_event("phase_started", offensive_state["campaign_id"], str(job.id), phase_id, status="running"))
             _phase_unit_start = _time.monotonic()
             _job_id_for_wait = int(job.id)
@@ -3131,6 +3178,7 @@ def run_offensive_operator_scan(
 
                     _body_reqs = list(_body_by_point.values())[:5]
                     _body_profile = "sqlmap_body" if phase_id == "P10" else "dalfox_body"
+                    _body_skill = "skill.vuln.sql_injection" if phase_id == "P10" else "skill.stored_xss_testing"
                     _body_count = 0
                     for _req in _body_reqs:
                         if _time.monotonic() - _phase_unit_start > _PHASE_UNIT_DEADLINE:
@@ -3150,7 +3198,7 @@ def run_offensive_operator_scan(
                         _supp_exec = {
                             "mcp_request_id": f"body-{phase_id}-{abs(hash((_method, _url, _body_template))) % 10**8}",
                             "phase_id": phase_id,
-                            "skill_id": _primary_skill,
+                            "skill_id": _body_skill,
                             "tool_name": _primary_tool,
                             "profile": _body_profile,
                             "target": _url,
@@ -3166,15 +3214,45 @@ def run_offensive_operator_scan(
                             "expected_evidence": ["stdout", "raw_tool_output", "parsed_result"],
                         }
                         try:
-                            _supp_results.append(
-                                _call_mcp_execution(_supp_exec, authorized_scope=authorized_scope)
-                            )
+                            _supp_result = _call_mcp_execution(_supp_exec, authorized_scope=authorized_scope)
+                            _supp_result.setdefault("skill_id", _body_skill)
+                            _supp_result.setdefault("profile", _body_profile)
+                            _supp_result.setdefault("phase_id", phase_id)
+                            _supp_result.setdefault("tool_name", _primary_tool)
+                            _supp_result.setdefault("target", _url)
+                            _supp_results.append(_supp_result)
                             _body_count += 1
                         except Exception:
                             continue
 
                     if _supp_results:
                         result["mcp_results"] = list(result.get("mcp_results") or []) + _supp_results
+                        if phase_id == "P12":
+                            _phase_evidence = list(result.get("evidence") or [])
+                            for _supp_result in _supp_results:
+                                if str(_supp_result.get("status") or "") == "success":
+                                    _phase_evidence.append({
+                                        "phase_id": phase_id,
+                                        "skill_id": _supp_result.get("skill_id") or "",
+                                        "tool_name": _supp_result.get("tool_name") or "",
+                                        "target": _supp_result.get("target") or "",
+                                        "evidence_strength": "medium",
+                                        "parsed_json": _supp_result.get("parsed_result") or _supp_result.get("parsed") or {},
+                                        "stdout": _supp_result.get("stdout") or "",
+                                    })
+                            _revalidated = PhaseValidator().validate(
+                                PHASE_CONTRACTS[phase_id],
+                                result.get("tool_plan") or {},
+                                list(result.get("mcp_results") or []),
+                                _phase_evidence,
+                                result.get("validator_decision", {}).get("generated_hypotheses") or [],
+                                dict(job.state_data or {}),
+                                phase_ledger.get("skill_coverage") or {},
+                            )
+                            result["validator_decision"] = _revalidated
+                            phase_ledger["status"] = _revalidated.get("status", phase_ledger.get("status"))
+                            phase_ledger["validation_result"] = _revalidated
+                            phase_ledger["blocking_reason"] = None if _revalidated.get("status") != "blocked" else _revalidated.get("reason")
                         db.add(ScanLog(
                             scan_job_id=job.id, source="offensive-operator", level="INFO",
                             message=(
@@ -4558,6 +4636,45 @@ def run_offensive_operator_scan(
 
     # ── Persist findings from phase evidence into the Finding table ────────
     _persist_offensive_findings(db, job, phase_ledgers, targets)
+
+    # Safety net: run_app_pentest_for_scan (weak-credential probe, SQLi-auth-bypass,
+    # business logic, IDOR, ...) is normally triggered per-work-item-completion in
+    # app/workers/tasks.py, gated on a P09/P10/P16/P19 item reaching status=completed.
+    # When those phases never produce a single completed item (e.g. an upstream
+    # connectivity failure starves P06 and everything downstream gets force-skipped
+    # by finalize_orphaned_blocked_work_items), that trigger never fires and an
+    # authorized aggressive-mode scan silently skips active exploitation entirely.
+    # Run it here once at finalization, keyed to the same idempotent checkpoint so
+    # it never double-runs if the per-item trigger already handled it.
+    try:
+        state_ae = dict(job.state_data or {})
+        if state_ae.get("active_exploit_authorized"):
+            from app.services.execution_context_service import (
+                complete_processor_checkpoint,
+                processor_should_run,
+            )
+
+            run_ae, checkpoint_ae, _ = processor_should_run(
+                db, job, execution_context="external",
+                processor_name="active-app-pentest", processor_version="v2-context-auth",
+            )
+            if run_ae:
+                from app.services.app_pentest import run_app_pentest_for_scan
+
+                app_result = run_app_pentest_for_scan(db, job, execution_context="external")
+                complete_processor_checkpoint(db, checkpoint_ae, app_result)
+                db.add(ScanLog(
+                    scan_job_id=job.id, source="app-pentest", level="INFO",
+                    message=(
+                        "active_app_pentest_finalization_safety_net_ran "
+                        f"findings_created={app_result.get('findings_created')}"
+                    )[:2000],
+                ))
+                db.commit()
+    except Exception as exc:  # noqa: BLE001
+        db.add(ScanLog(scan_job_id=job.id, source="app-pentest", level="WARNING",
+                       message=f"active_app_pentest_finalization_safety_net_failed error={exc!s}"[:2000]))
+        db.commit()
 
     try:
         from app.services.scan_execution_metrics import reconcile_tool_run_ledger

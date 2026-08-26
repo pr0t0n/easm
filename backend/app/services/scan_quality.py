@@ -267,7 +267,12 @@ def _verification_bucket(finding: Finding) -> str:
     return "unclassified"
 
 
-def _phase_component(phase_monitor: dict[str, Any], expected_phase_ids: list[str]) -> tuple[float, dict[str, Any], list[dict[str, Any]]]:
+def _phase_component(
+    phase_monitor: dict[str, Any],
+    expected_phase_ids: list[str],
+    drained_phase_ids: set[str] | None = None,
+) -> tuple[float, dict[str, Any], list[dict[str, Any]]]:
+    drained_phase_ids = drained_phase_ids or set()
     phases = {
         str(row.get("phase_id") or row.get("id") or ""): dict(row or {})
         for row in (phase_monitor.get("pentest_journey") or {}).get("phases") or phase_monitor.get("phases") or []
@@ -279,10 +284,23 @@ def _phase_component(phase_monitor: dict[str, Any], expected_phase_ids: list[str
         status = str(row.get("status") or "").lower()
         wq = dict(row.get("work_queue") or {})
         total = int(wq.get("total") or 0)
+        drained = False
         if total > 0:
             terminal_pct = float(wq.get("pct") or 0) / 100.0
             success_pct = float(wq.get("success_pct") or 0) / 100.0
-            if status in {"skipped", "not_applicable"} and int(wq.get("done") or 0) == 0 and int(wq.get("failed") or 0) == 0:
+            clean_skip = (
+                status in {"skipped", "not_applicable"}
+                and int(wq.get("done") or 0) == 0
+                and int(wq.get("failed") or 0) == 0
+            )
+            if clean_skip and pid in drained_phase_ids:
+                # Force-terminalized by finalize_orphaned_blocked_work_items after an
+                # upstream dependency never qualified any target -- the phase never
+                # actually ran. Giving this full credit let scan #50 (aggressive mode)
+                # report status=completed/approved while P09-P20 never executed.
+                value = 0.0
+                drained = True
+            elif clean_skip:
                 value = 1.0
             else:
                 value = (terminal_pct * 0.65) + (success_pct * 0.35)
@@ -309,6 +327,7 @@ def _phase_component(phase_monitor: dict[str, Any], expected_phase_ids: list[str
                 "status": status or "unknown",
                 "score": round(value * 100),
                 "missing_tools": list(row.get("required_tools_missing") or row.get("tools_missing_unused") or [])[:8],
+                "drained": drained,
             })
     ratio = sum(scored) / max(1, len(scored))
     return round(ratio * 100, 1), {
@@ -377,6 +396,504 @@ def _skill_runtime_attribution(job: ScanJob) -> tuple[set[str], set[str]]:
         status = "success" if row.get("all_mandatory_executed") or int(row.get("agents_success") or 0) > 0 else "partial"
         _mark_phase(str(row.get("phase_id") or ""), status)
     return attributed, executed
+
+
+def _item_mapping(value: Any) -> dict[str, Any]:
+    return dict(value or {}) if isinstance(value, dict) else {}
+
+
+def _item_text(*values: Any) -> str:
+    return " ".join(str(value or "") for value in values).lower()
+
+
+def _work_item_text(item: Any) -> str:
+    result = _item_mapping(getattr(item, "result", None))
+    metadata = _item_mapping(getattr(item, "item_metadata", None))
+    return _item_text(
+        getattr(item, "phase_id", ""),
+        getattr(item, "tool_name", ""),
+        getattr(item, "target", ""),
+        getattr(item, "status", ""),
+        getattr(item, "last_error", ""),
+        metadata,
+        result,
+    )
+
+
+def _has_mutating_body_surface(state: dict[str, Any], endpoints: list[Any]) -> bool:
+    safe_methods = {"GET", "HEAD", "OPTIONS", "TRACE"}
+    for row in list(state.get("discovered_parameterized_requests") or []):
+        if not isinstance(row, dict):
+            continue
+        method = str(row.get("method") or "GET").upper()
+        has_body = bool(
+            row.get("body_parameters")
+            or row.get("body_template")
+            or row.get("data")
+            or row.get("json")
+            or row.get("post_data")
+        )
+        if method not in safe_methods and has_body:
+            return True
+    for key in ("post_endpoints", "state_changing_endpoints", "fuzz_post_templates", "discovered_forms"):
+        if state.get(key):
+            return True
+    for endpoint in endpoints:
+        metadata = _item_mapping(getattr(endpoint, "endpoint_metadata", None))
+        analysis = _item_mapping(metadata.get("analysis"))
+        classification = _item_mapping(analysis.get("classification"))
+        method = str(metadata.get("method") or classification.get("method") or "").upper()
+        tags = {str(tag or "").lower() for tag in list(getattr(endpoint, "tags", None) or [])}
+        if method and method not in safe_methods:
+            return True
+        if bool(classification.get("state_changing")) or bool(metadata.get("state_changing")):
+            return True
+        if tags & {"form", "state_changing", "mutation", "api_write"}:
+            return True
+    return False
+
+
+def _has_parameterized_url_surface(state: dict[str, Any], endpoints: list[Any], work_items: list[Any]) -> bool:
+    if state.get("discovered_parameterized_urls") or state.get("known_parameters") or state.get("reflected_parameters"):
+        return True
+    for endpoint in endpoints:
+        url = str(getattr(endpoint, "normalized_url", "") or "")
+        metadata = _item_mapping(getattr(endpoint, "endpoint_metadata", None))
+        if "?" in url or metadata.get("parameters") or metadata.get("query_parameters"):
+            return True
+    return any("?" in str(getattr(item, "target", "") or "") for item in work_items)
+
+
+def _has_auth_depth_evidence(state: dict[str, Any], valid_sessions: list[Any]) -> bool:
+    return bool(
+        valid_sessions
+        or state.get("tokens")
+        or state.get("valid_auth_sessions")
+        or state.get("auth_session")
+        or state.get("authenticated_session")
+        or state.get("cookies")
+        or state.get("session_cookies")
+    )
+
+
+def _artifact_text(artifact: Any) -> str:
+    return _item_text(
+        getattr(artifact, "phase_id", ""),
+        getattr(artifact, "artifact_type", ""),
+        getattr(artifact, "validation_status", ""),
+        _item_mapping(getattr(artifact, "artifact_metadata", None)),
+    )
+
+
+def _tool_health_status_map() -> dict[str, str]:
+    """Best-effort tool_name -> health status ('ready'/'missing_binary'/...).
+
+    Returns {} on any failure (runner unreachable, etc.) so callers degrade to
+    "unknown" rather than breaking the quality gate.
+    """
+    try:
+        from app.services.tool_health_service import build_tool_health_matrix
+
+        matrix = build_tool_health_matrix()
+        return {
+            str(row.get("tool_name") or "").lower(): str(row.get("status") or "unknown")
+            for row in list(matrix.get("tools") or [])
+        }
+    except Exception:
+        return {}
+
+
+_JS_API_ROUTE_MARKERS = ("/api/", "/rest/", "/graphql", "/auth", "/login", "/logout", ".js")
+
+
+def _discovered_endpoints_indicate_js_api_surface(state: dict[str, Any]) -> bool:
+    """`state["discovered_endpoints"]`/`state["internal_discovered_endpoints"]`
+    (plain lists of URL strings, written by js_analyzer.py and every other
+    endpoint producer via OffensiveInventoryService) are the keys that are
+    actually populated in this codebase -- unlike `javascript_bundles`/
+    `discovered_js_routes`/`api_routes`, which nothing ever writes. Presence
+    alone isn't specific enough (any tool can add a plain endpoint), so this
+    also requires at least one URL to look like a JS/API route rather than a
+    generic page.
+    """
+    urls = list(state.get("discovered_endpoints") or []) + list(state.get("internal_discovered_endpoints") or [])
+    return any(
+        marker in str(url or "").lower()
+        for url in urls
+        for marker in _JS_API_ROUTE_MARKERS
+    )
+
+
+def _build_p08_tool_missing_gap(
+    *,
+    state: dict[str, Any],
+    work_items: list[Any],
+    artifacts: list[Any],
+) -> list[dict[str, Any]]:
+    """P08 (client-side route/API discovery) must surface an explicit,
+    profile-independent gap when its discovery tools are operationally
+    missing (binary/venv absent on the runner) -- as opposed to having run
+    and found nothing. Unlike the aggressive-profile-only depth requirement
+    below, this always applies: a scan with no evidence of running
+    linkfinder/paramspider because they don't exist should never look the
+    same as one where they ran and the target genuinely had no JS/API
+    surface to find.
+    """
+    all_text = " ".join(
+        [_work_item_text(item) for item in work_items]
+        + [_artifact_text(artifact) for artifact in artifacts]
+    )
+    state_keys = set(state)
+    js_surface = bool(
+        (state_keys & {"javascript_bundles", "js_bundles", "spa_routes", "discovered_js_routes", "api_routes", "client_routes"})
+        and any(state.get(key) for key in ("javascript_bundles", "js_bundles", "spa_routes", "discovered_js_routes", "api_routes", "client_routes"))
+    ) or "main.js" in all_text or _discovered_endpoints_indicate_js_api_surface(state)
+    if not js_surface:
+        return []
+    p08_tools = ("linkfinder", "chromium-capture", "nuclei-js-analysis", "nuclei-js-secrets", "katana")
+    completed_p08_tools = {
+        str(getattr(item, "tool_name", "") or "").lower()
+        for item in work_items
+        if str(getattr(item, "phase_id", "") or "").upper() == "P08"
+        and str(getattr(item, "status", "") or "").lower() in {"completed", "done", "success"}
+    }
+    if completed_p08_tools & set(p08_tools):
+        return []
+    health = _tool_health_status_map()
+    broken = [tool for tool in ("linkfinder", "paramspider") if health.get(tool) in {"missing_binary", "missing_profile"}]
+    if not broken:
+        return []
+    return [{
+        "severity": "high",
+        "area": "tool_missing",
+        "title": "P08 sem execução — ferramenta de discovery ausente no runner",
+        "detail": (
+            f"Superfície JS/API foi observada, mas {', '.join(broken)} está indisponível no kali-runner "
+            "(binário/venv ausente) — isto é falha operacional, não resultado negativo de teste."
+        ),
+        "action": f"Reinstalar {', '.join(broken)} no kali-runner (ver kali-runner/modules.yaml) e reexecutar P08.",
+    }]
+
+
+def _build_aggressive_depth_requirements(
+    *,
+    state: dict[str, Any],
+    profile: dict[str, Any],
+    expected_phase_ids: list[str],
+    work_items: list[Any],
+    artifacts: list[Any],
+    valid_sessions: list[Any],
+    endpoints: list[Any],
+    auth_required: bool,
+) -> dict[str, Any]:
+    profile_id = str(profile.get("id") or state.get("scan_level") or "").lower()
+    depth = str(profile.get("depth") or "").lower()
+    noise = str(profile.get("noise_profile") or "").lower()
+    enforced = profile_id == "aggressive" or depth == "aggressive" or noise == "aggressive"
+    if not enforced:
+        return {
+            "version": "depth-requirements-v1",
+            "profile": profile_id,
+            "enforced": False,
+            "requirements": [],
+            "met": 0,
+            "unmet": 0,
+            "applicable": 0,
+        }
+    expected = {str(phase_id).upper() for phase_id in expected_phase_ids}
+    if not expected:
+        return {
+            "version": "depth-requirements-v1",
+            "profile": profile_id,
+            "enforced": False,
+            "requirements": [],
+            "met": 0,
+            "unmet": 0,
+            "applicable": 0,
+        }
+
+    completed_by_phase = {
+        phase_id: [
+            item for item in work_items
+            if str(getattr(item, "phase_id", "") or "").upper() == phase_id
+            and str(getattr(item, "status", "") or "").lower() in {"completed", "done", "success"}
+        ]
+        for phase_id in expected
+    }
+    completed_p12 = [
+        item for item in work_items
+        if str(getattr(item, "phase_id", "") or "").upper() == "P12"
+        and str(getattr(item, "status", "") or "").lower() in {"completed", "done", "success"}
+    ]
+    p12_text = " ".join(_work_item_text(item) for item in completed_p12)
+    artifact_text = " ".join(_artifact_text(artifact) for artifact in artifacts if str(getattr(artifact, "phase_id", "") or "").upper() == "P12")
+    combined_p12_text = f"{p12_text} {artifact_text}"
+    has_parameterized_surface = _has_parameterized_url_surface(state, endpoints, work_items)
+    has_mutating_surface = _has_mutating_body_surface(state, endpoints)
+    has_auth_evidence = _has_auth_depth_evidence(state, valid_sessions)
+    state_keys = set(state)
+    all_text = " ".join([_work_item_text(item) for item in work_items] + [_artifact_text(artifact) for artifact in artifacts])
+    reflected_complete = bool(
+        has_parameterized_surface
+        and any(str(getattr(item, "tool_name", "") or "").lower() in {"dalfox", "nuclei-xss", "wapiti"} for item in completed_p12)
+    )
+    stored_body_complete = bool(
+        has_mutating_surface
+        and any(
+            str(getattr(item, "tool_name", "") or "").lower() in {"curl", "manual-http-probe", "dalfox", "wapiti"}
+            and any(token in _work_item_text(item) for token in (
+                "skill.stored_xss_testing",
+                "dalfox_body",
+                "curl_probe",
+                "scan_fuzz_post_data",
+                "body_template",
+                "post ",
+                "request_response_pair",
+            ))
+            for item in completed_p12
+        )
+    )
+    render_validation_complete = bool(
+        stored_body_complete
+        and any(token in combined_p12_text for token in (
+            "request_response_pair",
+            "rendered_context",
+            "payload_used",
+            "negative_control",
+            "stored_xss_request_response_render_validation",
+        ))
+        and "stored_xss_flow_not_covered" not in combined_p12_text
+    )
+
+    requirements: list[dict[str, Any]] = []
+
+    def add_requirement(name: str, status: str, missing: list[str], severity: str, evidence: dict[str, Any]) -> None:
+        requirements.append({
+            "id": name,
+            "status": status,
+            "severity": severity,
+            "missing": missing,
+            "evidence": evidence,
+        })
+
+    def completed_tools(phase_id: str, tools: set[str]) -> bool:
+        return any(str(getattr(item, "tool_name", "") or "").lower() in tools for item in completed_by_phase.get(phase_id, []))
+
+    def has_any_state(keys: set[str]) -> bool:
+        return bool(state_keys & keys) and any(state.get(key) for key in keys)
+
+    def add_surface_execution_requirement(
+        phase_id: str,
+        name: str,
+        surface_ok: bool,
+        execution_ok: bool,
+        surface_missing: str,
+        execution_missing: str,
+        severity: str,
+        evidence: dict[str, Any],
+    ) -> None:
+        if phase_id not in expected:
+            return
+        missing = []
+        if not surface_ok:
+            missing.append(surface_missing)
+        if not execution_ok:
+            missing.append(execution_missing)
+        add_requirement(name, "met" if not missing else "missing", missing, severity, evidence)
+
+    js_surface = has_any_state({"javascript_bundles", "js_bundles", "spa_routes", "discovered_js_routes", "api_routes", "client_routes"}) or "main.js" in all_text or _discovered_endpoints_indicate_js_api_surface(state)
+    api_surface = has_any_state({"api_specs", "openapi_urls", "swagger_urls", "graphql_endpoints", "discovered_api_endpoints"})
+    file_surface = has_any_state({
+        "upload_endpoints",
+        "file_upload_forms",
+        "file_path_parameters",
+        "path_traversal_candidates",
+        "backup_files",
+        "exposed_files",
+        "sensitive_file_candidates",
+        "openapi_urls",
+        "swagger_urls",
+    }) or any(token in all_text for token in ("/ftp", "/.well-known/security.txt", "/metrics", ".bak", ".old", ".zip", ".xml"))
+    object_reference_surface = has_any_state({"object_reference_endpoints", "id_parameters", "basket_ids", "user_ids", "order_ids", "known_parameters"}) or any(token in all_text for token in ("basketid", "userid", "orderid", " id=", " id:"))
+    auth_surface = has_any_state({"login_forms", "auth_endpoints", "jwt_tokens", "jwt_endpoints", "oauth_endpoints", "default_credential_targets", "auth_config"}) or auth_required
+    redirect_surface = has_any_state({"redirect_parameters", "url_like_parameters"}) or any(token in all_text for token in ("redirect?to=", "returnurl", "callback", "next="))
+    client_control_surface = has_any_state({"discovered_forms", "form_controls", "client_side_validations", "state_changing_endpoints", "post_endpoints"}) or has_mutating_surface
+    rate_limit_surface = has_any_state({"rate_limit_candidates", "captcha_endpoints", "transaction_endpoints"}) or any(token in all_text for token in ("captcha", "coupon", "checkout", "payment"))
+    server_side_danger_surface = has_any_state({"ssrf_candidate_params", "callback_parameters", "command_parameters", "rce_candidates", "template_parameters", "serialized_parameters"})
+
+    add_surface_execution_requirement(
+        "P08",
+        "p08_client_side_route_and_api_discovery",
+        js_surface,
+        completed_tools("P08", {"linkfinder", "chromium-capture", "nuclei-js-analysis", "nuclei-js-secrets", "katana"}),
+        "javascript_route_or_api_surface",
+        "completed_js_route_api_analysis",
+        "high",
+        {"js_surface": js_surface, "completed_p08_items": len(completed_by_phase.get("P08", []))},
+    )
+    add_surface_execution_requirement(
+        "P10",
+        "p10_injection_request_response_controls",
+        has_parameterized_surface or has_mutating_surface or api_surface,
+        completed_tools("P10", {"sqlmap", "wapiti", "nuclei-sqli", "nuclei-ssti", "nuclei-xxe", "nuclei-crlf"}),
+        "parameterized_or_body_input_surface",
+        "completed_injection_validator",
+        "high",
+        {"parameterized_surface": has_parameterized_surface, "mutating_body_surface": has_mutating_surface, "api_surface": api_surface},
+    )
+    add_surface_execution_requirement(
+        "P11",
+        "p11_ssrf_callback_or_url_input_flow",
+        has_any_state({"ssrf_candidate_params", "url_like_parameters", "callback_parameters"}) or redirect_surface,
+        completed_tools("P11", {"nuclei", "nuclei-ssrf", "interactsh-client", "wapiti"}),
+        "url_or_callback_input_surface",
+        "completed_ssrf_validator",
+        "medium",
+        {"redirect_or_url_surface": redirect_surface, "server_side_danger_surface": server_side_danger_surface},
+    )
+    if "P12" in expected:
+        add_requirement(
+            "p12_reflected_xss_parameterized_surface",
+            "met" if reflected_complete else "missing",
+            [] if reflected_complete else [
+                value for value, present in {
+                    "parameterized_url_surface": has_parameterized_surface,
+                    "completed_p12_reflected_xss_tool": bool(completed_p12),
+                }.items()
+                if not present
+            ],
+            "medium",
+            {
+                "parameterized_url_surface": has_parameterized_surface,
+                "completed_p12_items": len(completed_p12),
+            },
+        )
+        add_requirement(
+            "p12_stored_xss_mutating_body_surface",
+            "met" if has_mutating_surface else "missing",
+            [] if has_mutating_surface else ["state_changing_body_surface"],
+            "high",
+            {
+                "discovered_parameterized_requests": len(list(state.get("discovered_parameterized_requests") or [])),
+                "post_endpoints": len(list(state.get("post_endpoints") or [])),
+                "state_changing_endpoints": len(list(state.get("state_changing_endpoints") or [])),
+                "fuzz_post_templates": len(list(state.get("fuzz_post_templates") or [])),
+            },
+        )
+        stored_missing = []
+        if auth_required and not has_auth_evidence:
+            stored_missing.append("authenticated_session")
+        if not has_mutating_surface:
+            stored_missing.append("state_changing_body_surface")
+        if not stored_body_complete:
+            stored_missing.append("stored_xss_body_request_execution")
+        if not render_validation_complete:
+            stored_missing.append("stored_xss_request_response_render_validation")
+        stored_status = "met" if not stored_missing else ("blocked_precondition" if "authenticated_session" in stored_missing or "state_changing_body_surface" in stored_missing else "missing")
+        add_requirement(
+            "p12_stored_xss_request_response_render_flow",
+            stored_status,
+            stored_missing,
+            "high",
+            {
+                "auth_required": auth_required,
+                "auth_evidence": has_auth_evidence,
+                "mutating_body_surface": has_mutating_surface,
+                "stored_body_execution": stored_body_complete,
+                "render_validation": render_validation_complete,
+            },
+        )
+    add_surface_execution_requirement(
+        "P13",
+        "p13_access_control_business_logic_matrix",
+        object_reference_surface or has_mutating_surface or client_control_surface,
+        completed_tools("P13", {"bl-test", "nuclei-idor", "nuclei-redirect", "curl", "chromium-capture"}),
+        "object_reference_or_business_action_surface",
+        "completed_access_control_business_logic_validator",
+        "high",
+        {
+            "object_reference_surface": object_reference_surface,
+            "mutating_body_surface": has_mutating_surface,
+            "client_control_surface": client_control_surface,
+        },
+    )
+    add_surface_execution_requirement(
+        "P14",
+        "p14_auth_session_jwt_boundary",
+        auth_surface,
+        completed_tools("P14", {"nuclei-auth-bypass", "jwt_tool", "nuclei-jwt", "nuclei-auth"}),
+        "auth_or_token_surface",
+        "completed_auth_boundary_validator",
+        "high",
+        {"auth_surface": auth_surface, "auth_evidence": has_auth_evidence},
+    )
+    add_surface_execution_requirement(
+        "P15",
+        "p15_file_disclosure_upload_lfi_surface",
+        file_surface,
+        completed_tools("P15", {"nuclei-exposure", "nuclei-lfi", "nuclei-file-upload", "nuclei-misconfiguration", "ffuf-files", "gau", "waybackurls"}),
+        "file_upload_backup_or_path_surface",
+        "completed_file_disclosure_upload_validator",
+        "high",
+        {"file_surface": file_surface},
+    )
+    add_surface_execution_requirement(
+        "P16",
+        "p16_api_schema_parameter_hpp_surface",
+        api_surface or has_parameterized_surface or has_mutating_surface,
+        completed_tools("P16", {"arjun", "ffuf-params", "paramspider", "wfuzz", "nuclei-graphql", "nuclei-swagger"}),
+        "api_schema_parameter_or_body_surface",
+        "completed_api_parameter_validator",
+        "high",
+        {"api_surface": api_surface, "parameterized_surface": has_parameterized_surface, "mutating_body_surface": has_mutating_surface},
+    )
+    add_surface_execution_requirement(
+        "P19",
+        "p19_post_auth_state_change_controls",
+        has_mutating_surface or object_reference_surface or rate_limit_surface,
+        completed_tools("P19", {"nuclei-csrf", "nuclei-cors", "nuclei-idor", "nuclei-race", "post-exploitation-boundary-review"}),
+        "state_change_object_or_transaction_surface",
+        "completed_post_auth_control_validator",
+        "high",
+        {"mutating_body_surface": has_mutating_surface, "object_reference_surface": object_reference_surface, "rate_limit_surface": rate_limit_surface},
+    )
+    add_surface_execution_requirement(
+        "P20",
+        "p20_attack_path_correlation_for_discovered_primitives",
+        any(row["status"] == "met" for row in requirements),
+        completed_tools("P20", {"attack-path-correlator", "nuclei", "gitleaks", "trufflehog", "nuclei-race"}),
+        "validated_or_candidate_attack_primitives",
+        "completed_attack_path_correlation",
+        "medium",
+        {"prior_requirements_met": len([row for row in requirements if row["status"] == "met"])},
+    )
+    add_requirement(
+        "auth_state_visibility",
+        "met" if has_auth_evidence else ("blocked_precondition" if auth_required else "not_applicable"),
+        [] if has_auth_evidence or not auth_required else ["authenticated_session"],
+        "medium" if auth_required else "low",
+        {
+            "auth_required": auth_required,
+            "valid_sessions": len(valid_sessions),
+            "auth_state_keys": sorted(
+                key for key in ("tokens", "valid_auth_sessions", "auth_session", "authenticated_session", "cookies", "session_cookies")
+                if state.get(key)
+            ),
+        },
+    )
+
+    applicable = [row for row in requirements if row["status"] != "not_applicable"]
+    unmet = [row for row in applicable if row["status"] != "met"]
+    return {
+        "version": "depth-requirements-v1",
+        "profile": profile_id,
+        "enforced": True,
+        "requirements": requirements,
+        "met": len(applicable) - len(unmet),
+        "unmet": len(unmet),
+        "applicable": len(applicable),
+        "blocking_requirement_ids": [row["id"] for row in unmet if row.get("severity") == "high"],
+    }
 
 
 def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
@@ -579,7 +1096,14 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
     ) if effective_expected_skills else 1.0
     missing_skill_objectives = sorted(effective_expected_skills - executed_skills)
 
-    phase_score, phase_summary, weak_phase_rows = _phase_component(phase_monitor, expected_phase_ids)
+    drained_by_phase = Counter(
+        str(item.phase_id or "")
+        for item in work_items
+        if str(item.status or "").lower() == "skipped"
+        and str(item.last_error or "") == "skipped:dependency_gate_drained_at_finalization"
+    )
+    drained_phase_ids = set(drained_by_phase)
+    phase_score, phase_summary, weak_phase_rows = _phase_component(phase_monitor, expected_phase_ids, drained_phase_ids)
 
     findings_with_evidence = [f for f in findings if _has_finding_evidence(f, artifacts_by_finding)]
     findings_with_repro = [f for f in findings if _has_reproduction(f)]
@@ -828,6 +1352,16 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
         "coverage_external_precondition_items": len(external_coverage_items),
         "externally_blocked_skills": sorted(externally_blocked_skills),
     }
+    depth_requirements = _build_aggressive_depth_requirements(
+        state=state,
+        profile=profile,
+        expected_phase_ids=expected_phase_ids,
+        work_items=work_items,
+        artifacts=artifacts,
+        valid_sessions=valid_sessions,
+        endpoints=endpoints,
+        auth_required=auth_required,
+    )
     depth_score = (
         (hypothesis_resolution * 25)
         + (auth_depth * 20)
@@ -836,6 +1370,11 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
         + (business_logic_depth * 20)
         + (skill_objective_ratio * 10)
     )
+    if depth_requirements.get("enforced") and int(depth_requirements.get("applicable") or 0) > 0:
+        depth_score = min(depth_score, _ratio(
+            int(depth_requirements.get("met") or 0),
+            int(depth_requirements.get("applicable") or 0),
+        ) * 100)
 
     components = {
         "phase_coverage": {
@@ -899,6 +1438,11 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
             "skill_objectives_executed": len(expected_skills & executed_skills),
             "skill_objectives_missing": missing_skill_objectives,
             "skill_objectives_external_blocked": sorted(externally_blocked_skills),
+            "depth_requirements_enforced": bool(depth_requirements.get("enforced")),
+            "depth_requirements_met": int(depth_requirements.get("met") or 0),
+            "depth_requirements_unmet": int(depth_requirements.get("unmet") or 0),
+            "depth_requirements_applicable": int(depth_requirements.get("applicable") or 0),
+            "depth_requirements_blocking": list(depth_requirements.get("blocking_requirement_ids") or []),
         },
         "tool_reliability": {
             "score": round(_clamp(tool_score), 1),
@@ -942,7 +1486,35 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
     total_score = round(sum((c["score"] * c["weight"]) / 100 for c in components.values()), 1)
 
     gaps: list[dict[str, Any]] = []
+    gaps.extend(_build_p08_tool_missing_gap(state=state, work_items=work_items, artifacts=artifacts))
+    for requirement in list(depth_requirements.get("requirements") or []):
+        status = str(requirement.get("status") or "")
+        if status in {"met", "not_applicable"}:
+            continue
+        missing = [str(value) for value in list(requirement.get("missing") or [])]
+        gaps.append({
+            "severity": str(requirement.get("severity") or "medium"),
+            "area": "test_depth",
+            "title": f"Profundidade agressiva incompleta: {requirement.get('id')}",
+            "detail": (
+                f"Status {status}; faltando {', '.join(missing) if missing else 'evidência objetiva'}."
+            ),
+            "action": "Registrar ou executar a etapa faltante com request/response, contexto de sessão e validação de renderização quando aplicável.",
+        })
     for row in weak_phase_rows[:8]:
+        if row.get("drained"):
+            gaps.append({
+                "severity": "high",
+                "area": "dependency_gate_drain",
+                "title": f"{row['phase_id']} nunca executou (drenada por gate de dependência)",
+                "detail": (
+                    f"{row['phase_id']} foi forçada para 'skipped' por finalize_orphaned_blocked_work_items "
+                    f"({drained_by_phase.get(row['phase_id'], 0)} item(ns)) sem executar nenhuma ferramenta. "
+                    "Não é uma fase legitimamente não aplicável — a fase upstream nunca qualificou alvos."
+                ),
+                "action": "Corrigir a conectividade/gate da fase upstream (ex.: P06) e reexecutar as fases afetadas antes de aceitar o scan como concluído.",
+            })
+            continue
         gaps.append({
             "severity": "high" if row["score"] < 35 else "medium",
             "area": "phase_coverage",
@@ -1282,6 +1854,7 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
         "preflight_summary": preflight_summary,
         "auth_precondition_summary": auth_precondition_summary,
         "business_logic_precondition_summary": business_logic_precondition_summary,
+        "depth_requirements": depth_requirements,
         "operational_sli": dict((job.state_data or {}).get("operational_sli") or {}),
         "runtime_visibility": _runtime_visibility(job, all_validations, artifacts, work_items),
         "execution_metrics": execution_metrics,
@@ -1715,6 +2288,21 @@ def run_scan_quality_gate(db: Session, job: ScanJob) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         validation_changes["execution_context_diff"] = {"error": str(exc)[:500]}
     quality = build_scan_quality(db, job)
+    depth_requirements = dict(quality.get("depth_requirements") or {})
+    if depth_requirements.get("enforced"):
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="quality-gate",
+            level="INFO",
+            message=(
+                "depth_requirements "
+                f"profile={depth_requirements.get('profile')} "
+                f"met={int(depth_requirements.get('met') or 0)}/"
+                f"{int(depth_requirements.get('applicable') or 0)} "
+                f"unmet={int(depth_requirements.get('unmet') or 0)} "
+                f"blocking={','.join(str(value) for value in list(depth_requirements.get('blocking_requirement_ids') or []))}"
+            )[:2000],
+        ))
     if rounds >= QUALITY_GATE_MAX_ROUNDS:
         decision = quality_gate_decision(quality, actions)
         gate_state.update({

@@ -343,6 +343,37 @@ class EndpointObservation(Base):
     source_artifact = relationship("EvidenceArtifact")
 
 
+class ObservedRequest(Base):
+    """A real HTTP request/response captured from actual browser traffic
+    (browser_request_harvester.py), body values included -- unlike
+    EndpointObservation (a response fingerprint) or the scrubbed
+    discovered_parameterized_requests state blob, this preserves the real
+    captured values so validators that need them (P13 IDOR/BOLA needs the
+    real object id an identity actually saw) have something to test against."""
+    __tablename__ = "observed_requests"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    scan_job_id: Mapped[int] = mapped_column(ForeignKey("scan_jobs.id"), index=True)
+    endpoint_id: Mapped[int | None] = mapped_column(ForeignKey("offensive_endpoints.id"), nullable=True, index=True)
+    identity_key: Mapped[str] = mapped_column(String(120), default="", index=True)
+    source: Mapped[str] = mapped_column(String(60), default="browser_harvester", index=True)
+    method: Mapped[str] = mapped_column(String(12), default="GET", index=True)
+    url: Mapped[str] = mapped_column(Text)
+    normalized_url: Mapped[str] = mapped_column(String(1000), index=True)
+    request_headers: Mapped[dict] = mapped_column(EncryptedJSON, default=dict)
+    request_body: Mapped[dict] = mapped_column(EncryptedJSON, default=dict)
+    body_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    request_content_type: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    status_code: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    response_content_type: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    response_excerpt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_mutating: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
+
+    scan_job = relationship("ScanJob")
+    endpoint = relationship("OffensiveEndpoint")
+
+
 class OffensiveParameter(Base):
     __tablename__ = "offensive_parameters"
     __table_args__ = (

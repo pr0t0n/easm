@@ -253,7 +253,13 @@ def default_phase_contracts(skills_root: Path | str | None = None) -> dict[str, 
          ["ffuf", "gobuster", "nikto", "nmap-vuln", "wpscan",
           "nuclei-rce",           # HackerOne: injection class (135 reports) — RCE/command injection
           "nuclei-auth",          # HackerOne: 119 auth bypass / default credentials reports
-          "nuclei-deserialization"]),  # HackerOne: 13 insecure deserialization reports
+          "nuclei-deserialization",  # HackerOne: 13 insecure deserialization reports
+          # nmap-db-creds: read-only default/empty-credential probe (mysql-empty-password,
+          # mongodb-databases, redis-info, ms-sql-empty-password, pgsql-brute) against
+          # sensitive DB ports. NSE scripts self-gate on port state (no-op if closed), so
+          # it's safe to include broadly; gated on active_exploit_authorized in
+          # validate_skill_applicability (scan_work_queue.py) since it attempts real logins.
+          "nmap-db-creds"]),
         ("P10", "Injection Testing", "Test injection hypotheses with controls",
          ["skill.sqli_testing"], ["wapiti"],
          ["sqlmap", "dalfox", "nikto",
@@ -266,8 +272,9 @@ def default_phase_contracts(skills_root: Path | str | None = None) -> dict[str, 
          ["interactsh-client", "ffuf", "wapiti",
           "nuclei-ssrf"]),  # HackerOne: 68 SSRF reports — blind SSRF, EC2 metadata, webhook
         ("P12", "XSS Testing", "Validate reflected or stored XSS safely",
-         ["skill.stored_xss_testing"], ["dalfox"],
+         ["skill.vuln.xss", "skill.stored_xss_testing"], ["dalfox"],
          ["wapiti", "nikto",
+          "curl",
           "nuclei-xss",   # HackerOne: #1 class (652 reports) — reflected, stored, DOM, blind
           "nuclei-csrf"]), # HackerOne: 110 CSRF reports — login CSRF, OAuth CSRF
         ("P13", "Access Control & Business Logic", "Validate object/authorization boundaries and business-logic flows",
@@ -368,6 +375,11 @@ PHASE_ORDER = list(PHASE_CONTRACTS)
 # Ex.: bl-test cobre business logic / BOLA / mass-assignment, mas NÃO prova CSRF
 # nem IDOR genérico. Uma tool sem binding aqui é phase-global (entra em toda skill).
 PHASE_TOOL_BINDINGS: dict[str, dict[str, list[str]]] = {
+    "P12": {
+        "dalfox": ["skill.vuln.xss"],
+        "curl": ["skill.stored_xss_testing"],
+        "nuclei-xss": ["skill.vuln.xss"],
+    },
     "P13": {
         "bl-test": [
             "skill.vuln.business_logic",
@@ -569,6 +581,7 @@ def default_tool_catalog() -> list[ToolCatalogEntry]:
         # Vulnerability scanning
         entry("nikto", "nikto_basic", ["web_validation", "vuln_scanning"], "generic_json_parser", default_timeout=360),
         entry("wpscan", "wpscan_basic", ["cms_audit", "vuln_scanning"], "generic_json_parser", default_timeout=900),
+        entry("nmap-db-creds", "nmap_db_credential_probe", ["database_credential_probe", "nse_scripts"], "nmap_parser"),
         # Credential / brute-force
         entry("crackmapexec", "crackmapexec_smb", ["smb_enumeration", "auth_validation"], "generic_json_parser"),
         entry("medusa", "medusa_smb", ["auth_validation", "credential_test"], "generic_json_parser"),
@@ -1469,6 +1482,9 @@ class PhaseValidator:
             if phase_contract["phase_id"] in _PARTIAL_OK:
                 return self._decision(phase_contract["phase_id"], "partial", True, "no_evidence_partial_ok", [])
             return self._decision(phase_contract["phase_id"], "blocked", False, "missing_evidence", [])
+        stored_xss_decision = self._stored_xss_coverage_decision(phase_contract, skill_plan, mcp_results, evidence, offensive_state, skill_coverage)
+        if stored_xss_decision:
+            return stored_xss_decision
         min_strength = phase_contract["exit_criteria"].get("minimum_evidence_strength", "medium")
         strongest = max((EVIDENCE_STRENGTHS.index(ev.get("evidence_strength", "none")) for ev in evidence), default=0)
         if strongest < EVIDENCE_STRENGTHS.index(min_strength):
@@ -1508,6 +1524,79 @@ class PhaseValidator:
         if blocked or partial:
             return cls._decision(phase_contract["phase_id"], "partial", True, "partial_skill_coverage", blocked + partial)
         return None
+
+    @classmethod
+    def _stored_xss_coverage_decision(
+        cls,
+        phase_contract: dict[str, Any],
+        skill_plan: dict[str, Any],
+        mcp_results: list[dict[str, Any]],
+        evidence: list[dict[str, Any]],
+        offensive_state: dict[str, Any],
+        skill_coverage: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if phase_contract.get("phase_id") != "P12":
+            return None
+        planned = set(phase_contract.get("required_skills") or [])
+        planned.update(str(s) for s in (skill_coverage or {}).keys())
+        planned.update(str(s) for s in skill_plan.get("selected_skills") or [])
+        if "skill.stored_xss_testing" not in planned:
+            return None
+
+        state = dict(offensive_state or {})
+        mutating_requests = [
+            r for r in state.get("discovered_parameterized_requests") or []
+            if isinstance(r, dict)
+            and str(r.get("method") or "").upper() in {"POST", "PUT", "PATCH"}
+            and (r.get("body_parameters") or str(r.get("body_template") or "").strip())
+        ]
+        mutating_surface = bool(
+            mutating_requests
+            or state.get("post_endpoints")
+            or state.get("state_changing_endpoints")
+            or state.get("fuzz_post_templates")
+        )
+        auth_surface = bool(
+            state.get("tokens")
+            or state.get("sessions")
+            or state.get("auth_tokens")
+            or state.get("jwt_tokens")
+            or state.get("valid_auth_sessions")
+        )
+
+        result_text = json.dumps(mcp_results, ensure_ascii=False, default=str).lower()
+        evidence_text = json.dumps(evidence, ensure_ascii=False, default=str).lower()
+        body_tool_ran = any(
+            str(r.get("status") or "") == "success"
+            and (
+                str(r.get("profile") or "") in {"dalfox_body", "curl_probe"}
+                or str(r.get("tool_name") or "") in {"curl", "manual_http_probe"}
+            )
+            for r in mcp_results
+        )
+        persistence_terms = {
+            "request_response_pair",
+            "payload_used",
+            "rendered_context",
+            "submission_request",
+            "retrieval_request",
+            "negative_control",
+            "scan_fuzz_post_data",
+            "post ",
+            " put ",
+            " patch ",
+        }
+        stored_evidence = body_tool_ran and any(term in result_text or term in evidence_text for term in persistence_terms)
+        if stored_evidence:
+            return None
+
+        missing = []
+        if not auth_surface:
+            missing.append("authenticated_session")
+        if not mutating_surface:
+            missing.append("state_changing_body_surface")
+        missing.append("stored_xss_request_response_render_validation")
+        return cls._decision(phase_contract["phase_id"], "partial", True, "stored_xss_flow_not_covered", missing)
 
     @staticmethod
     def _decision(phase_id: str, status: str, can_advance: bool, reason: str, missing: list[str]) -> dict[str, Any]:

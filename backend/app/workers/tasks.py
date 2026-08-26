@@ -578,7 +578,10 @@ def _reconcile_postprocessor_ledger_from_logs(db: Session, scan_id: int) -> int:
         return 0
     state = dict(job.state_data or {})
     ledger = dict(state.get("postprocessor_ledger") or {})
-    pattern = _re.compile(r"postprocessor_(finished|failed) kind=([^ ]+) item=([^ ]+) target=(.*?)(?: error=(.*))?$")
+    pattern = _re.compile(
+        r"postprocessor_(finished|failed) kind=([^ ]+) item=([^ ]+) target=(.*?)(?: error=(.*))?$",
+        _re.DOTALL,
+    )
     updates = 0
     logs = (
         db.query(ScanLog)
@@ -4320,8 +4323,8 @@ def run_scan_postprocessor(
         db.commit()
         return {"scan_id": scan_id, "item_id": item_id, "kind": kind, "result": result}
     except Exception as exc:  # noqa: BLE001
-        db.rollback()
         try:
+            db.rollback()
             _set_scan_postprocessor_status(
                 db, scan_id, kind, target, "failed", item_id=item_id, error=str(exc)
             )
@@ -4332,8 +4335,44 @@ def run_scan_postprocessor(
                 message=f"postprocessor_failed kind={kind} item={item_id} target={target} error={exc!s}"[:2000],
             ))
             db.commit()
-        except Exception:
-            db.rollback()
+        except Exception as write_exc:  # noqa: BLE001
+            # The original session may be unusable (e.g. the DB connection
+            # itself dropped mid-flight) -- a bare swallow here left the
+            # ledger permanently stuck "pending" with no failure recorded
+            # anywhere, since the log-based self-heal in
+            # _reconcile_postprocessor_ledger_from_logs has nothing to read.
+            # Retry the status write on a fresh session so the ledger always
+            # gets a terminal entry, and always log the write failure itself.
+            logger.warning(
+                "postprocessor_failure_write_failed kind=%s item=%s target=%s "
+                "scan_id=%s original_error=%s write_error=%s",
+                kind, item_id, target, scan_id, exc, write_exc,
+            )
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            fresh_db = SessionLocal()
+            try:
+                _set_scan_postprocessor_status(
+                    fresh_db, scan_id, kind, target, "failed", item_id=item_id, error=str(exc)
+                )
+                fresh_db.add(ScanLog(
+                    scan_job_id=int(scan_id),
+                    source="postprocessor",
+                    level="WARNING",
+                    message=f"postprocessor_failed kind={kind} item={item_id} target={target} error={exc!s}"[:2000],
+                ))
+                fresh_db.commit()
+            except Exception as retry_exc:  # noqa: BLE001
+                fresh_db.rollback()
+                logger.error(
+                    "postprocessor_failure_write_retry_failed kind=%s item=%s target=%s "
+                    "scan_id=%s error=%s",
+                    kind, item_id, target, scan_id, retry_exc,
+                )
+            finally:
+                fresh_db.close()
         return {"scan_id": scan_id, "item_id": item_id, "kind": kind, "error": str(exc)[:500]}
     finally:
         db.close()
@@ -4941,6 +4980,48 @@ def dispatch_scan_work_items(
                     "scan_complete: scan_id=%d total_items=%d terminal=%d — marking completed",
                     scan_id, _total, _done,
                 )
+                # Safety net: run_app_pentest_for_scan (weak-credential probe,
+                # SQLi-auth-bypass, business logic, IDOR, ...) is normally triggered
+                # per-work-item-completion, gated on a P09/P10/P16/P19 item reaching
+                # status=completed. This is a SECOND, duplicate finalize/quality-gate
+                # call site (see the matching block in
+                # offensive_operator_runner.py's campaign finalize) -- scan #51
+                # confirmed live that THIS path, not that one, runs when the active
+                # dispatch loop finalizes here, so the same safety net is needed in
+                # both places or an authorized aggressive-mode scan can reach the
+                # quality gate having never attempted active exploitation at all.
+                try:
+                    _state_ae = dict(job.state_data or {})
+                    if _state_ae.get("active_exploit_authorized"):
+                        from app.services.execution_context_service import (
+                            complete_processor_checkpoint,
+                            processor_should_run,
+                        )
+
+                        _run_ae, _checkpoint_ae, _ = processor_should_run(
+                            db, job, execution_context="external",
+                            processor_name="active-app-pentest", processor_version="v2-context-auth",
+                        )
+                        if _run_ae:
+                            from app.services.app_pentest import run_app_pentest_for_scan
+
+                            _app_result = run_app_pentest_for_scan(db, job, execution_context="external")
+                            complete_processor_checkpoint(db, _checkpoint_ae, _app_result)
+                            db.add(ScanLog(
+                                scan_job_id=scan_id, source="app-pentest", level="INFO",
+                                message=(
+                                    "active_app_pentest_finalization_safety_net_ran "
+                                    f"findings_created={_app_result.get('findings_created')}"
+                                )[:2000],
+                            ))
+                            db.commit()
+                except Exception as exc:  # noqa: BLE001
+                    db.add(ScanLog(
+                        scan_job_id=scan_id, source="app-pentest", level="WARNING",
+                        message=f"active_app_pentest_finalization_safety_net_failed error={exc!s}"[:2000],
+                    ))
+                    db.commit()
+
                 try:
                     from app.services.scan_execution_metrics import reconcile_tool_run_ledger
                     from app.services.scan_quality import (
@@ -5060,6 +5141,7 @@ def dispatch_scan_work_items(
                     job.mission_progress = 99
                     job.current_step = "P21 Quality Gate · bloqueado por gaps de qualidade (retries automáticos esgotados)"
                     job.last_error = None
+                    job.next_retry_at = None
                     db.add(ScanLog(
                         scan_job_id=scan_id,
                         source="quality-gate",
@@ -5084,6 +5166,8 @@ def dispatch_scan_work_items(
                 job.status = str(_quality_gate.get("completion_status") or "completed_with_gaps")
                 job.mission_progress = 100
                 job.current_step = "P22 Campaign Report"
+                job.last_error = None
+                job.next_retry_at = None
                 db.add(ScanLog(
                     scan_job_id=scan_id,
                     source="work-queue",
@@ -5907,6 +5991,29 @@ def execute_scan_work_item(item_id: int):
         db.close()
 
 
+def _resolve_linkfinder_stdout_to_absolute_urls(stdout: str, base_target: str) -> str:
+    """linkfinder emits bare paths pulled out of JS source (e.g.
+    "/rest/products/search"), not absolute URLs like katana/gospider/
+    hakrawler -- extract_endpoints_from_crawl only keeps lines starting with
+    http(s), so a relative path is silently dropped unless resolved against
+    the crawled target first."""
+    from urllib.parse import urljoin
+
+    resolved_lines = []
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("http://") or line.startswith("https://"):
+            resolved_lines.append(line)
+            continue
+        try:
+            resolved_lines.append(urljoin(base_target, line))
+        except Exception:
+            continue
+    return "\n".join(resolved_lines)
+
+
 @celery.task(name="poll_scan_work_item", queue=SCAN_POLL_QUEUE, ignore_result=True)
 def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
     """Poll an async MCP/Kali job and persist the terminal result."""
@@ -6605,7 +6712,7 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
 
         # ── JS endpoint extraction + high-value probe seeding ───────────────
         if item.status == "completed" and job and item.tool_name in (
-            "katana", "katana-js", "gospider", "hakrawler",
+            "katana", "katana-js", "gospider", "hakrawler", "linkfinder",
         ):
             try:
                 from app.services.js_endpoint_extractor import process_crawl_result as _crawl_proc
@@ -6613,7 +6720,17 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
                 _crawl_base = item.target
                 if _is_work_item_batch_target(item.target):
                     _crawl_base = str((_crawl_meta.get("batch_targets") or [job.target_query])[0])
-                _crawl_summary = _crawl_proc(db, job.id, _crawl_base, item.tool_name, dict(item.result or {}))
+                _crawl_result_payload = dict(item.result or {})
+                if item.tool_name == "linkfinder":
+                    _raw_stdout = str(
+                        _crawl_result_payload.get("stdout_full")
+                        or _crawl_result_payload.get("stdout_preview")
+                        or ""
+                    )
+                    _crawl_result_payload["stdout_full"] = _resolve_linkfinder_stdout_to_absolute_urls(
+                        _raw_stdout, _crawl_base
+                    )
+                _crawl_summary = _crawl_proc(db, job.id, _crawl_base, item.tool_name, _crawl_result_payload)
                 if _crawl_summary.get("probes_seeded", 0) > 0 or _crawl_summary.get("high_value_found", 0) > 0:
                     import logging as _jlog
                     _jlog.getLogger(__name__).info(

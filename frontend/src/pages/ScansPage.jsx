@@ -185,13 +185,15 @@ function MiniPipeline({ faseStates }) {
 }
 
 // ─── Card de missão ativa ─────────────────────────────────────────────────────
-function ActiveScanCard({ scan, onStop, onPause, onResume, onContinue, onDelete, onReport, onClick }) {
+function ActiveScanCard({ scan, onStop, onPause, onResume, onContinue, onDelete, onReport, onFinalize, onClick }) {
   const pct        = scan.mission_progress ?? scan.progress ?? 0;
   const faseStates = getFaseStates(scan);
   const perfil     = getPerfil(scan);
   const curIdx     = faseStates.lastIndexOf("running") >= 0 ? faseStates.lastIndexOf("running") : faseStates.filter(s => s==="done").length;
   const faseLabel  = FASES_IDS[curIdx] ? `${FASES_IDS[curIdx]} · ${FASE_NOMES[FASES_IDS[curIdx]]}` : "—";
   const isBlocked  = scan.status === "blocked";
+  const isWaitingAuth = scan.status === "waiting_for_auth";
+  const isStuck    = isBlocked || isWaitingAuth;
   const isPaused   = scan.status === "paused";
   const isRunning  = scan.status === "running" || scan.status === "queued" || scan.status === "retrying";
   const isStopped  = scan.status === "stopped" || scan.status === "failed";
@@ -266,9 +268,11 @@ function ActiveScanCard({ scan, onStop, onPause, onResume, onContinue, onDelete,
 
       {/* controles */}
       <div style={{ display: "flex", gap: 6 }} onClick={(e) => e.stopPropagation()}>
-        {isBlocked ? (
+        {isStuck ? (
           <>
-            <button className="sk-btn-ghost" style={{ flex: 1, padding: "7px 0", fontSize: 12, color: "var(--sev-critical-text)", borderColor: "var(--sev-critical-border)" }}
+            <button className="sk-btn-ghost" style={{ flex: 1, padding: "7px 0", fontSize: 12 }}
+              onClick={() => onFinalize(scan.id)}>✓ Finalizar</button>
+            <button className="sk-btn-ghost" style={{ padding: "7px 14px", fontSize: 12, color: "var(--sev-critical-text)", borderColor: "var(--sev-critical-border)" }}
               onClick={() => onStop(scan.id)}>■ Cancelar</button>
           </>
         ) : isPaused ? (
@@ -1314,6 +1318,11 @@ export default function ScansPage() {
     loadScans();
   };
 
+  const finalizeScan = async (id) => {
+    await client.post(`/api/scans/${id}/finalize`);
+    loadScans();
+  };
+
   const pauseScan = async (id) => {
     await client.post(`/api/scans/${id}/pause`);
     loadScans();
@@ -1388,6 +1397,7 @@ export default function ScansPage() {
                 key={s.id} scan={s}
                 onStop={stopScan} onPause={pauseScan} onResume={resumeScan}
                 onContinue={resumeScan} onDelete={removeScan} onReport={removeReport}
+                onFinalize={finalizeScan}
                 onClick={() => setSelected(selected?.id === s.id ? null : s)}
               />
             ))}

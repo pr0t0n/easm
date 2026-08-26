@@ -183,7 +183,12 @@ def _extract_scan_id_from_task(task: dict) -> int | None:
 SCAN_ACTIVE_STATUSES = {"queued", "running", "retrying"}
 SCAN_PAUSABLE_STATUSES = SCAN_ACTIVE_STATUSES
 SCAN_RESUMABLE_STATUSES = {"paused", "stopped", "failed"}
-SCAN_STOPPABLE_STATUSES = SCAN_ACTIVE_STATUSES | {"paused"}
+# "blocked" (quality-gate retries exhausted) and "waiting_for_auth" (stuck on a
+# credential capture) are dead ends with no scheduled task left to look at
+# them again -- an operator must be able to cancel these the same as an
+# active scan, not just ones still queued/running/paused.
+SCAN_STOPPABLE_STATUSES = SCAN_ACTIVE_STATUSES | {"paused", "blocked", "waiting_for_auth"}
+SCAN_FINALIZABLE_STATUSES = {"blocked", "waiting_for_auth"}
 SCAN_PAUSE_REQUEUE_ITEM_STATUSES = {"dispatched", "running", "submitted", "retry"}
 
 
@@ -3593,6 +3598,23 @@ def stop_scan(scan_id: int, db: Session = Depends(get_db), current_user: User = 
     job.current_step = "Scan interrompido manualmente"
     job.next_retry_at = None
     job.last_error = "Interrompido manualmente por administrador"
+    # A cancelled scan is an abandoned test, not a validated result -- any
+    # findings it produced never went through P21 evidence review and would
+    # otherwise sit in the same table as confirmed/reviewed findings from
+    # completed scans, indistinguishable to anyone reading the findings list.
+    finding_ids = [
+        row[0] for row in db.query(Finding.id).filter(Finding.scan_job_id == scan_id).all()
+    ]
+    if finding_ids:
+        db.query(Vulnerability).filter(Vulnerability.finding_id.in_(finding_ids)).update(
+            {Vulnerability.finding_id: None},
+            synchronize_session=False,
+        )
+    findings_deleted = (
+        db.query(Finding)
+        .filter(Finding.scan_job_id == scan_id)
+        .delete(synchronize_session=False)
+    )
     db.add(
         ScanLog(
             scan_job_id=scan_id,
@@ -3600,7 +3622,8 @@ def stop_scan(scan_id: int, db: Session = Depends(get_db), current_user: User = 
             level="WARNING",
             message=(
                 f"Scan interrompido manualmente "
-                f"(task_ids={task_ids or ['nao_encontrada']}, kali_runner_cancel={runner_cancel})"
+                f"(task_ids={task_ids or ['nao_encontrada']}, kali_runner_cancel={runner_cancel}, "
+                f"findings_removidos={findings_deleted})"
             ),
         )
     )
@@ -3609,10 +3632,89 @@ def stop_scan(scan_id: int, db: Session = Depends(get_db), current_user: User = 
         event_type="scan.stopped",
         message=f"Scan {scan_id} interrompido manualmente",
         actor_user_id=current_user.id,
-        metadata={"scan_id": scan_id, "task_ids": task_ids, "kali_runner_cancel": runner_cancel},
+        metadata={
+            "scan_id": scan_id,
+            "task_ids": task_ids,
+            "kali_runner_cancel": runner_cancel,
+            "findings_deleted": findings_deleted,
+        },
     )
     db.commit()
-    return {"ok": True, "scan_id": scan_id, "revoked_task_ids": task_ids, "kali_runner_cancel": runner_cancel}
+    return {
+        "ok": True,
+        "scan_id": scan_id,
+        "revoked_task_ids": task_ids,
+        "kali_runner_cancel": runner_cancel,
+        "findings_deleted": findings_deleted,
+    }
+
+
+@router.post("/scans/{scan_id}/finalize")
+def finalize_scan(scan_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
+    """Accept a stuck scan's results as-is instead of cancelling it.
+
+    Unlike /stop, this keeps every finding already collected -- it exists for
+    the "blocked"/"waiting_for_auth" dead ends where a scan has no scheduled
+    task left to ever look at it again, and the operator has decided the
+    partial coverage/quality already gathered is good enough to close the
+    test on rather than wait for (or force) full completion.
+    """
+    job = _authorized_scan_query(db, current_user).filter(ScanJob.id == scan_id).first()
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scan nao encontrado")
+    if job.status not in SCAN_FINALIZABLE_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Somente scans bloqueados ou aguardando credencial podem ser finalizados manualmente",
+        )
+
+    task_ids = _active_scan_task_ids(scan_id, db)
+    runner_cancel = cancel_scan_jobs_in_kali_runner(scan_id, reason="scan_finalized_by_operator")
+    for task_id in task_ids:
+        try:
+            celery.control.revoke(task_id, terminate=True, signal="SIGTERM")
+        except Exception:
+            continue
+    _clear_scan_worker_heartbeat(db, scan_id)
+
+    previous_status = job.status
+    state = dict(job.state_data or {})
+    state["execution_epoch"] = int(state.get("execution_epoch") or 0) + 1
+    state["completion_source"] = "operator_finalized"
+    state["quality_gate_active"] = False
+    state["quality_gate_blocked"] = False
+    job.state_data = state
+    job.status = "completed_with_gaps"
+    job.mission_progress = 100
+    job.current_step = "Finalizado manualmente pelo operador (qualidade abaixo do limiar aceita)"
+    job.next_retry_at = None
+    job.last_error = None
+    db.add(
+        ScanLog(
+            scan_job_id=scan_id,
+            source="manager",
+            level="WARNING",
+            message=(
+                f"Scan finalizado manualmente pelo operador a partir de status={previous_status}; "
+                f"achados preservados, nenhuma execucao adicional sera agendada "
+                f"(task_ids={task_ids or ['nao_encontrada']}, kali_runner_cancel={runner_cancel})"
+            ),
+        )
+    )
+    log_audit(
+        db,
+        event_type="scan.finalized_by_operator",
+        message=f"Scan {scan_id} finalizado manualmente a partir de status={previous_status}",
+        actor_user_id=current_user.id,
+        metadata={
+            "scan_id": scan_id,
+            "previous_status": previous_status,
+            "task_ids": task_ids,
+            "kali_runner_cancel": runner_cancel,
+        },
+    )
+    db.commit()
+    return {"ok": True, "scan_id": scan_id, "status": job.status, "previous_status": previous_status}
 
 
 @router.post("/scans/{scan_id}/pause")

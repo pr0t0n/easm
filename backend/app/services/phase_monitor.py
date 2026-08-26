@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.graph.mission import PENTEST_PHASES, MISSION_ITEMS, PHASE_CONTRACTS
 from app.models.models import AgentTraceEvent, ScanJob, ExecutedToolRun, Finding, ScanWorkItem
 from app.services.capability_runtime import CAPABILITY_CONTRACT, infer_capability_ledger
+from app.services.scan_work_queue import PHASE_GATE
 
 try:
     from app.services.offensive_operator_core import (
@@ -763,10 +764,36 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
         _wq_pct = int(_wq_terminal / _wq_total * 100) if _wq_total > 0 else None
 
         scan_terminal = str(scan.status or "").lower() not in {"queued", "running", "retrying", "paused"}
-        if _wq_total == 0 and not ledger_entry and not normalized_ledger_status and scan_terminal:
+        # Whether THIS phase's seeding step has actually had a chance to run,
+        # independent of the scan's OWN status -- using scan_terminal alone
+        # here is circular when the caller is the P21 quality gate deciding
+        # whether to keep the scan non-terminal (tasks.py's retry loop holds
+        # job.status="running" across every retry round). Confirmed live:
+        # scan #13's P14 has zero ScanWorkItem rows because every P14 tool's
+        # evidence contract requires auth data absent on an unauthenticated
+        # scan -- a legitimate "skipped", proven by re-scoring the same data
+        # once the scan went terminal, where it correctly resolved to
+        # "skipped" with no gap. While still "running", scan_terminal=False
+        # made this default to "queued" every round, manufacturing a
+        # permanent phantom high-severity gap that blocked the scan forever.
+        # Fix: a phase whose own PHASE_GATE dependency has already reached a
+        # terminal state has necessarily already had its seeding attempted
+        # (enqueue_scan_work_items runs once its gate phase is terminal), so
+        # zero items at that point is real, not "not yet reached" -- check
+        # that independently of the scan's own status. Phases with no gate
+        # (root phases) keep the original scan_terminal-only behavior.
+        _gate_phase_id = PHASE_GATE.get(pid)
+        _gate_satisfied = False
+        if _gate_phase_id is not None:
+            _gate_wq = wq_by_phase.get(_gate_phase_id) or {}
+            _gate_total = int(_gate_wq.get("total", 0) or 0)
+            _gate_terminal = int(_gate_wq.get("done", 0) or 0) + int(_gate_wq.get("skipped", 0) or 0) + int(_gate_wq.get("failed", 0) or 0)
+            _gate_satisfied = _gate_total > 0 and _gate_terminal >= _gate_total
+        seeding_attempted = scan_terminal or _gate_satisfied
+        if _wq_total == 0 and not ledger_entry and not normalized_ledger_status and seeding_attempted:
             status_label = "skipped"
         elif not effective_node_visited and _wq_total == 0:
-            status_label = "skipped" if scan_terminal else "queued"
+            status_label = "skipped" if seeding_attempted else "queued"
         else:
             status_label = _normalized_phase_status(_wq, normalized_ledger_status)
 

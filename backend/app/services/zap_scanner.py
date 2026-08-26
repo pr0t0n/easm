@@ -212,28 +212,23 @@ def _wait_for_active_scan(scan_id: str, max_wait: int = _ACTIVE_MAX_WAIT) -> Non
 
 
 def _get_alerts(target: str) -> list[dict]:
-    """Obtém todos os alertas ZAP para o target."""
+    """Obtém todos os alertas ZAP para o target.
+
+    alertsByRisk's actual response shape is
+    {"alertsByRisk": [{risk_name: {alert_name: [instance, ...]}}, ...]} —
+    triple-nested, and instances lack desc/solution/reference/cweid/etc.
+    A flat-dict read of data.items() here silently absorbed the single
+    "alertsByRisk" wrapper key as if it were itself a real alert, so every
+    ZAP run "succeeded" with zero usable findings regardless of what ZAP
+    actually found. /JSON/core/view/alerts/ returns properly flat, fully
+    detailed alert dicts, so it is the primary path, not a fallback.
+    """
     try:
-        data = _zap("/JSON/alert/view/alertsByRisk/", {
-            "url": target,
-            "recurse": "true",
-        })
-        # alertsByRisk returns {High: [...], Medium: [...], Low: [...], Informational: [...]}
-        alerts = []
-        for level_name, items in (data or {}).items():
-            if isinstance(items, list):
-                for item in items:
-                    item["_risk_name"] = level_name.lower()
-                    alerts.append(item)
-        return alerts
-    except Exception:
-        # Fallback: get all alerts
-        try:
-            data = _zap("/JSON/core/view/alerts/", {"baseurl": target})
-            return list(data.get("alerts") or [])
-        except Exception as exc:
-            logger.debug("ZAP get alerts error: %s", exc)
-            return []
+        data = _zap("/JSON/core/view/alerts/", {"baseurl": target})
+        return list(data.get("alerts") or [])
+    except Exception as exc:
+        logger.debug("ZAP get alerts error: %s", exc)
+        return []
 
 
 def _alerts_to_findings(alerts: list[dict], target: str) -> list[dict]:

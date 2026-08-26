@@ -1,0 +1,126 @@
+{
+  "exported_at": "2026-08-24T21:45:57.090867",
+  "scan_id": 73,
+  "target": "http://192.168.65.254:3001",
+  "status": "running",
+  "score": 37.0,
+  "grade": "F",
+  "phase_coverage": 95.0,
+  "test_depth": 0.0,
+  "validation_depth": 0.0,
+  "depth_requirements_met": 0,
+  "depth_requirements_applicable": 12,
+  "endpoints_persisted": 2,
+  "observed_requests": 2,
+  "valid_auth_sessions": 0,
+  "identities": 0,
+  "body_requests_by_phase": {},
+  "findings_by_severity": {
+    "medium": 18,
+    "low": 7,
+    "info": 45,
+    "high": 1
+  },
+  "gaps": [
+    {
+      "severity": "high",
+      "area": "test_depth",
+      "title": "Profundidade agressiva incompleta: p08_client_side_route_and_api_discovery",
+      "detail": "Status missing; faltando javascript_route_or_api_surface, completed_js_route_api_analysis.",
+      "action": "Registrar ou executar a etapa faltante com request/response, contexto de sess\u00e3o e valida\u00e7\u00e3o de renderiza\u00e7\u00e3o quando aplic\u00e1vel."
+    },
+    {
+      "severity": "high",
+      "area": "test_depth",
+      "title": "Profundidade agressiva incompleta: p10_injection_request_response_controls",
+      "detail": "Status missing; faltando completed_injection_validator.",
+      "action": "Registrar ou executar a etapa faltante com request/response, contexto de sess\u00e3o e valida\u00e7\u00e3o de renderiza\u00e7\u00e3o quando aplic\u00e1vel."
+    },
+    {
+      "severity": "high",
+      "area": "test_depth",
+      "title": "Profundidade agressiva incompleta: p12_stored_xss_mutating_body_surface",
+      "detail": "Status missing; faltando state_changing_body_surface.",
+      "action": "Registrar ou executar a etapa faltante com request/response, contexto de sess\u00e3o e valida\u00e7\u00e3o de renderiza\u00e7\u00e3o quando aplic\u00e1vel."
+    },
+    {
+      "severity": "high",
+      "area": "test_depth",
+      "title": "Profundidade agressiva incompleta: p12_stored_xss_request_response_render_flow",
+      "detail": "Status blocked_precondition; faltando state_changing_body_surface, stored_xss_body_request_execution, stored_xss_request_response_render_validation.",
+      "action": "Registrar ou executar a etapa faltante com request/response, contexto de sess\u00e3o e valida\u00e7\u00e3o de renderiza\u00e7\u00e3o quando aplic\u00e1vel."
+    },
+    {
+      "severity": "high",
+      "area": "test_depth",
+      "title": "Profundidade agressiva incompleta: p13_access_control_business_logic_matrix",
+      "detail": "Status missing; faltando object_reference_or_business_action_surface, completed_access_control_business_logic_validator.",
+      "action": "Registrar ou executar a etapa faltante com request/response, contexto de sess\u00e3o e valida\u00e7\u00e3o de renderiza\u00e7\u00e3o quando aplic\u00e1vel."
+    },
+    {
+      "severity": "high",
+      "area": "test_depth",
+      "title": "Profundidade agressiva incompleta: p14_auth_session_jwt_boundary",
+      "detail": "Status missing; faltando auth_or_token_surface, completed_auth_boundary_validator.",
+      "action": "Registrar ou executar a etapa faltante com request/response, contexto de sess\u00e3o e valida\u00e7\u00e3o de renderiza\u00e7\u00e3o quando aplic\u00e1vel."
+    },
+    {
+      "severity": "high",
+      "area": "test_depth",
+      "title": "Profundidade agressiva incompleta: p15_file_disclosure_upload_lfi_surface",
+      "detail": "Status missing; faltando file_upload_backup_or_path_surface, completed_file_disclosure_upload_validator.",
+      "action": "Registrar ou executar a etapa faltante com request/response, contexto de sess\u00e3o e valida\u00e7\u00e3o de renderiza\u00e7\u00e3o quando aplic\u00e1vel."
+    },
+    {
+      "severity": "high",
+      "area": "test_depth",
+      "title": "Profundidade agressiva incompleta: p16_api_schema_parameter_hpp_surface",
+      "detail": "Status missing; faltando completed_api_parameter_validator.",
+      "action": "Registrar ou executar a etapa faltante com request/response, contexto de sess\u00e3o e valida\u00e7\u00e3o de renderiza\u00e7\u00e3o quando aplic\u00e1vel."
+    },
+    {
+      "severity": "high",
+      "area": "test_depth",
+      "title": "Profundidade agressiva incompleta: p19_post_auth_state_change_controls",
+      "detail": "Status missing; faltando state_change_object_or_transaction_surface, completed_post_auth_control_validator.",
+      "action": "Registrar ou executar a etapa faltante com request/response, contexto de sess\u00e3o e valida\u00e7\u00e3o de renderiza\u00e7\u00e3o quando aplic\u00e1vel."
+    },
+    {
+      "severity": "high",
+      "area": "phase_coverage",
+      "title": "P01 com cobertura fraca",
+      "detail": "Status queued e score 0%.",
+      "action": "Reexecutar a fase ou corrigir ferramentas/gates pendentes."
+    }
+  ],
+  "blockers_by_phase": {
+    "P08": [
+      "test_depth: Status missing; faltando javascript_route_or_api_surface, completed_js_route_api_analysis."
+    ],
+    "P10": [
+      "test_depth: Status missing; faltando completed_injection_validator."
+    ],
+    "P12": [
+      "test_depth: Status missing; faltando state_changing_body_surface.",
+      "test_depth: Status blocked_precondition; faltando state_changing_body_surface, stored_xss_body_request_execution, stored_xss_request_response_render_validation."
+    ],
+    "P13": [
+      "test_depth: Status missing; faltando object_reference_or_business_action_surface, completed_access_control_business_logic_validator."
+    ],
+    "P14": [
+      "test_depth: Status missing; faltando auth_or_token_surface, completed_auth_boundary_validator."
+    ],
+    "P15": [
+      "test_depth: Status missing; faltando file_upload_backup_or_path_surface, completed_file_disclosure_upload_validator."
+    ],
+    "P16": [
+      "test_depth: Status missing; faltando completed_api_parameter_validator."
+    ],
+    "P19": [
+      "test_depth: Status missing; faltando state_change_object_or_transaction_surface, completed_post_auth_control_validator."
+    ]
+  },
+  "challenges_solved": 7,
+  "challenges_total": 186,
+  "label": "initial_baseline_scan_73"
+}

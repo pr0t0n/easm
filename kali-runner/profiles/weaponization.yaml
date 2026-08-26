@@ -51,6 +51,17 @@ nmap_vuln_scripts_batch:
   timeout: 1200
   parser: raw
 
+nmap_db_credential_probe:
+  tool: nmap-db-creds
+  category: vuln
+  phase: WEAPONIZATION_SIMULATION
+  description: "Read-only default/empty-credential probe against exposed DB ports (mysql/postgres/mongo/redis/mssql)."
+  cmd: ["nmap", "-sV", "--script",
+        "mysql-empty-password,mongodb-databases,redis-info,ms-sql-empty-password,pgsql-brute",
+        "-p", "3306,5432,27017,6379,1433", "-Pn", "-T4", "--max-retries", "2", "{host}"]
+  timeout: 300
+  parser: raw
+
 nmap_http_enum:
   tool: nmap-http-enum
   category: vuln

@@ -441,6 +441,82 @@ def _extract_shodan_kali_findings(
     return findings
 
 
+_DB_CRED_PORT_RE = re.compile(r"^(\d+)/tcp\s+open\s+(\S+)")
+_DB_CRED_SCRIPT_START_RE = re.compile(r"^\|[_ ]\s*([a-z0-9_-]+):\s*$")
+_DB_CRED_MARKERS: dict[str, tuple[re.Pattern, str]] = {
+    "mysql-empty-password": (re.compile(r"(?i)empty password"), "Credencial vazia aceita no MySQL"),
+    "ms-sql-empty-password": (re.compile(r"(?i)empty password|credentials found"), "Credencial vazia/padrão aceita no MSSQL"),
+    "mongodb-databases": (re.compile(r"(?i)databases\s*=|ok\s*=\s*1"), "MongoDB acessível sem autenticação"),
+    "redis-info": (re.compile(r"(?i)redis_version"), "Redis acessível sem autenticação"),
+    "pgsql-brute": (re.compile(r"(?i)valid credentials"), "Credencial padrão aceita no PostgreSQL"),
+}
+
+
+def _extract_nmap_db_credential_findings(
+    stdout: str, step_name: str, target: str
+) -> list[dict[str, Any]]:
+    """Parse nmap-db-creds NSE output (mysql-empty-password, mongodb-databases,
+    redis-info, ms-sql-empty-password, pgsql-brute) into findings.
+
+    Each script's result lines sit under a `| <script-name>:` header until the
+    next port or script header; a positive marker inside that block means the
+    database accepted an empty/default credential or requires no auth at all.
+    """
+    findings: list[dict[str, Any]] = []
+    if not stdout:
+        return findings
+
+    current_port: str | None = None
+    current_service: str | None = None
+    current_script: str | None = None
+    script_lines: list[str] = []
+
+    def flush() -> None:
+        if current_script and script_lines:
+            marker = _DB_CRED_MARKERS.get(current_script)
+            if marker:
+                pattern, title = marker
+                body = "\n".join(script_lines)
+                if pattern.search(body):
+                    findings.append({
+                        "title": f"{title} (porta {current_port})",
+                        "severity": "critical",
+                        "risk_score": 9,
+                        "source_worker": "recon",
+                        "details": {
+                            "node": "recon",
+                            "step": step_name,
+                            "asset": target,
+                            "tool": "nmap-db-creds",
+                            "evidence": body.strip()[:800],
+                            "port": current_port,
+                            "service": current_service,
+                            "script": current_script,
+                            "vuln_family": "weak_credentials",
+                            "owasp_category": "A07:2021 Identification and Authentication Failures",
+                        },
+                    })
+        script_lines.clear()
+
+    for line in stdout.splitlines():
+        stripped = line.strip()
+        port_match = _DB_CRED_PORT_RE.match(stripped)
+        if port_match:
+            flush()
+            current_port, current_service = port_match.group(1), port_match.group(2)
+            current_script = None
+            continue
+        script_match = _DB_CRED_SCRIPT_START_RE.match(line.rstrip())
+        if script_match:
+            flush()
+            current_script = script_match.group(1)
+            continue
+        if line.startswith("|"):
+            script_lines.append(line.lstrip("|_ "))
+    flush()
+    return findings
+
+
 def _extract_nmap_findings(
     stdout: str, step_name: str, target: str
 ) -> list[dict[str, Any]]:
@@ -2177,6 +2253,9 @@ def extract_findings_from_work_item(
             vf = _extract_nmap_vulscan_findings(stdout, step, target)
             nf = _extract_nmap_findings(stdout, step, target)
             findings = vf + nf
+
+        elif tool == "nmap-db-creds":
+            findings = _extract_nmap_db_credential_findings(stdout, step, target)
 
         elif tool == "nmap-ssl":
             # SSL-specific nmap — check for weak ciphers / cert issues

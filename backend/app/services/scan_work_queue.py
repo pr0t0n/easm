@@ -945,10 +945,23 @@ def _preflight_profile_for_target(state: dict[str, Any], target: str) -> dict[st
     if not isinstance(preflight_targets, dict):
         return {}
     host = _target_host(target)
-    candidates = [target, host, f"http://{host}", f"https://{host}"]
+    candidates = [
+        target, host,
+        f"http://{host}", f"https://{host}",
+        f"http://{host}/", f"https://{host}/",
+    ]
     for candidate in candidates:
         if candidate and isinstance(preflight_targets.get(candidate), dict):
             return dict(preflight_targets[candidate])
+    # Preflight profiles are keyed by whatever exact URL P02/P06 probed (often
+    # with a path/trailing slash); a bare-host target (e.g. from
+    # provided_targets) never matches that key literally. Fall back to
+    # matching by host so a target string format mismatch can't masquerade as
+    # "P06 never confirmed this target" (confirmed live: scan #52 stranded
+    # P10-P20 as blocked-then-drained for a host P06 had already qualified).
+    for key, profile in preflight_targets.items():
+        if isinstance(profile, dict) and _target_host(str(key)) == host and host:
+            return dict(profile)
     return {}
 
 
@@ -1372,18 +1385,17 @@ def qualified_targets_for_gate(
     current = dict(state or {})
     if int(current.get("qualification_contract_version") or 0) < 2:
         return []
-    profiles = ((current.get("preflight") or {}).get("targets") or {})
     if gate_phase == "P02":
         return [
             target
             for target in targets
-            if bool((profiles.get(target) or {}).get("p02_complete"))
+            if bool(_preflight_profile_for_target(current, target).get("p02_complete"))
         ]
     if gate_phase == "P06":
         return [
             target
             for target in targets
-            if bool((profiles.get(target) or {}).get("p06_http_live"))
+            if bool(_preflight_profile_for_target(current, target).get("p06_http_live"))
         ]
     if gate_phase == "P09":
         # Gate ancestry is transitive: a P09 result cannot authorize later web
@@ -1391,7 +1403,7 @@ def qualified_targets_for_gate(
         return [
             target
             for target in targets
-            if bool((profiles.get(target) or {}).get("p06_http_live"))
+            if bool(_preflight_profile_for_target(current, target).get("p06_http_live"))
         ]
     return list(targets)
 
@@ -1504,6 +1516,22 @@ def _tool_evidence_decision(tool_name: str, target: str, state: dict[str, Any]) 
     }
 
 
+def _has_mutating_body_surface_for_target(state: dict[str, Any], target: str) -> bool:
+    for row in state.get("discovered_parameterized_requests") or []:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("method") or "").upper() not in {"POST", "PUT", "PATCH"}:
+            continue
+        if not (row.get("body_parameters") or str(row.get("body_template") or "").strip()):
+            continue
+        if _state_value_present_for_target(row, target):
+            return True
+    for key in ("post_endpoints", "state_changing_endpoints", "fuzz_post_templates"):
+        if _state_value_present_for_target(state.get(key), target):
+            return True
+    return False
+
+
 def _requires_http_surface(phase_id: str, tool_name: str) -> bool:
     if str(phase_id or "") == "P06":
         return False
@@ -1566,6 +1594,14 @@ def validate_skill_applicability(
             )
             return decision
 
+    if tool_l == "nmap-db-creds" and not state.get("active_exploit_authorized"):
+        decision.update(
+            applicable=False,
+            score=0.0,
+            reason="active_exploit_not_authorized",
+        )
+        return decision
+
     if tool_l == "masscan":
         scan_level = str(state.get("scan_level") or "full").lower()
         target_host = _target_host(target)
@@ -1603,6 +1639,14 @@ def validate_skill_applicability(
         if ctx["preflight_status"] in {"tcp_closed", "tcp_scanned_no_open_ports", "no_http_response"} and not ctx["has_http"]:
             decision.update(applicable=False, score=0.0, reason="no_http_surface:tcp_closed")
             return decision
+
+    if phase_id == "P12" and tool_l == "curl" and not _has_mutating_body_surface_for_target(state, target):
+        decision.update(
+            applicable=False,
+            score=0.0,
+            reason="stored_xss_requires_state_changing_body_surface",
+        )
+        return decision
 
     required_ports = PORT_REQUIRED_TOOLS.get(tool_l)
     if required_ports and ctx["ports_known"]:

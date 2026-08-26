@@ -161,6 +161,7 @@ class Settings(BaseSettings):
     browser_max_duration_seconds: int = 180
     enable_artifact_replay: bool = True
     enable_oob_validation: bool = False
+    enable_browser_request_harvester: bool = True
 
 
 settings = Settings()

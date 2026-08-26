@@ -193,6 +193,9 @@ def test_authenticated_deep_tool_selection_covers_p10_p11_p12_p13_after_crawl() 
     assert "dalfox" in scan_work_queue._authenticated_tools_for_phase(
         "P12", "https://example.test/search?q=invoice", state
     )
+    assert "curl" not in scan_work_queue._authenticated_tools_for_phase(
+        "P12", "https://example.test/search?q=invoice", state
+    )
     assert "bl-test" in scan_work_queue._authenticated_tools_for_phase(
         "P13", "https://example.test/support/manage", state
     )
@@ -211,6 +214,27 @@ def test_authenticated_deep_tool_selection_covers_p10_p11_p12_p13_after_crawl() 
     assert "nuclei" in scan_work_queue._authenticated_tools_for_phase(
         "P20", "https://example.test/support/manage", state
     )
+
+
+def test_p12_authenticated_tool_selection_adds_curl_for_mutating_body_surface() -> None:
+    state = {
+        "discovered_endpoints": ["https://example.test/api/items"],
+        "discovered_parameterized_urls": ["https://example.test/search?q=invoice"],
+        "discovered_parameterized_requests": [
+            {
+                "method": "POST",
+                "url": "https://example.test/api/items",
+                "body_parameters": ["description"],
+                "body_template": '{"description":"FUZZ"}',
+            }
+        ],
+    }
+
+    selected = scan_work_queue._authenticated_tools_for_phase(
+        "P12", "https://example.test/api/items", state
+    )
+
+    assert "curl" in selected
 
 
 def test_authenticated_deep_target_filter_rejects_static_and_mime_artifacts() -> None:

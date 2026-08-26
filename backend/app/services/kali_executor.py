@@ -214,6 +214,7 @@ TOOL_TO_PROFILE: dict[str, str] = {
     "nuclei-takeover": "nuclei_takeover",
     "nmap-vulscan": "nmap_vuln_scripts",
     "nmap-vuln": "nmap_vuln_scripts",
+    "nmap-db-creds": "nmap_db_credential_probe",
     "nmap-http-enum": "nmap_http_enum",
     "nmap-smb-vuln": "nmap_smb_vuln",
     "nmap-dns-vuln": "nmap_dns_vuln",
@@ -442,9 +443,14 @@ def execute_via_kali(
             "extra_args": _clean_extra,
             "authorized_scope": resolve_authorized_scope_for_dispatch(scan_id),
         }
-        if env_vars:
-            payload["env_vars"] = dict(env_vars)
+        _env_vars = dict(env_vars or {})
         _auth_headers = _auth_headers_from_skill_context(skill_context)
+        if norm_tool == "jwt_tool" and not _env_vars.get("SCAN_JWT_TOKEN"):
+            _bearer = _auth_headers.get("Authorization") or ""
+            if _bearer.lower().startswith("bearer "):
+                _env_vars["SCAN_JWT_TOKEN"] = _bearer.split(" ", 1)[1].strip()
+        if _env_vars:
+            payload["env_vars"] = _env_vars
         if _auth_headers:
             payload["auth_headers"] = _auth_headers
         if dispatch_targets:
