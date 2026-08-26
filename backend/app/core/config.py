@@ -42,6 +42,14 @@ class Settings(BaseSettings):
     # directly. This is what makes a real agent NOT need to be on the same
     # host as the dev stack, unlike the old host.docker.internal shortcut.
     bas_relay_external_port: int = 8446
+    # docker-compose's BACKEND_HOST_PORT -- the plain-HTTP port a REAL agent
+    # (or anything outside docker) dials for /api/bas/agents/enroll, as
+    # opposed to the container-internal port 8000 the app actually listens
+    # on. Only knowable via this env var (see docker-compose.yml's `backend`
+    # service `environment:` block, mirrored from its own `ports:` mapping)
+    # -- GET /api/bas/install-config hands this back as the default
+    # callback_port instead of the unreachable internal port.
+    backend_host_port: int = 8001
     # Extra hostnames the mTLS server cert must also cover (comma-separated),
     # beyond the always-included "backend"/"localhost". A real remote agent
     # reaches the platform by whatever public DNS name/IP it's actually

@@ -306,6 +306,12 @@ services:
       # Extra SANs for the BAS mTLS server cert (bas_ca.py) -- add the LAN
       # IP/hostname a real (non-container) agent uses to reach this host.
       BAS_MTLS_EXTRA_SANS: "${BAS_MTLS_EXTRA_SANS:-host.docker.internal}"
+      # Same value used in this service's `ports:` mapping below -- only
+      # reflected here so the app itself can tell an operator the real
+      # host-mapped port for BAS agent enrollment (GET /api/bas/install-
+      # config) instead of the container-internal port 8000, which is
+      # unreachable from outside Docker.
+      BACKEND_HOST_PORT: "${BACKEND_HOST_PORT:-8001}"
       LANGFUSE_HOST: "${LANGFUSE_HOST:-}"
       LANGFUSE_PUBLIC_KEY: "${LANGFUSE_PUBLIC_KEY:-}"
       LANGFUSE_SECRET_KEY: "${LANGFUSE_SECRET_KEY:-}"

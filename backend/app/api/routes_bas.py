@@ -640,7 +640,7 @@ def install_config(db: Session = Depends(get_db), current_user: User = Depends(g
 
     return {
         "callback_host": _setting("bas_agent_callback_host", "backend"),
-        "callback_port": _setting("bas_agent_callback_port", "8000"),
+        "callback_port": _setting("bas_agent_callback_port", str(settings.backend_host_port)),
         "mtls_port": settings.bas_mtls_external_port,
     }
 

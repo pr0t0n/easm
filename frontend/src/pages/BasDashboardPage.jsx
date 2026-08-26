@@ -68,8 +68,16 @@ export default function BasDashboardPage() {
     if (navigator.clipboard) navigator.clipboard.writeText(String(value || ""));
   };
 
+  // "backend" is the container-internal default GET /install-config returns
+  // when no admin override was ever saved -- meaningless to a real agent.
+  // The operator's own browser already reached this platform through a
+  // real, current, externally-reachable address, so use that instead of
+  // asking the operator to go find and type their LAN IP by hand.
+  const isAutoDetectedHost = installConfig?.callback_host === "backend";
+  const effectiveHost = isAutoDetectedHost ? window.location.hostname : (installConfig?.callback_host || "");
+
   const startEditingCallback = () => {
-    setCallbackHostInput(installConfig?.callback_host || "");
+    setCallbackHostInput(effectiveHost);
     setCallbackPortInput(installConfig?.callback_port || "");
     setEditingCallback(true);
   };
@@ -133,17 +141,17 @@ export default function BasDashboardPage() {
         <div className="card-h"><div><h3>Credenciais de instalação</h3><div className="sub">IP/porta de conexão + gerar um novo token de enrollment</div></div></div>
         {installConfig && !editingCallback && (
           <>
-            {(installConfig.callback_host === "backend" || installConfig.callback_port === "8000") && (
-              <div className="mono-sm" style={{ marginBottom: 10, color: "var(--sev-high-text, #b45309)" }}>
-                "backend"/"8000" são o nome interno do container e a porta interna do Docker — não alcançáveis de fora.
-                Edite abaixo com o IP/host real da plataforma e a porta mapeada no host (padrão 8001).
+            {isAutoDetectedHost && (
+              <div className="mono-sm muted" style={{ marginBottom: 10 }}>
+                IP detectado automaticamente pelo navegador (endereço usado para acessar esta página agora).
+                Se o agente precisar alcançar a plataforma por um caminho de rede diferente do seu, edite abaixo.
               </div>
             )}
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
               <div>
                 <div className="mono-sm muted">IP / host da plataforma</div>
-                <div className="mono" style={{ fontWeight: 600, cursor: "pointer" }} onClick={() => copy(installConfig.callback_host)} title="clique para copiar">
-                  {installConfig.callback_host}
+                <div className="mono" style={{ fontWeight: 600, cursor: "pointer" }} onClick={() => copy(effectiveHost)} title="clique para copiar">
+                  {effectiveHost}
                 </div>
               </div>
               <div>
@@ -160,7 +168,7 @@ export default function BasDashboardPage() {
           <div style={{ display: "flex", gap: 8, alignItems: "flex-end", marginBottom: 14, flexWrap: "wrap" }}>
             <div>
               <div className="mono-sm muted" style={{ marginBottom: 4 }}>IP / host da plataforma</div>
-              <input style={fieldStyle} value={callbackHostInput} onChange={(e) => setCallbackHostInput(e.target.value)} placeholder="ex.: 192.168.16.154" />
+              <input style={fieldStyle} value={callbackHostInput} onChange={(e) => setCallbackHostInput(e.target.value)} placeholder="IP ou hostname" />
             </div>
             <div>
               <div className="mono-sm muted" style={{ marginBottom: 4 }}>porta de conexão</div>
