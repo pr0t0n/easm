@@ -164,6 +164,7 @@ export default function BasTestMenuPage() {
             ))}
           </select>
           <input
+            required
             style={{ ...fieldStyle, gridColumn: "1 / -1" }}
             placeholder="Alvo interno (IP alcançável PELO AGENTE — ex: 10.10.10.5). Nunca use 127.0.0.1: é bloqueado como alvo inseguro."
             value={form.target_hint}

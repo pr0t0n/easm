@@ -349,6 +349,15 @@ def _schedule_to_dict(s: BasSchedule, db: Session | None = None) -> dict[str, An
 
 @router.post("/schedules")
 def create_schedule(payload: ScheduleCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    if not payload.target_hint.strip():
+        # bas_scheduler._create_shadow_scan_job() falls back to a synthetic
+        # "bas-unset-target-schedule-{id}" label when target_hint is blank --
+        # a deliberate fail-closed placeholder (kali_runner needs a real
+        # authorized_scope), so a schedule saved without a target doesn't
+        # error loudly here, it just fails every single future firing
+        # (enqueue_error: 400 Bad Request) with no clear signal why. Reject
+        # it up front instead.
+        raise HTTPException(status_code=400, detail="Alvo (target_hint) é obrigatório para criar um agendamento BAS")
     access_group_id = resolve_company_group_id(
         db, current_user, payload.access_group_id, payload.access_group_name, required=False,
     )
@@ -412,6 +421,8 @@ def patch_schedule(schedule_id: int, payload: SchedulePatch, db: Session = Depen
     schedule = apply_company_scope(db.query(BasSchedule), current_user, BasSchedule).filter(BasSchedule.id == schedule_id).first()
     if not schedule:
         raise HTTPException(status_code=404, detail="Agendamento não encontrado")
+    if payload.target_hint is not None and not payload.target_hint.strip():
+        raise HTTPException(status_code=400, detail="Alvo (target_hint) não pode ficar vazio")
     if payload.chain_key is not None:
         technique_keys, stop_on_failure = _resolve_chain_technique_keys(payload.chain_key, payload.technique_keys or [])
         schedule.chain_key = payload.chain_key
