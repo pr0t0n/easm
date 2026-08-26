@@ -75,6 +75,12 @@ def test_interval_frequency_due_once_interval_elapses():
     assert _is_due(_schedule(frequency="every_3_hours", last_run_at=last_run), now) is True
 
 
+def _agent(**overrides):
+    base = dict(id=13, kind="real", hostname="mac.local", tunnel_host="", tunnel_port=None, local_network_cidr=None)
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
 def test_shadow_scan_job_target_query_is_the_real_target_hint_not_a_synthetic_label():
     """Regression: a synthetic label like 'bas:schedule#1' parses to no valid
     scope root at all, so kali_runner's authorized_scope-required check
@@ -82,7 +88,7 @@ def test_shadow_scan_job_target_query_is_the_real_target_hint_not_a_synthetic_la
     db = MagicMock()
     schedule = _schedule(target_hint="10.10.10.5")
 
-    shadow = _create_shadow_scan_job(db, schedule)
+    shadow = _create_shadow_scan_job(db, schedule, _agent())
 
     assert shadow.target_query == "10.10.10.5"
     assert shadow.mode == "bas"
@@ -90,11 +96,20 @@ def test_shadow_scan_job_target_query_is_the_real_target_hint_not_a_synthetic_la
     db.flush.assert_called_once()
 
 
-def test_shadow_scan_job_falls_back_to_a_placeholder_when_target_hint_is_blank():
+def test_shadow_scan_job_uses_the_agents_own_network_when_target_hint_is_blank():
     db = MagicMock()
     schedule = _schedule(target_hint="")
 
-    shadow = _create_shadow_scan_job(db, schedule)
+    shadow = _create_shadow_scan_job(db, schedule, _agent(local_network_cidr="10.10.10.5/24"))
+
+    assert shadow.target_query == "10.10.10.5/24"
+
+
+def test_shadow_scan_job_falls_back_to_a_placeholder_when_target_hint_and_agent_network_are_both_blank():
+    db = MagicMock()
+    schedule = _schedule(target_hint="")
+
+    shadow = _create_shadow_scan_job(db, schedule, _agent(local_network_cidr=None))
 
     assert shadow.target_query  # never empty -- an empty target_query also fails scope resolution
     assert "1" in shadow.target_query
@@ -150,6 +165,46 @@ def test_split_targets_single_value_returns_one_element_list():
 def test_split_targets_falls_back_when_blank():
     assert _split_targets("", "fallback") == ["fallback"]
     assert _split_targets("   ", "fallback") == ["fallback"]
+
+
+def test_fire_schedule_defaults_to_the_agents_own_network_when_target_hint_is_blank():
+    db = MagicMock()
+    agent = _agent(local_network_cidr="10.10.10.5/24")
+    db.query.return_value.filter.return_value.first.return_value = agent
+
+    schedule = _schedule(target_hint="", agent_id=13)
+    schedule.stop_on_failure = False
+    schedule.technique_keys = ["port_service_scan"]
+
+    with patch(
+        "app.services.bas_scheduler.dispatch_bas_technique",
+        return_value={"dispatched": True, "result": {"status": "executed"}, "agent_kind": "real"},
+    ) as mock_dispatch:
+        result = fire_schedule(db, schedule)
+
+    mock_dispatch.assert_called_once()
+    assert mock_dispatch.call_args.kwargs["target_hint"] == "10.10.10.5/24"
+    assert len(result["job_ids"]) == 1
+
+
+def test_fire_schedule_skips_everything_with_a_clear_reason_when_agent_network_is_unknown():
+    """The agent binary predates local_network_cidr, or hasn't sent a
+    heartbeat yet -- never guess a target, never fall back to a meaningless
+    placeholder that would just 400 at kali_runner with no clear signal why."""
+    db = MagicMock()
+    agent = _agent(local_network_cidr=None)
+    db.query.return_value.filter.return_value.first.return_value = agent
+
+    schedule = _schedule(target_hint="", agent_id=13)
+    schedule.technique_keys = ["port_service_scan", "smb_enum_cme"]
+
+    with patch("app.services.bas_scheduler.dispatch_bas_technique") as mock_dispatch:
+        result = fire_schedule(db, schedule)
+
+    mock_dispatch.assert_not_called()
+    assert result["job_ids"] == []
+    assert len(result["skipped"]) == 2
+    assert all(s["reason"] == "agent_network_unknown_send_a_heartbeat_first" for s in result["skipped"])
 
 
 def test_fire_schedule_dispatches_one_job_per_technique_per_target():

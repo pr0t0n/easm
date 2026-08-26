@@ -12,7 +12,7 @@ import secrets
 from datetime import datetime, timedelta
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Response, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -132,6 +132,10 @@ class AgentEnrollRequest(BaseModel):
     tunnel_port: int | None = None
     reported_host: str = ""
     reported_port: int | None = None
+    # Self-reported real interface CIDR (see bas-agent/network.go /
+    # stub_agent.py._local_network_cidr) -- never guessed server-side from a
+    # single observed peer IP, which cannot reveal the actual netmask.
+    local_network_cidr: str = ""
     # Optional: a PEM-encoded PKCS#10 CSR generated locally by the agent (its
     # private key never leaves the agent). When present, enroll additionally
     # signs it with the BAS root CA and returns a client certificate the
@@ -175,6 +179,7 @@ def enroll_agent(payload: AgentEnrollRequest, db: Session = Depends(get_db)):
         last_heartbeat_at=datetime.now(),
         enrolled_via_host=payload.reported_host,
         enrolled_via_port=payload.reported_port,
+        local_network_cidr=payload.local_network_cidr.strip() or None,
     )
     db.add(agent)
     token.used_count += 1
@@ -207,10 +212,24 @@ def enroll_agent(payload: AgentEnrollRequest, db: Session = Depends(get_db)):
     return response
 
 
+class AgentHeartbeatRequest(BaseModel):
+    # Recalculated by the agent every heartbeat (not just at enroll), so the
+    # platform self-corrects if the agent's network changes without needing
+    # a re-enroll. Optional: older agent binaries (pre-Marco 3.6) send no
+    # body at all -- payload stays None, existing value is left untouched.
+    local_network_cidr: str = ""
+
+
 @router.post("/agents/heartbeat")
-def agent_heartbeat(db: Session = Depends(get_db), agent: BasAgent = Depends(get_current_bas_agent)):
+def agent_heartbeat(
+    payload: AgentHeartbeatRequest | None = Body(default=None),
+    db: Session = Depends(get_db),
+    agent: BasAgent = Depends(get_current_bas_agent),
+):
     agent.last_heartbeat_at = datetime.now()
     agent.status = "online"
+    if payload is not None and payload.local_network_cidr.strip():
+        agent.local_network_cidr = payload.local_network_cidr.strip()
     db.commit()
     return {"status": "ok", "server_time": datetime.now()}
 
@@ -225,6 +244,7 @@ def list_agents(db: Session = Depends(get_db), current_user: User = Depends(get_
             "id": a.id, "label": a.label, "hostname": a.hostname, "os": a.os,
             "os_version": a.os_version, "status": a.status, "kind": a.kind,
             "last_heartbeat_at": a.last_heartbeat_at, "last_seen_ip": a.last_seen_ip,
+            "local_network_cidr": a.local_network_cidr,
             "created_at": a.created_at,
         }
         for a in agents
@@ -317,6 +337,23 @@ def _resolve_chain_technique_keys(chain_key: str, requested_keys: list[str]) -> 
     return list(chain["technique_keys"]), True
 
 
+def _schedule_requires_target_hint(technique_keys: list[str]) -> bool:
+    """A schedule may omit target_hint ONLY when every one of its techniques
+    accepts_range -- in that case bas_scheduler.fire_schedule defaults the
+    target to the dispatching BasAgent's own self-reported
+    local_network_cidr (see network.go) instead of requiring the operator to
+    type an internal IP they may not know. A single app/service/domain-
+    specific technique in the mix still needs an explicit target -- there is
+    no way to guess "the app's URL" from a network interface."""
+    if not technique_keys:
+        return True  # nothing selected yet -- fall back to the safe default
+    for key in technique_keys:
+        technique = get_technique(key)
+        if technique is None or not technique.get("accepts_range"):
+            return True
+    return False
+
+
 def _schedule_to_dict(s: BasSchedule, db: Session | None = None) -> dict[str, Any]:
     last_job = None
     if db is not None:
@@ -349,23 +386,30 @@ def _schedule_to_dict(s: BasSchedule, db: Session | None = None) -> dict[str, An
 
 @router.post("/schedules")
 def create_schedule(payload: ScheduleCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    if not payload.target_hint.strip():
+    # Pure, DB-free validation first (mirrors the resolution create_schedule
+    # itself does further down, but doesn't need db/current_user to run) --
+    # fail fast before touching the database.
+    technique_keys, stop_on_failure = _resolve_chain_technique_keys(payload.chain_key, payload.technique_keys)
+    if not payload.target_hint.strip() and _schedule_requires_target_hint(technique_keys):
         # bas_scheduler._create_shadow_scan_job() falls back to a synthetic
-        # "bas-unset-target-schedule-{id}" label when target_hint is blank --
-        # a deliberate fail-closed placeholder (kali_runner needs a real
+        # "bas-unset-target-schedule-{id}" label when target_hint is blank
+        # AND no technique can default to the agent's own network -- a
+        # deliberate fail-closed placeholder (kali_runner needs a real
         # authorized_scope), so a schedule saved without a target doesn't
         # error loudly here, it just fails every single future firing
         # (enqueue_error: 400 Bad Request) with no clear signal why. Reject
         # it up front instead.
-        raise HTTPException(status_code=400, detail="Alvo (target_hint) é obrigatório para criar um agendamento BAS")
+        raise HTTPException(
+            status_code=400,
+            detail="Alvo (target_hint) é obrigatório quando alguma técnica selecionada não aceita faixa de rede automática",
+        )
+
     access_group_id = resolve_company_group_id(
         db, current_user, payload.access_group_id, payload.access_group_name, required=False,
     )
     agent = apply_company_scope(db.query(BasAgent), current_user, BasAgent).filter(BasAgent.id == payload.agent_id).first()
     if not agent:
         raise HTTPException(status_code=404, detail="Agente não encontrado")
-
-    technique_keys, stop_on_failure = _resolve_chain_technique_keys(payload.chain_key, payload.technique_keys)
 
     schedule = BasSchedule(
         owner_id=current_user.id,
@@ -421,13 +465,23 @@ def patch_schedule(schedule_id: int, payload: SchedulePatch, db: Session = Depen
     schedule = apply_company_scope(db.query(BasSchedule), current_user, BasSchedule).filter(BasSchedule.id == schedule_id).first()
     if not schedule:
         raise HTTPException(status_code=404, detail="Agendamento não encontrado")
-    if payload.target_hint is not None and not payload.target_hint.strip():
-        raise HTTPException(status_code=400, detail="Alvo (target_hint) não pode ficar vazio")
     if payload.chain_key is not None:
         technique_keys, stop_on_failure = _resolve_chain_technique_keys(payload.chain_key, payload.technique_keys or [])
         schedule.chain_key = payload.chain_key
         schedule.technique_keys = technique_keys
         schedule.stop_on_failure = stop_on_failure
+    if payload.target_hint is not None and not payload.target_hint.strip():
+        # Effective technique set after this patch: payload.technique_keys if
+        # this request set it (or the chain resolved above already wrote it
+        # onto `schedule`), otherwise whatever the schedule already has.
+        effective_keys = schedule.technique_keys if payload.chain_key is not None else (
+            payload.technique_keys if payload.technique_keys is not None else schedule.technique_keys
+        )
+        if _schedule_requires_target_hint(effective_keys or []):
+            raise HTTPException(
+                status_code=400,
+                detail="Alvo (target_hint) é obrigatório quando alguma técnica selecionada não aceita faixa de rede automática",
+            )
     for field in ("name", "target_hint", "technique_keys", "frequency", "run_time", "day_of_week", "day_of_month", "enabled", "max_authorized_risk_tier"):
         if payload.chain_key is not None and field == "technique_keys":
             continue  # already stamped from the chain above -- don't let a raw list overwrite it

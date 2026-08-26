@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import socket
 import time
 
 import httpx
@@ -28,6 +29,24 @@ ENROLLMENT_PASSWORD = os.environ.get("BAS_STUB_ENROLLMENT_PASSWORD", "")
 SOCKS_HOST = os.environ.get("BAS_STUB_SOCKS_HOST", "0.0.0.0")
 SOCKS_PORT = int(os.environ.get("BAS_STUB_SOCKS_PORT", "1080"))
 HEARTBEAT_INTERVAL_SECONDS = int(os.environ.get("BAS_STUB_HEARTBEAT_SECONDS", "30"))
+
+
+def _local_network_cidr() -> str:
+    """Best-effort only, unlike bas-agent's real net.Interfaces()-based
+    detection (see bas-agent/network.go) -- this container has no iproute2
+    and stdlib gives no portable way to read a real configured netmask
+    without one. Since this stub only ever runs inside this project's own
+    docker-compose network (never a real customer network -- see this
+    module's docstring), a /16 covering the container's own docker bridge
+    subnet is a reasonable, clearly-labeled approximation for smoke-testing
+    the enroll/heartbeat plumbing shape, not a claim of real accuracy."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("10.255.255.255", 1))
+            local_ip = s.getsockname()[0]
+        return f"{local_ip}/16"
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def _enroll() -> str | None:
@@ -52,6 +71,7 @@ def _enroll() -> str | None:
                 "agent_version": "stub-0.1",
                 "tunnel_host": "bas_agent_stub",
                 "tunnel_port": SOCKS_PORT,
+                "local_network_cidr": _local_network_cidr(),
             },
             timeout=10,
         )
@@ -68,7 +88,10 @@ def _heartbeat_loop(agent_jwt: str) -> None:
     headers = {"Authorization": f"Bearer {agent_jwt}"}
     while True:
         try:
-            httpx.post(f"{BACKEND_URL}/api/bas/agents/heartbeat", headers=headers, timeout=10).raise_for_status()
+            httpx.post(
+                f"{BACKEND_URL}/api/bas/agents/heartbeat", headers=headers,
+                json={"local_network_cidr": _local_network_cidr()}, timeout=10,
+            ).raise_for_status()
         except Exception as exc:  # noqa: BLE001
             logger.warning("bas_agent_stub: heartbeat failed: %s", exc)
         time.sleep(HEARTBEAT_INTERVAL_SECONDS)

@@ -1354,6 +1354,15 @@ class BasAgent(Base):
     tunnel_port: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
     last_seen_ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Self-reported by the agent (network.go's net.Interfaces() read for the
+    # real binary; a best-effort docker-bridge approximation for the stub --
+    # see stub_agent.py) at enroll and every heartbeat, never guessed
+    # server-side: a single observed peer IP can never reveal the real
+    # netmask configured on the agent's interface. Lets range-capable BAS
+    # techniques default their target to this agent's real local segment
+    # instead of requiring the operator to type an internal IP they may not
+    # know (see bas_scheduler.fire_schedule).
+    local_network_cidr: Mapped[str | None] = mapped_column(String(64), nullable=True)
     enrolled_via_host: Mapped[str] = mapped_column(String(255), default="")
     enrolled_via_port: Mapped[int | None] = mapped_column(Integer, nullable=True)
     agent_metadata: Mapped[dict] = mapped_column("metadata", JSONB, default=dict)

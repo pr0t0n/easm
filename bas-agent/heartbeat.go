@@ -1,13 +1,22 @@
 package main
 
 import (
+	"bytes"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"time"
 )
+
+type heartbeatRequest struct {
+	// Recalculated every heartbeat (not just at enroll) so the platform
+	// self-corrects if the agent's network changes (DHCP renewal, moved to
+	// a different segment, etc.) without needing a re-enroll.
+	LocalNetworkCIDR string `json:"local_network_cidr"`
+}
 
 // buildMTLSClient configures an http.Client that presents the agent's
 // CA-signed client certificate on every connection and validates the
@@ -46,8 +55,10 @@ func heartbeatLoop(cfg *Config) {
 	}
 	url := fmt.Sprintf("https://%s:%d/api/bas/agents/heartbeat", cfg.Host, cfg.MTLSPort)
 	for {
-		req, _ := http.NewRequest(http.MethodPost, url, nil)
+		body, _ := json.Marshal(heartbeatRequest{LocalNetworkCIDR: localNetworkCIDR()})
+		req, _ := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
 		req.Header.Set("Authorization", "Bearer "+cfg.AgentJWT)
+		req.Header.Set("Content-Type", "application/json")
 		resp, err := client.Do(req)
 		if err != nil {
 			log.Printf("bas-agent: heartbeat failed: %v", err)

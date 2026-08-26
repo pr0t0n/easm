@@ -21,6 +21,11 @@ type enrollRequest struct {
 	TunnelHost   string `json:"tunnel_host"`
 	TunnelPort   int    `json:"tunnel_port"`
 	CSRPEM       string `json:"csr_pem"`
+	// The agent's own network interface CIDR (see network.go) -- lets
+	// range-capable BAS techniques (port_service_scan, smb_enum_cme, etc.)
+	// default their target to this agent's real local segment instead of
+	// requiring the operator to type an internal IP they may not know.
+	LocalNetworkCIDR string `json:"local_network_cidr"`
 }
 
 type enrollResponse struct {
@@ -42,7 +47,7 @@ func enroll(input *EnrollInput, hostname, osName, arch, csrPEM string, socksPort
 		Code: input.Code, Username: input.Username, Password: input.Password,
 		Hostname: hostname, OS: osName, OSVersion: "bas-agent-go-0.1", Arch: arch,
 		AgentVersion: "bas-agent-go-0.1", TunnelHost: hostname, TunnelPort: socksPort,
-		CSRPEM: csrPEM,
+		CSRPEM: csrPEM, LocalNetworkCIDR: localNetworkCIDR(),
 	}
 	data, err := json.Marshal(body)
 	if err != nil {

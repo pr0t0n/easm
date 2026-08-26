@@ -166,25 +166,46 @@ export default function BasTestMenuPage() {
             <option value="">Selecione o agente</option>
             {agents.map((a) => (
               <option key={a.id} value={a.id}>
-                {a.label || a.hostname || `agente #${a.id}`} ({a.status} · {a.kind === "real" ? "real" : "stub"})
+                {a.label || a.hostname || `agente #${a.id}`} ({a.status} · {a.kind === "real" ? "real" : "stub"}
+                {a.local_network_cidr ? ` · rede: ${a.local_network_cidr}` : ""})
               </option>
             ))}
           </select>
-          <div style={{ gridColumn: "1 / -1" }}>
-            <textarea
-              required
-              rows={2}
-              style={{ ...fieldStyle, resize: "vertical", fontFamily: "inherit" }}
-              placeholder={"Alvo(s) interno(s) — IP(s) alcançável(is) PELO AGENTE. Um por linha ou separados por vírgula (ex.: 10.10.10.5, app-db.internal.local). Para port_service_scan/firewall_segmentation_test/smb_enum_cme, também aceita uma faixa CIDR (ex.: 10.10.10.0/24, até 256 hosts). Nunca use 127.0.0.1: é bloqueado como alvo inseguro."}
-              value={form.target_hint}
-              onChange={(e) => setForm({ ...form, target_hint: e.target.value })}
-            />
-            {form.technique_keys.some((k) => techniques.find((t) => t.technique_key === k)?.accepts_range) && (
-              <div className="mono-sm muted" style={{ marginTop: 4 }}>
-                Uma ou mais técnicas selecionadas aceitam uma faixa CIDR como alvo (varre a faixa inteira numa única execução, até 256 hosts) — a atestação de autorização acima cobre a faixa inteira digitada.
+          {(() => {
+            const selectedTechniques = form.technique_keys.map((k) => techniques.find((t) => t.technique_key === k)).filter(Boolean);
+            const anyTechniqueSelected = selectedTechniques.length > 0;
+            const allAcceptRange = anyTechniqueSelected && selectedTechniques.every((t) => t.accepts_range);
+            const targetOptional = allAcceptRange;
+            const selectedAgent = agents.find((a) => a.id === form.agent_id);
+            return (
+              <div style={{ gridColumn: "1 / -1" }}>
+                <textarea
+                  required={!targetOptional}
+                  rows={2}
+                  style={{ ...fieldStyle, resize: "vertical", fontFamily: "inherit" }}
+                  placeholder={
+                    targetOptional
+                      ? "Opcional — deixe em branco para varrer automaticamente a rede do próprio agente (rede detectada acima, se o agente já reportou). Ou digite uma faixa CIDR/IP específico. Nunca use 127.0.0.1: é bloqueado como alvo inseguro."
+                      : "Alvo(s) interno(s) — IP(s) alcançável(is) PELO AGENTE. Um por linha ou separados por vírgula (ex.: 10.10.10.5, app-db.internal.local). Para port_service_scan/firewall_segmentation_test/smb_enum_cme, também aceita uma faixa CIDR (ex.: 10.10.10.0/24, até 256 hosts). Nunca use 127.0.0.1: é bloqueado como alvo inseguro."
+                  }
+                  value={form.target_hint}
+                  onChange={(e) => setForm({ ...form, target_hint: e.target.value })}
+                />
+                {targetOptional && !form.target_hint.trim() && (
+                  <div className="mono-sm muted" style={{ marginTop: 4 }}>
+                    {selectedAgent?.local_network_cidr
+                      ? `Alvo em branco: vai varrer a rede do agente (${selectedAgent.local_network_cidr}) — a atestação de autorização acima cobre essa faixa inteira.`
+                      : "Alvo em branco: o agente ainda não reportou sua rede (aguarde um heartbeat) — o agendamento vai falhar até lá, ou digite um alvo/faixa manualmente."}
+                  </div>
+                )}
+                {anyTechniqueSelected && !allAcceptRange && selectedTechniques.some((t) => t.accepts_range) && (
+                  <div className="mono-sm muted" style={{ marginTop: 4 }}>
+                    Uma ou mais técnicas selecionadas aceitam uma faixa CIDR como alvo (varre a faixa inteira numa única execução, até 256 hosts) — mas há também técnica(s) específica(s) na seleção, então o alvo continua obrigatório.
+                  </div>
+                )}
               </div>
-            )}
-          </div>
+            );
+          })()}
           {(() => {
             const selectedAgent = agents.find((a) => a.id === form.agent_id);
             if (!selectedAgent) return null;

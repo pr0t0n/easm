@@ -19,14 +19,22 @@ from app.services.bas_technique_catalog import get_technique
 logger = logging.getLogger(__name__)
 
 
-def _create_shadow_scan_job(db: Session, schedule: BasSchedule) -> ScanJob:
+def _create_shadow_scan_job(db: Session, schedule: BasSchedule, agent: BasAgent) -> ScanJob:
     # target_query must be the REAL target_hint, not a synthetic label --
     # kali_runner requires a non-empty authorized_scope on every dispatch
     # (SEC-001), and resolve_authorized_scope_for_dispatch derives that scope
     # from this ScanJob's target_query via authorized_scope_from_target_query.
     # A label like "bas:schedule#1" parses to no valid root at all, so every
-    # dispatch through this shadow job would fail closed with 400.
-    target_query = schedule.target_hint or f"bas-unset-target-schedule-{schedule.id}"
+    # dispatch through this shadow job would fail closed with 400. When
+    # target_hint is blank (range-only schedule), fall back to the agent's
+    # own self-reported network -- same value fire_schedule below will use
+    # as the actual per-technique target -- so authorized_scope agrees with
+    # what's really being dispatched instead of a meaningless placeholder.
+    target_query = (
+        schedule.target_hint
+        or agent.local_network_cidr
+        or f"bas-unset-target-schedule-{schedule.id}"
+    )
     shadow = ScanJob(
         owner_id=schedule.owner_id,
         access_group_id=schedule.access_group_id,
@@ -171,17 +179,38 @@ def fire_schedule(db: Session, schedule: BasSchedule) -> dict[str, Any]:
     if not agent:
         return {"error": "agent_not_found"}
 
-    shadow = _create_shadow_scan_job(db, schedule)
+    job_ids: list[int] = []
+    skipped: list[dict[str, str]] = []
+
+    if schedule.target_hint and schedule.target_hint.strip():
+        targets = _split_targets(schedule.target_hint, agent.hostname or "internal-target")
+    elif agent.local_network_cidr:
+        # Range-only schedule (create_schedule/patch_schedule only allow a
+        # blank target_hint when every technique accepts_range) -- default to
+        # the agent's own self-reported network instead of requiring the
+        # operator to type an internal IP they may not know.
+        targets = [agent.local_network_cidr]
+    else:
+        # Agent has never reported its network (binary predates this
+        # capability, or hasn't sent a heartbeat yet) -- never guess or fall
+        # back to a meaningless placeholder; skip every technique with a
+        # clear, actionable reason instead of a silent/garbled dispatch.
+        for technique_key in schedule.technique_keys:
+            skipped.append({
+                "technique_key": technique_key, "target": "",
+                "reason": "agent_network_unknown_send_a_heartbeat_first",
+            })
+        schedule.last_run_at = datetime.now()
+        db.commit()
+        return {"scan_job_id": None, "job_ids": [], "skipped": skipped}
+
+    shadow = _create_shadow_scan_job(db, schedule, agent)
     # Commit (not just flush) before any dispatch: resolve_authorized_scope_
     # for_dispatch opens its OWN SessionLocal() to read this ScanJob by id --
     # a separate connection can't see a row this transaction has only
     # flushed, so every dispatch would fail closed with "authorized_scope is
     # required" until this row is actually committed.
     db.commit()
-    job_ids: list[int] = []
-    skipped: list[dict[str, str]] = []
-
-    targets = _split_targets(schedule.target_hint, agent.hostname or "internal-target")
 
     for target in targets:
         for technique_key in schedule.technique_keys:
