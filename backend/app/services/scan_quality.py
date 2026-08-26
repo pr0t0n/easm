@@ -803,11 +803,13 @@ def _build_aggressive_depth_requirements(
                 "render_validation": render_validation_complete,
             },
         )
+    p13_matrix_surface = object_reference_surface or has_mutating_surface or client_control_surface
+    p13_matrix_ran = completed_tools("P13", {"bl-test", "nuclei-idor", "nuclei-redirect", "curl", "chromium-capture"})
     add_surface_execution_requirement(
         "P13",
         "p13_access_control_business_logic_matrix",
-        object_reference_surface or has_mutating_surface or client_control_surface,
-        completed_tools("P13", {"bl-test", "nuclei-idor", "nuclei-redirect", "curl", "chromium-capture"}),
+        p13_matrix_surface,
+        p13_matrix_ran,
         "object_reference_or_business_action_surface",
         "completed_access_control_business_logic_validator",
         "high",
@@ -817,6 +819,32 @@ def _build_aggressive_depth_requirements(
             "client_control_surface": client_control_surface,
         },
     )
+    if "P13" in expected and p13_matrix_surface:
+        # A "matrix ran" tool completion (above) proves *a* cross-identity
+        # request pair was sent, not that the object each identity hit was
+        # actually attributed to that identity -- validate_idor_bola and
+        # bl-test's compare_two_identities both stamp object_attribution
+        # (observed_per_identity vs unverified_shared_endpoint) into their
+        # artifact/result text specifically so this can be checked here
+        # instead of trusting "some tool completed" as proof of a sound test.
+        completed_p13 = completed_by_phase.get("P13", [])
+        p13_result_text = " ".join(_work_item_text(item) for item in completed_p13)
+        p13_artifact_text = " ".join(
+            _artifact_text(artifact) for artifact in artifacts if str(getattr(artifact, "phase_id", "") or "").upper() == "P13"
+        )
+        combined_p13_text = f"{p13_result_text} {p13_artifact_text}"
+        attribution_verified = "observed_per_identity" in combined_p13_text
+        add_requirement(
+            "p13_cross_identity_object_attribution_verified",
+            "met" if attribution_verified else "missing",
+            [] if attribution_verified else ["cross_identity_object_attribution_not_confirmed"],
+            "medium",
+            {
+                "matrix_ran": p13_matrix_ran,
+                "observed_per_identity_seen": attribution_verified,
+                "unverified_shared_endpoint_seen": "unverified_shared_endpoint" in combined_p13_text,
+            },
+        )
     add_surface_execution_requirement(
         "P14",
         "p14_auth_session_jwt_boundary",

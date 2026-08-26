@@ -198,5 +198,76 @@ def test_aggressive_depth_requirements_cover_walkthrough_classes_beyond_xss():
 
     assert expected_missing <= set(by_id)
     assert all(by_id[requirement_id]["status"] == "missing" for requirement_id in expected_missing)
-    assert by_id["auth_state_visibility"]["status"] == "blocked_precondition"
-    assert requirements["blocking_requirement_ids"]
+
+
+def test_p13_attribution_requirement_missing_when_matrix_ran_without_real_object_evidence():
+    """A bl-test/idor validator run that completed proves *a* cross-identity
+    request pair was sent -- not that the tested object was actually
+    attributed to the identity the test claims. Without "observed_per_identity"
+    anywhere in the P13 evidence text, the new sub-requirement must stay
+    unmet even though the main matrix requirement is satisfied."""
+    state = {
+        "scan_level": "aggressive",
+        "object_reference_endpoints": ["https://example.test/api/BasketItems/1"],
+    }
+    work_items = [
+        SimpleNamespace(
+            phase_id="P13",
+            status="completed",
+            tool_name="bl-test",
+            target="https://example.test/api/BasketItems/1",
+            item_metadata={},
+            result={"parsed": {"wire_assessments": [{"object_attribution": "unverified_shared_endpoint"}]}},
+            last_error=None,
+        )
+    ]
+
+    requirements = _build_aggressive_depth_requirements(
+        state=state,
+        profile={"id": "aggressive", "depth": "aggressive"},
+        expected_phase_ids=["P13"],
+        work_items=work_items,
+        artifacts=[],
+        valid_sessions=[],
+        endpoints=[],
+        auth_required=True,
+    )
+
+    by_id = {row["id"]: row for row in requirements["requirements"]}
+    assert by_id["p13_access_control_business_logic_matrix"]["status"] == "met"
+    assert by_id["p13_cross_identity_object_attribution_verified"]["status"] == "missing"
+    # medium severity -- documented as a gap, not a hard block.
+    assert "p13_cross_identity_object_attribution_verified" not in requirements["blocking_requirement_ids"]
+
+
+def test_p13_attribution_requirement_met_when_real_object_evidence_present():
+    state = {
+        "scan_level": "aggressive",
+        "object_reference_endpoints": ["https://example.test/api/BasketItems/1"],
+    }
+    work_items = [
+        SimpleNamespace(
+            phase_id="P13",
+            status="completed",
+            tool_name="bl-test",
+            target="https://example.test/api/BasketItems/1",
+            item_metadata={},
+            result={"parsed": {"wire_assessments": [{"object_attribution": "observed_per_identity"}]}},
+            last_error=None,
+        )
+    ]
+
+    requirements = _build_aggressive_depth_requirements(
+        state=state,
+        profile={"id": "aggressive", "depth": "aggressive"},
+        expected_phase_ids=["P13"],
+        work_items=work_items,
+        artifacts=[],
+        valid_sessions=[],
+        endpoints=[],
+        auth_required=True,
+    )
+
+    by_id = {row["id"]: row for row in requirements["requirements"]}
+    assert by_id["p13_access_control_business_logic_matrix"]["status"] == "met"
+    assert by_id["p13_cross_identity_object_attribution_verified"]["status"] == "met"

@@ -835,8 +835,11 @@ def run_as_tool(
                 try:
                     if len(cross_identity_keys) >= 2:
                         key_a, key_b = cross_identity_keys[0], cross_identity_keys[1]
-                        obs_a = _observe(_client_for(key_a).request(method, endpoint), endpoint=endpoint, method=method, action=action, identity_key=key_a)
-                        obs_b = _observe(_client_for(key_b).request(method, endpoint), endpoint=endpoint, method=method, action=action, identity_key=key_b)
+                        endpoint_by_identity = dict(action.get("endpoint_by_identity") or {})
+                        object_attribution = "observed_per_identity" if key_a in endpoint_by_identity else "unverified_shared_endpoint"
+                        object_url = endpoint_by_identity.get(key_a, endpoint)
+                        obs_a = _observe(_client_for(key_a).request(method, object_url), endpoint=object_url, method=method, action=action, identity_key=key_a)
+                        obs_b = _observe(_client_for(key_b).request(method, object_url), endpoint=object_url, method=method, action=action, identity_key=key_b)
                         delta = _cross_identity_signature(obs_a) != _cross_identity_signature(obs_b)
                         obs_a["cross_identity_delta"] = delta
                         obs_b["cross_identity_delta"] = delta
@@ -866,6 +869,7 @@ def run_as_tool(
                                 if owner_ok and authorization_denied
                                 else "inconclusive"
                             ),
+                            "object_attribution": object_attribution,
                         })
                     else:
                         identity_key = cross_identity_keys[0] if cross_identity_keys else None

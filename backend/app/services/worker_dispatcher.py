@@ -392,6 +392,56 @@ def _resolve_auth_identities(
         return {}
 
 
+def _attach_observed_endpoints_per_identity(
+    db: Any, scan_id: int, actions: list[dict[str, Any]], endpoints: list[Any],
+) -> None:
+    """Enriches each 2-identity action in place with
+    action["endpoint_by_identity"] = {identity_key: real observed URL} when
+    browser_request_harvester.py captured one -- mirrors pentest_validators.
+    _observed_object_for_identity's rationale: action["endpoint"] is a
+    single, identity-agnostic URL shared by every action referencing this
+    route (OffensiveEndpoint.url is unconditionally overwritten on every
+    upsert), so a compare_two_identities test built from it alone can't
+    prove the tested object actually belongs to the identity it's supposed
+    to. When a real per-identity ObservedRequest exists, run_as_tool's
+    compare_two_identities prefers it over the shared endpoint string."""
+    from app.models.models import ObservedRequest
+    from app.services.offensive_inventory_service import normalize_url
+
+    needs_lookup = {
+        str(key)
+        for action in actions
+        for key in list(action.get("required_identities") or [])
+        if len(action.get("required_identities") or []) >= 2
+    }
+    if not needs_lookup:
+        return
+    normalized_by_endpoint_url = {str(row.url): row.normalized_url for row in endpoints}
+    rows = (
+        db.query(ObservedRequest)
+        .filter(ObservedRequest.scan_job_id == scan_id, ObservedRequest.identity_key.in_(needs_lookup))
+        .order_by(ObservedRequest.created_at.desc())
+        .all()
+    )
+    observed_by_normalized_and_identity: dict[tuple[str, str], str] = {}
+    for row in rows:
+        key = (row.normalized_url, row.identity_key)
+        observed_by_normalized_and_identity.setdefault(key, row.url)
+    for action in actions:
+        required = list(action.get("required_identities") or [])
+        if len(required) < 2:
+            continue
+        endpoint = str(action.get("endpoint") or "")
+        normalized = normalized_by_endpoint_url.get(endpoint) or normalize_url(endpoint)
+        by_identity = {
+            key: observed_by_normalized_and_identity[(normalized, key)]
+            for key in required
+            if (normalized, key) in observed_by_normalized_and_identity
+        }
+        if by_identity:
+            action["endpoint_by_identity"] = by_identity
+
+
 def _business_logic_execution_plan(
     scan_id: int | None,
     wire_contract: dict[str, Any] | None = None,
@@ -426,6 +476,7 @@ def _business_logic_execution_plan(
                 available_identities=identities,
                 mutation_plan=state.get("business_logic_mutation_plan"),
             )
+            _attach_observed_endpoints_per_identity(db, int(scan_id), list(plan.get("actions") or []), endpoints)
             wire = dict(wire_contract or {})
             if not wire:
                 return plan
@@ -468,6 +519,11 @@ def _business_logic_execution_plan(
                 exact["parameter_ref"] = parameter_ref
                 exact["object_id"] = object_id
                 exact_actions.append(exact)
+            # Wire contracts can request a different identity pair than the
+            # action's originally-observed required_identities, so re-derive
+            # endpoint_by_identity against the final exact_actions instead of
+            # trusting whatever the earlier attach call computed above.
+            _attach_observed_endpoints_per_identity(db, int(scan_id), exact_actions, endpoints)
             if not exact_actions and not exact_blocked:
                 exact_blocked.append({"endpoint": target_ref, "reasons": ["wire_exact_endpoint_not_observed"]})
             return {
