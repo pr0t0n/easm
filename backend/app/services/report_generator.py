@@ -455,6 +455,91 @@ def generate_executive_report(
     return html
 
 
+def _render_quality_gate_html(quality: dict[str, Any]) -> str:
+    """"Quality Gate do Pentest" section of the report. build_scan_quality()
+    already computes precise, plain-language explanations of why coverage is
+    incomplete (depth_requirements.blocking_requirement_ids,
+    preflight_summary.non_success_reason_counts, and the operator_message
+    fields on auth_precondition_summary/business_logic_precondition_summary)
+    -- previously none of that reached the report, only the generic top-6
+    `gaps` titles did, so an operator reading the PDF/HTML had no way to see
+    the specific reason (e.g. "needs a second identity") behind a gap."""
+    _score = float(quality.get("score") or 0)
+    _grade = _html.escape(str(quality.get("grade") or "—"))
+    _label = _html.escape(str(quality.get("label") or ""))
+    _gate = dict(quality.get("quality_gate") or {})
+    _gate_status = _html.escape(str(_gate.get("status") or "not_run").replace("_", " "))
+    _gate_bg = "#fff3cd" if _gate.get("status") in {"remediation_scheduled", "exhausted"} or _score < 70 else "#eafaf1"
+    _gate_border = "#f39c12" if _gate.get("status") in {"remediation_scheduled", "exhausted"} or _score < 70 else "#27ae60"
+    _gaps = list(quality.get("gaps") or [])[:6]
+    _gap_rows = "".join(
+        "<li>"
+        f"<strong>{_html.escape(str(gap.get('title') or 'Gap de qualidade'))}</strong>: "
+        f"{_html.escape(str(gap.get('action') or gap.get('detail') or 'Revisar evidência/cobertura.'))}"
+        "</li>"
+        for gap in _gaps
+    )
+    _components = dict(quality.get("components") or {})
+    _component_bits = " · ".join(
+        f"{_html.escape(name.replace('_', ' '))}: {float(item.get('score') or 0):.0f}%"
+        for name, item in _components.items()
+    )
+
+    _blocking_ids = list((dict(quality.get("depth_requirements") or {})).get("blocking_requirement_ids") or [])
+    _reason_counts = list((dict(quality.get("preflight_summary") or {})).get("non_success_reason_counts") or [])[:6]
+    _operator_messages = [
+        text for text in (
+            (dict(quality.get("auth_precondition_summary") or {})).get("operator_message")
+            if (dict(quality.get("auth_precondition_summary") or {})).get("blocked") else None,
+            (dict(quality.get("business_logic_precondition_summary") or {})).get("operator_message")
+            if (dict(quality.get("business_logic_precondition_summary") or {})).get("blockers") else None,
+        )
+        if text
+    ]
+
+    _explain_rows = "".join(
+        f'<li><strong>{_html.escape(str(item.get("reason") or ""))}</strong>: {int(item.get("count") or 0)} alvo(s)</li>'
+        for item in _reason_counts
+    )
+    _explain_parts: list[str] = []
+    if _blocking_ids:
+        _explain_parts.append(
+            '<p style="font-size:11px;color:#555;margin-bottom:4px">'
+            f'<strong>Requisitos bloqueando de fato:</strong> {_html.escape(", ".join(_blocking_ids))}</p>'
+        )
+    for msg in _operator_messages:
+        _explain_parts.append(f'<p style="font-size:11px;color:#555;margin-bottom:4px">{_html.escape(msg)}</p>')
+    if _explain_rows:
+        _explain_parts.append(
+            '<p style="font-size:11px;color:#555;margin-bottom:2px">Alvos não totalmente escaneados por motivo:</p>'
+            f'<ul style="font-size:11px;color:#555;margin-left:18px">{_explain_rows}</ul>'
+        )
+    _explain_html = (
+        '<div style="margin-top:10px;padding-top:8px;border-top:1px solid rgba(0,0,0,0.08)">'
+        + "".join(_explain_parts) + "</div>"
+    ) if _explain_parts else ""
+
+    return (
+        f'<div class="section" style="border-left:4px solid {_gate_border};background:{_gate_bg}">'
+        '<h2>Quality Gate do Pentest</h2>'
+        f'<p style="font-size:13px;color:#555;margin-bottom:8px">'
+        f'Score de qualidade: <strong>{_score:.1f}% ({_grade} — {_label})</strong> · '
+        f'Gate: <strong>{_gate_status}</strong>'
+        f'{(" · rodada " + str(_gate.get("rounds"))) if _gate.get("rounds") else ""}'
+        '</p>'
+        f'<p style="font-size:11px;color:#777;margin-bottom:8px">{_html.escape(_component_bits)}</p>'
+        + (f'<ul style="font-size:12px;color:#555;margin-left:18px">{_gap_rows}</ul>' if _gap_rows else
+           '<p style="font-size:12px;color:#555">Sem gaps automáticos pendentes.</p>')
+        + _explain_html
+        + (
+            '<p style="font-size:11px;color:#8a6d3b;margin-top:8px">'
+            'Relatório qualificado: findings não confirmados permanecem como candidatos/hipóteses até EvidenceArtifact + ValidationRun suficientes.'
+            '</p>'
+        )
+        + '</div>'
+    )
+
+
 def generate_pentest_report(
     db: "Session",
     scan_id: int,
@@ -1023,45 +1108,7 @@ def generate_pentest_report(
     try:
         from app.services.scan_quality import build_scan_quality
 
-        _quality = build_scan_quality(db, job)
-        _score = float(_quality.get("score") or 0)
-        _grade = _html.escape(str(_quality.get("grade") or "—"))
-        _label = _html.escape(str(_quality.get("label") or ""))
-        _gate = dict(_quality.get("quality_gate") or {})
-        _gate_status = _html.escape(str(_gate.get("status") or "not_run").replace("_", " "))
-        _gate_bg = "#fff3cd" if _gate.get("status") in {"remediation_scheduled", "exhausted"} or _score < 70 else "#eafaf1"
-        _gate_border = "#f39c12" if _gate.get("status") in {"remediation_scheduled", "exhausted"} or _score < 70 else "#27ae60"
-        _gaps = list(_quality.get("gaps") or [])[:6]
-        _gap_rows = "".join(
-            "<li>"
-            f"<strong>{_html.escape(str(gap.get('title') or 'Gap de qualidade'))}</strong>: "
-            f"{_html.escape(str(gap.get('action') or gap.get('detail') or 'Revisar evidência/cobertura.'))}"
-            "</li>"
-            for gap in _gaps
-        )
-        _components = dict(_quality.get("components") or {})
-        _component_bits = " · ".join(
-            f"{_html.escape(name.replace('_', ' '))}: {float(item.get('score') or 0):.0f}%"
-            for name, item in _components.items()
-        )
-        quality_html = (
-            f'<div class="section" style="border-left:4px solid {_gate_border};background:{_gate_bg}">'
-            '<h2>Quality Gate do Pentest</h2>'
-            f'<p style="font-size:13px;color:#555;margin-bottom:8px">'
-            f'Score de qualidade: <strong>{_score:.1f}% ({_grade} — {_label})</strong> · '
-            f'Gate: <strong>{_gate_status}</strong>'
-            f'{(" · rodada " + str(_gate.get("rounds"))) if _gate.get("rounds") else ""}'
-            '</p>'
-            f'<p style="font-size:11px;color:#777;margin-bottom:8px">{_html.escape(_component_bits)}</p>'
-            + (f'<ul style="font-size:12px;color:#555;margin-left:18px">{_gap_rows}</ul>' if _gap_rows else
-               '<p style="font-size:12px;color:#555">Sem gaps automáticos pendentes.</p>')
-            + (
-                '<p style="font-size:11px;color:#8a6d3b;margin-top:8px">'
-                'Relatório qualificado: findings não confirmados permanecem como candidatos/hipóteses até EvidenceArtifact + ValidationRun suficientes.'
-                '</p>'
-            )
-            + '</div>'
-        )
+        quality_html = _render_quality_gate_html(build_scan_quality(db, job))
     except Exception:
         quality_html = ""
 

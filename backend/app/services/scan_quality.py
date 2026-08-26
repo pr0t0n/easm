@@ -885,11 +885,25 @@ def _build_aggressive_depth_requirements(
         "high",
         {"mutating_body_surface": has_mutating_surface, "object_reference_surface": object_reference_surface, "rate_limit_surface": rate_limit_surface},
     )
+    # Previously any of {"attack-path-correlator", "nuclei", "gitleaks",
+    # "trufflehog", "nuclei-race"} completing satisfied this -- nuclei alone
+    # (run for a dozen unrelated reasons every P20-tagged scan) proved P20
+    # "done" without the correlator itself ever running or producing a
+    # single path. Require real correlation output (state populated by
+    # phase_control_tools._attack_path_correlator or the always-on
+    # AttackPathEngine) or the correlator tool specifically completing --
+    # same gate-honesty fix as P13's object-attribution requirement.
+    p20_correlation_ran = bool(
+        state.get("attack_path_correlation")
+        or state.get("attack_paths_v2")
+        or list(state.get("attack_paths") or [])
+        or completed_tools("P20", {"attack-path-correlator"})
+    )
     add_surface_execution_requirement(
         "P20",
         "p20_attack_path_correlation_for_discovered_primitives",
         any(row["status"] == "met" for row in requirements),
-        completed_tools("P20", {"attack-path-correlator", "nuclei", "gitleaks", "trufflehog", "nuclei-race"}),
+        p20_correlation_ran,
         "validated_or_candidate_attack_primitives",
         "completed_attack_path_correlation",
         "medium",

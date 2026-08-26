@@ -621,6 +621,18 @@ function QualityPanel({ quality }) {
     : "var(--sev-critical-solid)";
   const components = Object.entries(quality.components || {});
   const gaps = Array.isArray(quality.gaps) ? quality.gaps : [];
+  const depthRequirements = quality.depth_requirements || {};
+  const blockingRequirementIds = Array.isArray(depthRequirements.blocking_requirement_ids) ? depthRequirements.blocking_requirement_ids : [];
+  const preflightSummary = quality.preflight_summary || {};
+  const nonSuccessReasons = Array.isArray(preflightSummary.non_success_reason_counts) ? preflightSummary.non_success_reason_counts : [];
+  const authPrecondition = quality.auth_precondition_summary || {};
+  const businessLogicPrecondition = quality.business_logic_precondition_summary || {};
+  const operatorMessages = [
+    authPrecondition.blocked ? authPrecondition.operator_message : null,
+    businessLogicPrecondition.blockers && Object.keys(businessLogicPrecondition.blockers).length > 0
+      ? businessLogicPrecondition.operator_message
+      : null,
+  ].filter(Boolean);
   const gate = quality.quality_gate || {};
   const runtime = quality.runtime_visibility || {};
   const external = quality.external_preconditions || {};
@@ -824,6 +836,26 @@ function QualityPanel({ quality }) {
               </div>
             ))}
           </div>
+        </div>
+      )}
+
+      {(blockingRequirementIds.length > 0 || operatorMessages.length > 0 || nonSuccessReasons.length > 0) && (
+        <div style={{ marginTop: 12, paddingTop: 10, borderTop: "1px solid var(--line-soft)" }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: "var(--ink-soft)", marginBottom: 6 }}>Por que a cobertura está incompleta</div>
+          {blockingRequirementIds.length > 0 && (
+            <div style={{ fontSize: 11, color: "var(--ink-muted)", marginBottom: 4, lineHeight: 1.45 }}>
+              <strong>Requisitos bloqueando de fato:</strong> {blockingRequirementIds.join(", ")}
+            </div>
+          )}
+          {operatorMessages.map((msg, idx) => (
+            <div key={idx} style={{ fontSize: 11, color: "var(--ink-muted)", marginBottom: 4, lineHeight: 1.45 }}>{msg}</div>
+          ))}
+          {nonSuccessReasons.length > 0 && (
+            <div style={{ fontSize: 11, color: "var(--ink-muted)", lineHeight: 1.45 }}>
+              <strong>Alvos não totalmente escaneados:</strong>{" "}
+              {nonSuccessReasons.slice(0, 6).map((row) => `${row.reason} (${row.count})`).join(", ")}
+            </div>
+          )}
         </div>
       )}
     </div>

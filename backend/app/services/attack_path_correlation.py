@@ -84,6 +84,7 @@ def correlate_attack_signals(
                 "target": row["target"],
                 "severity": row["severity"],
                 "confirmed": row["verified"],
+                "blocked": row["blocked"],
                 "confidence": row["confidence"],
                 "evidence_ids": row["evidence_ids"],
             }
@@ -92,13 +93,33 @@ def correlate_attack_signals(
         path_payload = {"affinity": affinity, "objective": objective.get("target"), "signals": [row["id"] for row in linked]}
         evidence_complete = bool(steps and all(step["evidence_ids"] for step in steps if step["confirmed"]))
         chain_proven = bool(reached and evidence_complete and all(step["confirmed"] for step in steps))
+        # `steps` is already in ascending stage order (linked was sorted by
+        # FAMILY_STAGE rank above), so the first unconfirmed step is the next
+        # one the chain needs to advance past its objective. If a validator
+        # already tried it and hit a missing precondition (not merely
+        # "untested"), the chain can't progress no matter how much more
+        # scanning happens -- that's structurally different from "candidate"
+        # (still open, more testing might resolve it).
+        next_required_step = next((step for step in steps if not step["confirmed"]), None)
+        chain_blocked = bool(not chain_proven and next_required_step is not None and next_required_step["blocked"])
+        status = "proven" if chain_proven else ("blocker" if chain_blocked else "candidate")
         paths.append({
             "attack_path_id": "AP-" + hashlib.sha256(json.dumps(path_payload, sort_keys=True).encode()).hexdigest()[:16],
             "objective": str(objective.get("target") or affinity),
             "label": str(objective.get("label") or "highest demonstrated impact"),
-            "status": "proven" if chain_proven else "candidate",
+            "status": status,
             "objective_reachable": reached,
             "chain_proven": chain_proven,
+            "chain_blocked": chain_blocked,
+            "blocking_step": (
+                {
+                    "signal_id": next_required_step["signal_id"],
+                    "family": next_required_step["family"],
+                    "target": next_required_step["target"],
+                    "description": next_required_step["description"],
+                }
+                if chain_blocked else None
+            ),
             "confidence": confidence,
             "stages": sorted(stages, key=lambda stage: min(value[0] for value in FAMILY_STAGE.values() if value[1] == stage)),
             "steps": steps,
@@ -124,6 +145,13 @@ def _normalize_signal(signal: dict[str, Any]) -> dict[str, Any]:
         "severity": str(signal.get("severity") or "medium").lower(),
         "status": status,
         "verified": status in VERIFIED_STATUSES,
+        # A validator explicitly skipped this hypothesis for lack of a
+        # precondition (record_validation() sets hypothesis.status to
+        # "blocked_precondition" -- see offensive_inventory_service.py) --
+        # distinct from "just not tested yet". A chain whose next required
+        # step is blocked this way can't progress no matter how much more
+        # scanning happens, so it deserves its own status, not "candidate".
+        "blocked": status in {"blocked_precondition", "skipped"},
         "confidence": max(0.0, min(1.0, confidence)),
         "evidence_ids": [str(item) for item in list(signal.get("evidence_ids") or []) if str(item)],
     }
