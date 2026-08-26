@@ -50,7 +50,7 @@ export default function BasDashboardPage() {
       const url = URL.createObjectURL(res.data);
       const a = document.createElement("a");
       a.href = url;
-      a.download = os === "windows" ? "bas-agent.exe" : "bas-agent";
+      a.download = os === "windows" ? "bas-agent.exe" : `bas-agent-${os}`;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -82,10 +82,11 @@ export default function BasDashboardPage() {
       )}
 
       <section className="card">
-        <div className="card-h"><div><h3>Baixar agente</h3><div className="sub">instale na máquina Windows ou Linux que ficará dentro da rede do cliente</div></div></div>
-        <div style={{ display: "flex", gap: 10 }}>
+        <div className="card-h"><div><h3>Baixar agente</h3><div className="sub">instale na máquina Windows ou Linux que ficará dentro da rede do cliente — escolha a arquitetura certa, um binário amd64 rodando sob emulação num host arm64 (ex.: VM Linux no VirtualBox em Mac Apple Silicon) trava</div></div></div>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
           <button className="btn btn-primary" onClick={() => downloadAgent("windows")}>Baixar agente (Windows)</button>
-          <button className="btn btn-primary" onClick={() => downloadAgent("linux")}>Baixar agente (Linux)</button>
+          <button className="btn btn-primary" onClick={() => downloadAgent("linux-amd64")}>Baixar agente (Linux amd64)</button>
+          <button className="btn btn-primary" onClick={() => downloadAgent("linux-arm64")}>Baixar agente (Linux arm64)</button>
         </div>
       </section>
 

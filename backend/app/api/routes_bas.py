@@ -572,7 +572,13 @@ def install_config(db: Session = Depends(get_db), current_user: User = Depends(g
 
 
 _AGENT_BINARY_FILENAMES = {
-    "linux": "bas-agent-linux",
+    # A single "linux" binary used to be amd64-only, which silently segfaults
+    # deep in the Go runtime's epoll syscall handling when run under
+    # binfmt/QEMU x86 emulation on an arm64 host -- e.g. any Kali VM under
+    # VirtualBox on Apple Silicon, which can only run arm64 guests. Split by
+    # architecture so the customer downloads a native binary.
+    "linux-amd64": "bas-agent-linux-amd64",
+    "linux-arm64": "bas-agent-linux-arm64",
     "windows": "bas-agent-windows.exe",
 }
 
