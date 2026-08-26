@@ -449,6 +449,14 @@ def delete_schedule(schedule_id: int, db: Session = Depends(get_db), current_use
     schedule = apply_company_scope(db.query(BasSchedule), current_user, BasSchedule).filter(BasSchedule.id == schedule_id).first()
     if not schedule:
         raise HTTPException(status_code=404, detail="Agendamento não encontrado")
+    # BasJob.schedule_id has no ON DELETE clause -- any schedule that has
+    # ever fired (has BasJob rows) 500s here otherwise. Null the FK instead
+    # of deleting the jobs: they're real dispatch history (technique/target/
+    # result/finding_id) that stays meaningful on its own after the schedule
+    # that triggered them is gone.
+    db.query(BasJob).filter(BasJob.schedule_id == schedule_id).update(
+        {BasJob.schedule_id: None}, synchronize_session=False,
+    )
     db.delete(schedule)
     db.commit()
 
