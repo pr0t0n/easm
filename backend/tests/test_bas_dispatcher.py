@@ -149,6 +149,76 @@ def test_dispatch_refuses_future_agent_required_technique_even_with_no_schedule(
     mock_exec.assert_not_called()
 
 
+def test_dispatch_preserves_cidr_for_an_accepts_range_technique():
+    with patch("app.services.bas_dispatcher.execute_via_kali", return_value={"status": "executed"}) as mock_exec:
+        outcome = dispatch_bas_technique(
+            technique_key="port_service_scan",
+            target_hint="10.10.10.0/28",  # 16 addresses, well under the 256 cap
+            bas_agent=SimpleNamespace(id=1),
+            scan_id=42,
+            schedule=_schedule(),
+        )
+
+    assert outcome["dispatched"] is True
+    mock_exec.assert_called_once_with(
+        "nmap-portscan-bas", "10.10.10.0/28", scan_id=42, scan_mode="unit", env_vars=_STUB_ENV_VARS,
+    )
+
+
+def test_dispatch_strips_cidr_for_a_technique_that_does_not_accept_a_range():
+    """smb_enum_enum4linux is NOT marked accepts_range -- a CIDR handed to it
+    must still be mangled down to a bare host (the pre-existing safe
+    behavior), never silently passed through as a range the underlying tool
+    was never verified to handle correctly."""
+    with patch("app.services.bas_dispatcher.execute_via_kali", return_value={"status": "executed"}) as mock_exec:
+        dispatch_bas_technique(
+            technique_key="smb_enum_enum4linux",
+            target_hint="10.10.10.0/24",
+            bas_agent=SimpleNamespace(id=1),
+            scan_id=42,
+            schedule=_schedule(),
+        )
+
+    mock_exec.assert_called_once_with(
+        "enum4linux-ng-bas", "10.10.10.0", scan_id=42, scan_mode="unit", env_vars=_STUB_ENV_VARS,
+    )
+
+
+def test_dispatch_refuses_a_range_larger_than_the_host_cap_without_calling_kali():
+    """Every accepts_range profile has a fixed timeout sized for one host
+    (120-240s, bas_internal.yaml) through a SOCKS5-proxied tool -- a /16
+    would silently run out of time and cover only a sliver of the range with
+    no signal anything was truncated. Reject up front instead."""
+    with patch("app.services.bas_dispatcher.execute_via_kali") as mock_exec:
+        outcome = dispatch_bas_technique(
+            technique_key="port_service_scan",
+            target_hint="10.10.0.0/16",  # 65536 addresses
+            bas_agent=SimpleNamespace(id=1),
+            scan_id=42,
+            schedule=_schedule(),
+        )
+
+    assert outcome["dispatched"] is False
+    assert outcome["reason"] == "range_too_large:65536_hosts_max_256"
+    mock_exec.assert_not_called()
+
+
+def test_dispatch_allows_a_range_exactly_at_the_host_cap():
+    with patch("app.services.bas_dispatcher.execute_via_kali", return_value={"status": "executed"}) as mock_exec:
+        outcome = dispatch_bas_technique(
+            technique_key="smb_enum_cme",
+            target_hint="10.10.10.0/24",  # exactly 256 addresses
+            bas_agent=SimpleNamespace(id=1),
+            scan_id=42,
+            schedule=_schedule(),
+        )
+
+    assert outcome["dispatched"] is True
+    mock_exec.assert_called_once_with(
+        "crackmapexec-bas", "10.10.10.0/24", scan_id=42, scan_mode="unit", env_vars=_STUB_ENV_VARS,
+    )
+
+
 def test_dispatch_unknown_technique_refused():
     with patch("app.services.bas_dispatcher.execute_via_kali") as mock_exec:
         outcome = dispatch_bas_technique(

@@ -143,6 +143,7 @@ export default function BasOperationsCenterPage() {
               <div key={j.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: TV.surface2, borderRadius: 8, padding: "7px 10px" }}>
                 <div style={{ fontSize: 11, color: TV.text }}>
                   #{j.id} · {j.technique_key} <span style={{ color: TV.muted }}>({j.risk_tier})</span>
+                  {j.target && <span style={{ color: TV.muted }}> · {j.target}</span>}
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                   {j.simulated ? (

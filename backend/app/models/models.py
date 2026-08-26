@@ -1410,6 +1410,13 @@ class BasJob(Base):
     access_group_id: Mapped[int | None] = mapped_column(ForeignKey("access_groups.id"), nullable=True, index=True)
     scan_job_id: Mapped[int] = mapped_column(ForeignKey("scan_jobs.id"), index=True)
     technique_key: Mapped[str] = mapped_column(String(120), index=True)
+    # The specific target this job ran against -- needed because a schedule's
+    # target_hint can now hold a list (one BasJob per technique x target) or
+    # a CIDR range (accepts_range techniques: one BasJob covers the whole
+    # range in a single tool invocation, this is the CIDR string itself).
+    # Nullable: jobs created before this column existed have no value here,
+    # target context for those lives only on the shared shadow ScanJob.
+    target: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     risk_tier: Mapped[str] = mapped_column(String(20), index=True)
     status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
     kali_job_id: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)

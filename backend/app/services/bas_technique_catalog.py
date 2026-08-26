@@ -74,6 +74,13 @@ def _technique(
     # verbatim (confirmed live: nmap silently misresolved a "host:port"
     # string meant for a "host"-only step in the web_to_secrets_chain test).
     target_format: str = "host",
+    # True only for techniques whose underlying CLI tool natively iterates a
+    # CIDR range in a single invocation (nmap -sT -Pn, crackmapexec) -- lets
+    # bas_dispatcher._normalize_target preserve a "/nn" mask instead of
+    # collapsing target_hint to one bare host. Most techniques are
+    # app/service/domain-specific (a webhook URL, one AD DC, one cloud
+    # tenant) and would never make sense pointed at a range.
+    accepts_range: bool = False,
     # Generic, technique-level remediation guidance shown in the BAS report
     # when this technique produces a real (non-simulated) finding.
     recommendation: str = "",
@@ -98,6 +105,7 @@ def _technique(
         "requires_privileged_agent": requires_privileged_agent,
         "is_simulated_in_phase_1": is_simulated_in_phase_1,
         "target_format": target_format,
+        "accepts_range": accepts_range,
         "recommendation": recommendation,
     }
 
@@ -118,7 +126,8 @@ BAS_TECHNIQUE_CATALOG: list[dict[str, Any]] = [
         kali_tool_name="crackmapexec-bas", kali_profile="crackmapexec_smb_bas_tunnel",
         availability="simulated", execution_backend="kali_proxychains",
         requires_tcp=True, is_simulated_in_phase_1=True,
-        target_format="host", recommendation="Restrinja acesso a compartilhamentos SMB anonimo/autenticado; desative SMBv1; segmente hosts com dados sensiveis do acesso geral da rede.",
+        target_format="host", accepts_range=True,
+        recommendation="Restrinja acesso a compartilhamentos SMB anonimo/autenticado; desative SMBv1; segmente hosts com dados sensiveis do acesso geral da rede.",
     ),
     _technique(
         "smb_enum_enum4linux",
@@ -249,7 +258,8 @@ BAS_TECHNIQUE_CATALOG: list[dict[str, Any]] = [
         kali_tool_name="nmap-firewall-bas", kali_profile="firewall_segmentation_probe",
         availability="simulated", execution_backend="kali_proxychains",
         requires_tcp=True, is_simulated_in_phase_1=True,
-        target_format="host", recommendation="Revise regras de firewall/ACLs entre segmentos; o alcance encontrado indica que a segmentacao presumida nao esta de fato aplicada na rede.",
+        target_format="host", accepts_range=True,
+        recommendation="Revise regras de firewall/ACLs entre segmentos; o alcance encontrado indica que a segmentacao presumida nao esta de fato aplicada na rede.",
     ),
 
     # ── Added on request: network/AD/cloud/web discovery + supply-chain
@@ -297,7 +307,8 @@ BAS_TECHNIQUE_CATALOG: list[dict[str, Any]] = [
         kali_tool_name="nmap-portscan-bas", kali_profile="port_service_scan",
         availability="simulated", execution_backend="kali_proxychains",
         requires_tcp=True, is_simulated_in_phase_1=True,
-        target_format="host", recommendation="Feche portas/servicos desnecessariamente expostos; confirme que a segmentacao de rede presumida realmente bloqueia o alcance encontrado.",
+        target_format="host", accepts_range=True,
+        recommendation="Feche portas/servicos desnecessariamente expostos; confirme que a segmentacao de rede presumida realmente bloqueia o alcance encontrado.",
     ),
     _technique(
         "chat_webhook_discovery",

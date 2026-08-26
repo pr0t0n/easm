@@ -549,6 +549,7 @@ def operations_center(db: Session = Depends(get_db), current_user: User = Depend
         "recent_jobs": [
             {
                 "id": j.id, "technique_key": j.technique_key, "risk_tier": j.risk_tier,
+                "target": j.target,
                 "status": j.status, "agent_id": j.agent_id, "created_at": j.created_at,
                 "finished_at": j.finished_at,
                 # Per-job, sourced from the actual dispatching agent's kind --

@@ -48,3 +48,26 @@ def test_url_format_leaves_an_already_schemed_url_untouched():
 def test_empty_target_hint_stays_empty_regardless_of_format():
     assert _normalize_target("", "host") == ""
     assert _normalize_target("", "url") == ""
+
+
+def test_accepts_range_preserves_cidr_mask():
+    assert _normalize_target("10.10.10.0/24", "host", accepts_range=True) == "10.10.10.0/24"
+
+
+def test_accepts_range_still_normalizes_a_plain_single_host():
+    """accepts_range=True doesn't change single-host behavior -- only a real
+    multi-address CIDR takes the preserved-mask path."""
+    assert _normalize_target("192.168.1.65:8001", "host", accepts_range=True) == "192.168.1.65"
+
+
+def test_accepts_range_false_strips_the_mask_from_a_cidr_string():
+    """Regression: without accepts_range, a technique that got a CIDR by
+    mistake (or before this technique was marked accepts_range) must keep
+    the old, safe behavior -- mangled to a bare host, not silently scanning
+    an unintended range."""
+    assert _normalize_target("10.10.10.0/24", "host", accepts_range=False) == "10.10.10.0"
+
+
+def test_a_single_host_cidr_slash_32_does_not_take_the_range_path():
+    """/32 has exactly one address -- treat it as the plain host it is."""
+    assert _normalize_target("10.10.10.5/32", "host", accepts_range=True) == "10.10.10.5"

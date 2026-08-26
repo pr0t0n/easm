@@ -5,6 +5,7 @@ generic ScanWorkItem/execute_scan_work_item queue)."""
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -38,6 +39,17 @@ def _create_shadow_scan_job(db: Session, schedule: BasSchedule) -> ScanJob:
     return shadow
 
 
+def _split_targets(target_hint: str, fallback: str) -> list[str]:
+    """Same split regex as scan_scope.authorized_scope_from_target_query, so
+    the per-target dispatch loop below and the shadow ScanJob's derived
+    authorized_scope always agree on the same set of targets. A schedule's
+    target_hint can now be a single target (unchanged behavior) or a
+    comma/semicolon/newline-separated list -- one BasJob per (technique,
+    target) pair either way."""
+    pieces = [p.strip() for p in re.split(r"[,;\n]+", str(target_hint or "")) if p.strip()]
+    return pieces or [fallback]
+
+
 def _extract_key_findings(technique_key: str, category: str, result: dict[str, Any]) -> list[str]:
     """Pulls the actually meaningful lines out of a real tool's raw stdout
     instead of leaving the report to show just a title/status -- this is
@@ -53,8 +65,25 @@ def _extract_key_findings(technique_key: str, category: str, result: dict[str, A
 
     if technique_key == "owasp_web_app_scan":
         return [ln for ln in lines if ln.startswith("+ [")][:15]
-    if technique_key in ("port_service_scan", "firewall_segmentation_test", "network_share_discovery"):
-        return [ln for ln in lines if "open" in ln.lower() and ("/tcp" in ln or "share" in ln.lower())][:15]
+    if technique_key in ("port_service_scan", "firewall_segmentation_test"):
+        # These two accept_range techniques run nmap against a whole CIDR in
+        # one invocation -- its stdout only prints "Nmap scan report for
+        # <host>" once per host, then a bare PORT/STATE/SERVICE table with no
+        # host repeated per line. Filtering on "open" alone (the old
+        # single-host-only behavior) would flatten a multi-host result into
+        # an indistinguishable list of ports with no idea which host each
+        # belongs to -- track the most recent host header and prefix it in.
+        current_host = ""
+        findings: list[str] = []
+        for ln in lines:
+            if ln.lower().startswith("nmap scan report for"):
+                current_host = ln[len("Nmap scan report for "):].strip()
+                continue
+            if "open" in ln.lower() and "/tcp" in ln:
+                findings.append(f"{current_host}: {ln}" if current_host else ln)
+        return findings[:50]
+    if technique_key == "network_share_discovery":
+        return [ln for ln in lines if "open" in ln.lower() and "share" in ln.lower()][:15]
     if technique_key in ("pipeline_secrets_harvesting", "source_code_secrets_scan"):
         hits = [ln for ln in lines if not ln.upper().startswith("EXIT_CODE") and "no leaks found" not in ln.lower()]
         return hits[:15]
@@ -114,6 +143,7 @@ def _finding_from_job_result(
             "counts_towards_attack_path": not is_stub,
             "bas_job_id": job.id,
             "bas_schedule_id": schedule.id,
+            "target": job.target,
             "bas_agent_id": agent.id,
             "bas_agent_kind": agent.kind,
             "technique_key": technique["technique_key"],
@@ -151,68 +181,75 @@ def fire_schedule(db: Session, schedule: BasSchedule) -> dict[str, Any]:
     job_ids: list[int] = []
     skipped: list[dict[str, str]] = []
 
-    for technique_key in schedule.technique_keys:
-        technique = get_technique(technique_key)
-        if technique is None:
-            skipped.append({"technique_key": technique_key, "reason": "unknown_technique"})
-            continue
-        decision = check_bas_authorization(schedule, technique_key)
-        if not decision["allowed"]:
-            skipped.append({"technique_key": technique_key, "reason": decision["reason"]})
-            logger.info("bas_scheduler: skipped technique=%s reason=%s schedule=%s", technique_key, decision["reason"], schedule.id)
-            continue
+    targets = _split_targets(schedule.target_hint, agent.hostname or "internal-target")
 
-        job = BasJob(
-            schedule_id=schedule.id,
-            agent_id=agent.id,
-            owner_id=schedule.owner_id,
-            access_group_id=schedule.access_group_id,
-            scan_job_id=shadow.id,
-            technique_key=technique_key,
-            risk_tier=technique["risk_tier"],
-            status="dispatched_to_kali",
-            dispatched_at=datetime.now(),
-        )
-        db.add(job)
-        db.flush()
+    for target in targets:
+        for technique_key in schedule.technique_keys:
+            technique = get_technique(technique_key)
+            if technique is None:
+                skipped.append({"technique_key": technique_key, "target": target, "reason": "unknown_technique"})
+                continue
+            decision = check_bas_authorization(schedule, technique_key)
+            if not decision["allowed"]:
+                skipped.append({"technique_key": technique_key, "target": target, "reason": decision["reason"]})
+                logger.info(
+                    "bas_scheduler: skipped technique=%s target=%s reason=%s schedule=%s",
+                    technique_key, target, decision["reason"], schedule.id,
+                )
+                continue
 
-        outcome = dispatch_bas_technique(
-            technique_key=technique_key,
-            target_hint=schedule.target_hint or agent.hostname or "internal-target",
-            bas_agent=agent,
-            scan_id=shadow.id,
-            schedule=schedule,
-        )
-        if not outcome["dispatched"]:
-            job.status = "skipped"
-            job.last_error = outcome["reason"]
-            job.finished_at = datetime.now()
-            db.commit()
-            skipped.append({"technique_key": technique_key, "reason": outcome["reason"]})
-            continue
-
-        result = outcome["result"]
-        job.kali_job_id = str(result.get("dispatch_task_id") or "")
-        job.result = result
-        job.status = "completed" if result.get("status") == "executed" else "failed"
-        job.finished_at = datetime.now()
-        db.flush()
-
-        finding = _finding_from_job_result(db, job, schedule, technique, agent)
-        if finding:
-            job.finding_id = finding.id
-        job_ids.append(job.id)
-        db.commit()
-
-        if schedule.stop_on_failure and job.status == "failed":
-            remaining = schedule.technique_keys[schedule.technique_keys.index(technique_key) + 1:]
-            for remaining_key in remaining:
-                skipped.append({"technique_key": remaining_key, "reason": "chain_stopped_after_failure"})
-            logger.info(
-                "bas_scheduler: chain stopped after technique=%s failed, skipping %d remaining step(s) schedule=%s",
-                technique_key, len(remaining), schedule.id,
+            job = BasJob(
+                schedule_id=schedule.id,
+                agent_id=agent.id,
+                owner_id=schedule.owner_id,
+                access_group_id=schedule.access_group_id,
+                scan_job_id=shadow.id,
+                technique_key=technique_key,
+                target=target,
+                risk_tier=technique["risk_tier"],
+                status="dispatched_to_kali",
+                dispatched_at=datetime.now(),
             )
-            break
+            db.add(job)
+            db.flush()
+
+            outcome = dispatch_bas_technique(
+                technique_key=technique_key,
+                target_hint=target,
+                bas_agent=agent,
+                scan_id=shadow.id,
+                schedule=schedule,
+            )
+            if not outcome["dispatched"]:
+                job.status = "skipped"
+                job.last_error = outcome["reason"]
+                job.finished_at = datetime.now()
+                db.commit()
+                skipped.append({"technique_key": technique_key, "target": target, "reason": outcome["reason"]})
+                continue
+
+            result = outcome["result"]
+            job.kali_job_id = str(result.get("dispatch_task_id") or "")
+            job.result = result
+            job.status = "completed" if result.get("status") == "executed" else "failed"
+            job.finished_at = datetime.now()
+            db.flush()
+
+            finding = _finding_from_job_result(db, job, schedule, technique, agent)
+            if finding:
+                job.finding_id = finding.id
+            job_ids.append(job.id)
+            db.commit()
+
+            if schedule.stop_on_failure and job.status == "failed":
+                remaining = schedule.technique_keys[schedule.technique_keys.index(technique_key) + 1:]
+                for remaining_key in remaining:
+                    skipped.append({"technique_key": remaining_key, "target": target, "reason": "chain_stopped_after_failure"})
+                logger.info(
+                    "bas_scheduler: chain stopped after technique=%s failed for target=%s, skipping %d remaining step(s) for this target, schedule=%s",
+                    technique_key, target, len(remaining), schedule.id,
+                )
+                break  # only this target's remaining chain steps -- other targets still run their own full chain
 
     shadow.status = "completed"
     schedule.last_run_at = datetime.now()

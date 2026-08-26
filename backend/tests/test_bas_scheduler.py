@@ -15,6 +15,7 @@ from app.services.bas_scheduler import (
     _extract_key_findings,
     _finding_from_job_result,
     _is_due,
+    _split_targets,
     fire_schedule,
 )
 from app.services.bas_technique_catalog import get_technique
@@ -100,7 +101,7 @@ def test_shadow_scan_job_falls_back_to_a_placeholder_when_target_hint_is_blank()
 
 
 def _job(**overrides):
-    base = dict(id=1, scan_job_id=1, result={"command": "smbmap -H 127.0.0.1", "status": "executed"})
+    base = dict(id=1, scan_job_id=1, target="10.10.10.5", result={"command": "smbmap -H 127.0.0.1", "status": "executed"})
     base.update(overrides)
     return SimpleNamespace(**base)
 
@@ -136,6 +137,68 @@ def test_finding_from_job_result_marks_real_agent_dispatch_as_not_simulated():
     assert finding.details["bas_agent_kind"] == "real"
 
 
+def test_split_targets_splits_on_comma_semicolon_and_newline():
+    assert _split_targets("10.0.0.5, app-db.internal", "fallback") == ["10.0.0.5", "app-db.internal"]
+    assert _split_targets("10.0.0.5;app-db.internal", "fallback") == ["10.0.0.5", "app-db.internal"]
+    assert _split_targets("10.0.0.5\napp-db.internal", "fallback") == ["10.0.0.5", "app-db.internal"]
+
+
+def test_split_targets_single_value_returns_one_element_list():
+    assert _split_targets("10.0.0.5", "fallback") == ["10.0.0.5"]
+
+
+def test_split_targets_falls_back_when_blank():
+    assert _split_targets("", "fallback") == ["fallback"]
+    assert _split_targets("   ", "fallback") == ["fallback"]
+
+
+def test_fire_schedule_dispatches_one_job_per_technique_per_target():
+    db = MagicMock()
+    agent = SimpleNamespace(id=13, kind="real", hostname="mac.local", tunnel_host="", tunnel_port=None)
+    db.query.return_value.filter.return_value.first.return_value = agent
+
+    schedule = _schedule(target_hint="10.0.0.5, 10.0.0.6", agent_id=13)
+    schedule.stop_on_failure = False
+    schedule.technique_keys = ["network_share_discovery", "ad_scouting_ldap"]
+
+    with patch(
+        "app.services.bas_scheduler.dispatch_bas_technique",
+        return_value={"dispatched": True, "result": {"status": "executed"}, "agent_kind": "real"},
+    ) as mock_dispatch:
+        result = fire_schedule(db, schedule)
+
+    assert mock_dispatch.call_count == 4  # 2 targets x 2 techniques
+    dispatched_targets = [call.kwargs["target_hint"] for call in mock_dispatch.call_args_list]
+    assert dispatched_targets == ["10.0.0.5", "10.0.0.5", "10.0.0.6", "10.0.0.6"]
+    assert len(result["job_ids"]) == 4
+
+
+def test_fire_schedule_stop_on_failure_only_stops_the_failing_targets_own_chain():
+    """A chain failing for one target must not skip the SAME techniques for
+    a different target in the same schedule -- each target runs its own
+    independent chain attempt."""
+    db = MagicMock()
+    agent = SimpleNamespace(id=13, kind="real", hostname="mac.local", tunnel_host="", tunnel_port=None)
+    db.query.return_value.filter.return_value.first.return_value = agent
+
+    schedule = _schedule(target_hint="10.0.0.5, 10.0.0.6", agent_id=13)
+    schedule.stop_on_failure = True
+    schedule.technique_keys = ["network_share_discovery", "ad_scouting_ldap"]
+
+    outcomes = [
+        {"dispatched": True, "result": {"status": "error"}, "agent_kind": "real"},  # target 1, step 1: fails
+        # target 1, step 2 skipped (chain_stopped_after_failure)
+        {"dispatched": True, "result": {"status": "executed"}, "agent_kind": "real"},  # target 2, step 1
+        {"dispatched": True, "result": {"status": "executed"}, "agent_kind": "real"},  # target 2, step 2
+    ]
+    with patch("app.services.bas_scheduler.dispatch_bas_technique", side_effect=outcomes) as mock_dispatch:
+        result = fire_schedule(db, schedule)
+
+    assert mock_dispatch.call_count == 3
+    assert {"technique_key": "ad_scouting_ldap", "target": "10.0.0.5", "reason": "chain_stopped_after_failure"} in result["skipped"]
+    assert len(result["job_ids"]) == 3  # target 1's failed job + target 2's two successful jobs
+
+
 def test_fire_schedule_stops_after_a_failure_when_stop_on_failure_is_set():
     """A chain schedule (stop_on_failure=True) must not keep firing later
     steps once an earlier one genuinely fails -- those steps' premise (the
@@ -157,7 +220,7 @@ def test_fire_schedule_stops_after_a_failure_when_stop_on_failure_is_set():
         result = fire_schedule(db, schedule)
 
     assert mock_dispatch.call_count == 2  # third step never dispatched
-    assert {"technique_key": "port_service_scan", "reason": "chain_stopped_after_failure"} in result["skipped"]
+    assert {"technique_key": "port_service_scan", "target": "192.168.1.65", "reason": "chain_stopped_after_failure"} in result["skipped"]
 
 
 def test_fire_schedule_does_not_stop_early_when_stop_on_failure_is_false():

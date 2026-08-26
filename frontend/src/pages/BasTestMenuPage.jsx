@@ -31,6 +31,13 @@ function availabilityLabel(technique, selectedAgent) {
 
 const RISK_BADGE = { safe: "b-low", elevated: "b-medium", high_risk: "b-critical" };
 
+function formatTargets(targetHint) {
+  const pieces = String(targetHint || "").split(/[,;\n]+/).map((p) => p.trim()).filter(Boolean);
+  if (pieces.length === 0) return "—";
+  if (pieces.length === 1) return pieces[0];
+  return `${pieces.length} alvos: ${pieces.join(", ")}`;
+}
+
 const emptyForm = {
   name: "", agent_id: "", target_hint: "", technique_keys: [], chain_key: null,
   frequency: "daily", run_time: "00:00", day_of_week: "monday", day_of_month: 1,
@@ -163,13 +170,21 @@ export default function BasTestMenuPage() {
               </option>
             ))}
           </select>
-          <input
-            required
-            style={{ ...fieldStyle, gridColumn: "1 / -1" }}
-            placeholder="Alvo interno (IP alcançável PELO AGENTE — ex: 10.10.10.5). Nunca use 127.0.0.1: é bloqueado como alvo inseguro."
-            value={form.target_hint}
-            onChange={(e) => setForm({ ...form, target_hint: e.target.value })}
-          />
+          <div style={{ gridColumn: "1 / -1" }}>
+            <textarea
+              required
+              rows={2}
+              style={{ ...fieldStyle, resize: "vertical", fontFamily: "inherit" }}
+              placeholder={"Alvo(s) interno(s) — IP(s) alcançável(is) PELO AGENTE. Um por linha ou separados por vírgula (ex.: 10.10.10.5, app-db.internal.local). Para port_service_scan/firewall_segmentation_test/smb_enum_cme, também aceita uma faixa CIDR (ex.: 10.10.10.0/24, até 256 hosts). Nunca use 127.0.0.1: é bloqueado como alvo inseguro."}
+              value={form.target_hint}
+              onChange={(e) => setForm({ ...form, target_hint: e.target.value })}
+            />
+            {form.technique_keys.some((k) => techniques.find((t) => t.technique_key === k)?.accepts_range) && (
+              <div className="mono-sm muted" style={{ marginTop: 4 }}>
+                Uma ou mais técnicas selecionadas aceitam uma faixa CIDR como alvo (varre a faixa inteira numa única execução, até 256 hosts) — a atestação de autorização acima cobre a faixa inteira digitada.
+              </div>
+            )}
+          </div>
           {(() => {
             const selectedAgent = agents.find((a) => a.id === form.agent_id);
             if (!selectedAgent) return null;
@@ -254,7 +269,14 @@ export default function BasTestMenuPage() {
                           checked={form.technique_keys.includes(t.technique_key)}
                           onChange={() => toggleTechnique(t.technique_key)}
                         />
-                        <span style={{ flex: 1, fontSize: 13 }}>{t.display_name}</span>
+                        <span style={{ flex: 1, fontSize: 13 }}>
+                          {t.display_name}
+                          {t.accepts_range && (
+                            <span className="mono-sm muted" style={{ marginLeft: 6 }} title="Aceita uma faixa CIDR como alvo (ex.: 10.10.10.0/24)">
+                              [aceita CIDR]
+                            </span>
+                          )}
+                        </span>
                         <span className={`b ${RISK_BADGE[t.risk_tier] || "b-neutral"}`}>{t.risk_tier}</span>
                         <span className="mono-sm muted" style={isRealNow ? { color: "var(--sev-low, #229160)", fontWeight: 700 } : undefined}>{label}</span>
                       </label>
@@ -303,7 +325,7 @@ export default function BasTestMenuPage() {
               </div>
             </div>
             <div className="mono-sm muted" style={{ marginTop: 5 }}>
-              alvo: {row.target_hint || "—"} · técnicas: {(row.technique_keys || []).join(" → ") || "—"}
+              alvo: {formatTargets(row.target_hint)} · técnicas: {(row.technique_keys || []).join(" → ") || "—"}
               {row.chain_key && (
                 <span className="b b-medium" style={{ marginLeft: 8 }}>
                   chain{row.stop_on_failure ? " · para na 1ª falha" : ""}

@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 
 from app.models.models import BasAgent, BasJob, BasSchedule, Finding
 from app.services.bas_exclusion import BAS_FINDING_TOOL
+from app.services.bas_scheduler import _split_targets
 from app.services.bas_technique_catalog import list_techniques
 from app.services.crown_jewel_analyzer import identify_crown_jewels
 
@@ -91,12 +92,12 @@ def exposure_summary(db: Session, *, group_ids: list[int] | None = None) -> dict
         query = query.filter(BasJob.access_group_id.in_(group_ids))
     jobs = query.all()
 
-    # target_hint isn't stored on BasJob itself (it lives on the schedule) --
-    # derive distinct targets tested from schedules that actually have jobs.
-    sched_query = db.query(BasSchedule.target_hint).distinct()
-    if group_ids is not None:
-        sched_query = sched_query.filter(BasSchedule.access_group_id.in_(group_ids))
-    targets = {row[0] for row in sched_query.all() if row[0]}
+    # BasJob.target (one row per technique x target actually dispatched) is
+    # the accurate source now -- a schedule's target_hint can be a list or a
+    # CIDR range, so counting distinct BasSchedule.target_hint values would
+    # count "10.0.0.5, app-db.internal" as ONE target instead of two, and
+    # would count schedules that were created but never actually fired.
+    targets = {j.target for j in jobs if j.target}
 
     categories_tested = {
         t["category"] for t in list_techniques() if t["technique_key"] in {j.technique_key for j in jobs}
@@ -147,15 +148,20 @@ def crown_jewels_view(db: Session, *, group_ids: list[int] | None = None) -> lis
         query = query.filter(BasSchedule.access_group_id.in_(group_ids))
     schedules = query.all()
 
-    hints = [s.target_hint for s in schedules if s.target_hint]
+    # target_hint can now be a comma/semicolon/newline-separated list -- split
+    # it the same way bas_scheduler.fire_schedule does before handing hints to
+    # the crown-jewel identifier, or a multi-target string like
+    # "10.0.0.5, app-db.internal" would be scored as one garbled hint instead
+    # of two real ones.
+    hints = [target for s in schedules if s.target_hint for target in _split_targets(s.target_hint, "")]
+    hints = [h for h in hints if h]
     jewels = identify_crown_jewels(hints)
     jewel_map = {t: (boost, label) for t, boost, label in jewels}
 
-    job_counts = Counter()
-    for row in db.query(BasJob).all():
-        sched = next((s for s in schedules if s.id == row.schedule_id), None)
-        if sched and sched.target_hint:
-            job_counts[sched.target_hint] += 1
+    # BasJob.target (the actual per-dispatch target) is the accurate count
+    # now -- a schedule's raw target_hint is no longer 1:1 with what a single
+    # job ran against.
+    job_counts = Counter(row.target for row in db.query(BasJob).all() if row.target)
 
     return [
         {"target": target, "label": label, "boost": boost, "jobs_run": job_counts.get(target, 0)}

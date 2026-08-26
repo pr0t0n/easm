@@ -18,6 +18,7 @@ destination. See bas_scheduler.py for where this flows into Finding.details.
 """
 from __future__ import annotations
 
+import ipaddress
 import logging
 from typing import Any
 from urllib.parse import urlparse
@@ -39,6 +40,15 @@ _RELAY_HOST = "bas_relay"
 _RELAY_FORWARD_PORT_BASE = 20000
 _DEFAULT_SOCKS_PORT = 1080
 
+# Every BAS profile that accepts_range (nmap-based/crackmapexec-based) has a
+# fixed kali-runner timeout sized for ONE host (120-240s -- see
+# bas_internal.yaml), not tuned per range size. Each TCP connect is also
+# proxied through proxychains/SOCKS5, far slower than a direct scan. A large
+# CIDR would silently run out of time and cover only part of the range with
+# no signal that anything was truncated -- reject up front instead of
+# guessing at a bigger timeout that still wouldn't scale to /16s etc.
+_MAX_RANGE_HOSTS = 256
+
 
 def _tunnel_env_vars(bas_agent: Any) -> dict[str, str]:
     if getattr(bas_agent, "kind", "stub") == "real":
@@ -50,16 +60,32 @@ def _tunnel_env_vars(bas_agent: Any) -> dict[str, str]:
     return {"BAS_TUNNEL_HOST": str(host), "BAS_TUNNEL_PORT": str(port)}
 
 
-def _normalize_target(target_hint: str, target_format: str) -> str:
+def _normalize_target(target_hint: str, target_format: str, *, accepts_range: bool = False) -> str:
     """Reshapes ONE shared target_hint (a schedule, and especially a chain,
     supplies a single string for every step) to match each step's own
     declared target_format -- confirmed live that skipping this makes a
     tool silently misinterpret its target: nmap given "192.168.1.65:8001"
     for a "host"-only step resolved to a bogus multicast address instead of
-    scanning the intended IP."""
+    scanning the intended IP.
+
+    accepts_range=True (port_service_scan, firewall_segmentation_test,
+    smb_enum_cme -- their underlying nmap/crackmapexec CLI natively iterates
+    a CIDR in one invocation) preserves the "/nn" mask instead of the usual
+    urlparse-based host extraction below, which would otherwise silently
+    strip it (ipaddress.ip_network parses "10.0.0.0/24" as a network, but
+    parsed.hostname/raw.split("/")[0] both discard the mask -- confirmed by
+    code reading, not a guess)."""
     raw = str(target_hint or "").strip()
     if not raw:
         return raw
+
+    if accepts_range:
+        try:
+            network = ipaddress.ip_network(raw, strict=False)
+            if network.num_addresses > 1:
+                return str(network)
+        except ValueError:
+            pass  # not a CIDR -- fall through to normal single-host handling
 
     has_scheme = "://" in raw
     parsed = urlparse(raw if has_scheme else f"//{raw}")
@@ -105,7 +131,20 @@ def dispatch_bas_technique(
         return {"dispatched": False, "reason": "no_kali_tool_mapped"}
 
     env_vars = _tunnel_env_vars(bas_agent)
-    normalized_target = _normalize_target(target_hint, technique.get("target_format", "host"))
+    normalized_target = _normalize_target(
+        target_hint, technique.get("target_format", "host"),
+        accepts_range=bool(technique.get("accepts_range")),
+    )
+    if "/" in normalized_target:
+        try:
+            network = ipaddress.ip_network(normalized_target, strict=False)
+            if network.num_addresses > _MAX_RANGE_HOSTS:
+                return {
+                    "dispatched": False,
+                    "reason": f"range_too_large:{network.num_addresses}_hosts_max_{_MAX_RANGE_HOSTS}",
+                }
+        except ValueError:
+            pass
     logger.info(
         "bas_dispatcher: dispatching technique=%s tool=%s agent_id=%s agent_kind=%s tunnel=%s:%s "
         "target_hint=%s target_format=%s normalized_target=%s scan_id=%s",

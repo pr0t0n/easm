@@ -69,17 +69,11 @@ def test_risk_score_joins_against_basagent_kind_real():
 def test_exposure_summary_counts_real_tunnel_roundtrips_as_completed_jobs_only():
     db = MagicMock()
     jobs = [
-        SimpleNamespace(technique_key="smb_enum_cme", status="completed"),
-        SimpleNamespace(technique_key="smb_enum_cme", status="failed"),
-        SimpleNamespace(technique_key="ad_kerberoast", status="completed"),
+        SimpleNamespace(technique_key="smb_enum_cme", status="completed", target="10.10.10.5"),
+        SimpleNamespace(technique_key="smb_enum_cme", status="failed", target="10.10.10.5"),
+        SimpleNamespace(technique_key="ad_kerberoast", status="completed", target="admin-portal.corp.local"),
     ]
-
-    def query_side_effect(*args):
-        if args and args[0] is bas_reporting.BasJob:
-            return _query_chain(jobs)
-        return _query_chain([("10.10.10.5",), ("admin-portal.corp.local",)])
-
-    db.query.side_effect = query_side_effect
+    db.query.return_value = _query_chain(jobs)
 
     result = bas_reporting.exposure_summary(db)
 
@@ -134,6 +128,26 @@ def test_crown_jewels_view_empty_for_generic_hostnames():
     db.query.side_effect = query_side_effect
 
     assert bas_reporting.crown_jewels_view(db) == []
+
+
+def test_crown_jewels_view_splits_a_multi_target_schedule_before_scoring():
+    """target_hint can now be a list ("10.0.0.5, admin-portal.corp.local") --
+    passing that whole string as ONE hint to identify_crown_jewels would
+    never match its keyword patterns; each piece must be scored separately."""
+    db = MagicMock()
+    schedules = [SimpleNamespace(id=1, target_hint="10.10.10.5, admin-portal.corp.local")]
+
+    def query_side_effect(*args):
+        if args and args[0] is bas_reporting.BasSchedule:
+            return _query_chain(schedules)
+        return _query_chain([])
+
+    db.query.side_effect = query_side_effect
+
+    rows = bas_reporting.crown_jewels_view(db)
+
+    assert len(rows) == 1
+    assert rows[0]["target"] == "admin-portal.corp.local"  # the generic "10.10.10.5" piece scores nothing
 
 
 def test_attack_heatmap_includes_every_cataloged_mitre_ref_even_untested():
