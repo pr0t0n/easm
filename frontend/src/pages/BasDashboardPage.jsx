@@ -14,6 +14,9 @@ export default function BasDashboardPage() {
   const [installConfig, setInstallConfig] = useState(null);
   const [newToken, setNewToken] = useState(null);
   const [tokenUsername, setTokenUsername] = useState("bas-agent");
+  const [editingCallback, setEditingCallback] = useState(false);
+  const [callbackHostInput, setCallbackHostInput] = useState("");
+  const [callbackPortInput, setCallbackPortInput] = useState("");
 
   const load = async () => {
     try {
@@ -65,6 +68,27 @@ export default function BasDashboardPage() {
     if (navigator.clipboard) navigator.clipboard.writeText(String(value || ""));
   };
 
+  const startEditingCallback = () => {
+    setCallbackHostInput(installConfig?.callback_host || "");
+    setCallbackPortInput(installConfig?.callback_port || "");
+    setEditingCallback(true);
+  };
+
+  const saveCallback = async () => {
+    try {
+      await client.put("/api/bas/install-config", {
+        callback_host: callbackHostInput.trim(),
+        callback_port: callbackPortInput.trim(),
+      });
+      setEditingCallback(false);
+      toastSuccess("IP/porta de instalação atualizados.");
+      await load();
+    } catch (error) {
+      const detail = error?.response?.data?.detail;
+      toastError(typeof detail === "string" ? detail : "Falha ao salvar IP/porta de instalação.");
+    }
+  };
+
   return (
     <main className="dpage space-y-4">
       <div className="page-intro">
@@ -107,20 +131,43 @@ export default function BasDashboardPage() {
 
       <section className="card">
         <div className="card-h"><div><h3>Credenciais de instalação</h3><div className="sub">IP/porta de conexão + gerar um novo token de enrollment</div></div></div>
-        {installConfig && (
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 14 }}>
-            <div>
-              <div className="mono-sm muted">IP / host da plataforma</div>
-              <div className="mono" style={{ fontWeight: 600, cursor: "pointer" }} onClick={() => copy(installConfig.callback_host)} title="clique para copiar">
-                {installConfig.callback_host}
+        {installConfig && !editingCallback && (
+          <>
+            {(installConfig.callback_host === "backend" || installConfig.callback_port === "8000") && (
+              <div className="mono-sm" style={{ marginBottom: 10, color: "var(--sev-high-text, #b45309)" }}>
+                "backend"/"8000" são o nome interno do container e a porta interna do Docker — não alcançáveis de fora.
+                Edite abaixo com o IP/host real da plataforma e a porta mapeada no host (padrão 8001).
+              </div>
+            )}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
+              <div>
+                <div className="mono-sm muted">IP / host da plataforma</div>
+                <div className="mono" style={{ fontWeight: 600, cursor: "pointer" }} onClick={() => copy(installConfig.callback_host)} title="clique para copiar">
+                  {installConfig.callback_host}
+                </div>
+              </div>
+              <div>
+                <div className="mono-sm muted">porta de conexão</div>
+                <div className="mono" style={{ fontWeight: 600, cursor: "pointer" }} onClick={() => copy(installConfig.callback_port)} title="clique para copiar">
+                  {installConfig.callback_port}
+                </div>
               </div>
             </div>
+            <button className="btn" onClick={startEditingCallback} style={{ marginBottom: 14 }}>Editar IP/porta</button>
+          </>
+        )}
+        {editingCallback && (
+          <div style={{ display: "flex", gap: 8, alignItems: "flex-end", marginBottom: 14, flexWrap: "wrap" }}>
             <div>
-              <div className="mono-sm muted">porta de conexão</div>
-              <div className="mono" style={{ fontWeight: 600, cursor: "pointer" }} onClick={() => copy(installConfig.callback_port)} title="clique para copiar">
-                {installConfig.callback_port}
-              </div>
+              <div className="mono-sm muted" style={{ marginBottom: 4 }}>IP / host da plataforma</div>
+              <input style={fieldStyle} value={callbackHostInput} onChange={(e) => setCallbackHostInput(e.target.value)} placeholder="ex.: 192.168.16.154" />
             </div>
+            <div>
+              <div className="mono-sm muted" style={{ marginBottom: 4 }}>porta de conexão</div>
+              <input style={{ ...fieldStyle, maxWidth: 120 }} value={callbackPortInput} onChange={(e) => setCallbackPortInput(e.target.value)} placeholder="8001" />
+            </div>
+            <button className="btn btn-primary" onClick={saveCallback}>Salvar</button>
+            <button className="btn" onClick={() => setEditingCallback(false)}>Cancelar</button>
           </div>
         )}
 

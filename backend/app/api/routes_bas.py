@@ -571,6 +571,29 @@ def install_config(db: Session = Depends(get_db), current_user: User = Depends(g
     }
 
 
+@router.put("/install-config")
+def save_install_config(payload: dict, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
+    # "backend"/"8000" (this endpoint's GET defaults) are the internal Docker
+    # service name and container port -- meaningless to a real agent
+    # installed on another machine/VM, which needs the platform's actual
+    # externally-reachable IP/hostname and the HOST-mapped plain-HTTP port
+    # (BACKEND_HOST_PORT, default 8001) enroll() posts to. Nothing wrote
+    # these AppSetting rows before this endpoint existed, so the dashboard's
+    # "Credenciais de instalação" card always showed the unusable defaults.
+    host = str(payload.get("callback_host") or "").strip()
+    port = str(payload.get("callback_port") or "").strip()
+    for key, value in (("bas_agent_callback_host", host), ("bas_agent_callback_port", port)):
+        if not value:
+            continue
+        row = db.query(AppSetting).filter(AppSetting.owner_id == current_user.id, AppSetting.key == key).first()
+        if row:
+            row.value = value
+        else:
+            db.add(AppSetting(owner_id=current_user.id, key=key, value=value))
+    db.commit()
+    return {"ok": True}
+
+
 _AGENT_BINARY_FILENAMES = {
     # A single "linux" binary used to be amd64-only, which silently segfaults
     # deep in the Go runtime's epoll syscall handling when run under

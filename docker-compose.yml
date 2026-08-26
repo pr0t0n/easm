@@ -303,6 +303,9 @@ services:
       MCP_EXECUTE_TOOLS_VIA_MCP: "${MCP_EXECUTE_TOOLS_VIA_MCP:-true}"
       ENABLE_OBSERVABILITY: "${ENABLE_OBSERVABILITY:-false}"
       ENABLE_AUTO_EVALUATION: "${ENABLE_AUTO_EVALUATION:-false}"
+      # Extra SANs for the BAS mTLS server cert (bas_ca.py) -- add the LAN
+      # IP/hostname a real (non-container) agent uses to reach this host.
+      BAS_MTLS_EXTRA_SANS: "${BAS_MTLS_EXTRA_SANS:-host.docker.internal}"
       LANGFUSE_HOST: "${LANGFUSE_HOST:-}"
       LANGFUSE_PUBLIC_KEY: "${LANGFUSE_PUBLIC_KEY:-}"
       LANGFUSE_SECRET_KEY: "${LANGFUSE_SECRET_KEY:-}"
