@@ -29,7 +29,7 @@ from app.models.models import (
     OffensiveService, OffensiveEndpoint, OffensiveParameter, OffensiveJsAsset, OffensiveApiSpec,
     OffensiveHypothesis, ValidationRun, CoverageItem, RetestRun, PentestOutcomeMetric,
     EndpointObservation, ProcessorCheckpoint, ScanExecutionContext,
-    FindingAdjudication, ValidationWire, FindingIntelligenceSnapshot,
+    FindingAdjudication, ValidationWire, FindingIntelligenceSnapshot, BasJob,
 )
 from app.schemas.scan import LogResponse, ReportResponse, ScanCreate, ScanResponse, ScanStatusResponse, AutonomyResponse
 from app.services.audit_service import log_audit
@@ -3606,10 +3606,19 @@ def stop_scan(scan_id: int, db: Session = Depends(get_db), current_user: User = 
         row[0] for row in db.query(Finding.id).filter(Finding.scan_job_id == scan_id).all()
     ]
     if finding_ids:
-        db.query(Vulnerability).filter(Vulnerability.finding_id.in_(finding_ids)).update(
-            {Vulnerability.finding_id: None},
-            synchronize_session=False,
-        )
+        # findings.id is referenced by 9 tables (no ON DELETE clause on any of
+        # them) -- nullable FKs get nulled out (the row survives, it just
+        # stops pointing at the removed finding); NOT NULL FKs are meaningless
+        # once their finding is gone, so those rows are deleted outright.
+        for _nullable_model in (Vulnerability, EvidenceArtifact, ValidationRun, CoverageItem, BasJob):
+            db.query(_nullable_model).filter(_nullable_model.finding_id.in_(finding_ids)).update(
+                {_nullable_model.finding_id: None},
+                synchronize_session=False,
+            )
+        for _dependent_model in (FindingAdjudication, ValidationWire, FindingIntelligenceSnapshot, RetestRun):
+            db.query(_dependent_model).filter(_dependent_model.finding_id.in_(finding_ids)).delete(
+                synchronize_session=False,
+            )
     findings_deleted = (
         db.query(Finding)
         .filter(Finding.scan_job_id == scan_id)

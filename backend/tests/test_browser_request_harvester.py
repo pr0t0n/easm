@@ -184,6 +184,7 @@ def test_captures_real_body_and_upserts_endpoint(monkeypatch):
     assert result["requests_persisted"] == 1
     assert len(fake_inv.upsert_endpoint_calls) == 1
     assert fake_inv.upsert_endpoint_calls[0][0] == "http://target.local/rest/login"
+    assert "state-changing" in fake_inv.upsert_endpoint_calls[0][1]["tags"]
     body_params = {name for name, _ in fake_inv.upsert_parameter_calls}
     assert body_params == {"email", "password"}
 
@@ -194,6 +195,18 @@ def test_captures_real_body_and_upserts_endpoint(monkeypatch):
     assert observed.request_body == {"body": '{"email": "real@user.com", "password": "hunter2"}'}
     assert observed.status_code == 200
     assert observed.response_excerpt == '{"id": 42}'
+
+
+def test_get_request_is_not_tagged_state_changing(monkeypatch):
+    monkeypatch.setattr(harvester.settings, "enable_browser_request_harvester", True)
+    get_request = _FakeRequest(method="GET", url="http://target.local/rest/products", resource_type="xhr")
+    _patch_playwright(monkeypatch, requests_to_fire=[get_request])
+    fake_inv = _FakeInventoryService(None, None)
+    monkeypatch.setattr(harvester, "OffensiveInventoryService", lambda db, scan: fake_inv)
+
+    harvester.harvest_target(_FakeDb(), SimpleNamespace(id=1), "http://target.local")
+
+    assert "state-changing" not in fake_inv.upsert_endpoint_calls[0][1]["tags"]
 
 
 def test_non_xhr_fetch_document_requests_are_not_captured(monkeypatch):

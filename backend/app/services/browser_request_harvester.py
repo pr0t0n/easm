@@ -142,13 +142,20 @@ def _persist_observed_request(
     body_sha256 = hashlib.sha256(full_body.encode("utf-8")).hexdigest() if full_body else None
     content_type = str(entry.get("request_content_type") or "")
 
+    tags = ["browser-captured", "real-body"] if full_body else ["browser-captured"]
+    if is_mutating:
+        # _has_mutating_body_surface (scan_quality.py) already infers this
+        # from the endpoint's plain `method`, but it also checks this exact
+        # tag set -- cheap, explicit reinforcement for that and any future
+        # consumer that reads tags rather than re-deriving from method.
+        tags.append("state-changing")
     endpoint = inv.upsert_endpoint(
         url,
         method=method,
         source_tool="browser-harvester",
         status_code=entry.get("status_code"),
         content_type=str(entry.get("response_content_type") or ""),
-        tags=["browser-captured", "real-body"] if full_body else ["browser-captured"],
+        tags=tags,
     )
     if is_mutating and full_body:
         for name in _extract_body_param_names(full_body, content_type):

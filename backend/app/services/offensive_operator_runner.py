@@ -1688,6 +1688,50 @@ def _run_lab_browser_capture_once(db, job: ScanJob, target: str) -> dict[str, An
         return {"error": str(exc)[:500]}
 
 
+def _ensure_auth_sessions_once(db, job: ScanJob) -> dict[str, Any]:
+    """AuthSessionManager.ensure_sessions() -- the only call site in the
+    backend that actually LOGS IN and persists ScanIdentity/ScanAuthSession,
+    as opposed to the ~15 other call sites that only read via get_material()/
+    list_material() -- used to run exclusively from a P21 hypothesis-drain
+    work item, i.e. near the very end of the pipeline. Every stateful phase
+    before that (P08-P19) dispatched its tools with zero session material
+    available whenever a scan had auth_config configured. Calling it here,
+    once per scan (not per target -- auth_config is scan-level), makes real
+    sessions available before those phases run. Idempotent and side-effect-
+    free when no auth_config is set (returns {"required": False, ...})."""
+    state = dict(job.state_data or {})
+    if state.get("_auth_sessions_bootstrapped"):
+        return {"skipped": True, "reason": "already_bootstrapped"}
+    try:
+        from app.services.auth_session_manager import AuthSessionManager
+
+        result = AuthSessionManager(db, job).ensure_sessions()
+        state = dict(job.state_data or {})
+        state["_auth_sessions_bootstrapped"] = True
+        job.state_data = state
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="offensive-operator",
+            level="INFO",
+            message=(
+                f"auth_sessions_bootstrap ready={result.get('ready')} "
+                f"auth_type={result.get('auth_type')} identities={len(result.get('identities') or [])}"
+            ),
+        ))
+        db.commit()
+        return result
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="offensive-operator",
+            level="WARNING",
+            message=f"auth_sessions_bootstrap_failed error={exc!s}"[:2000],
+        ))
+        db.commit()
+        return {"ready": False, "error": str(exc)[:500]}
+
+
 def _run_browser_request_harvester_once(db, job: ScanJob, target: str, identity_key: str = "") -> dict[str, Any]:
     """Runs the real-body-capturing browser harvester (Épico 3) once per
     target during P08, for EVERY scan mode -- not gated behind
@@ -3050,7 +3094,18 @@ def run_offensive_operator_scan(
                 continue
 
             if phase_id == "P08":
+                _ensure_auth_sessions_once(db, job)
                 _run_browser_request_harvester_once(db, job, _effective_target)
+                try:
+                    from app.services.auth_session_manager import AuthSessionManager
+
+                    for _material in AuthSessionManager(db, job).list_material(limit=4):
+                        if _material.valid and _material.identity_key:
+                            _run_browser_request_harvester_once(
+                                db, job, _effective_target, identity_key=_material.identity_key,
+                            )
+                except Exception:
+                    pass
 
             events.append(create_operation_event("phase_started", offensive_state["campaign_id"], str(job.id), phase_id, status="running"))
             _phase_unit_start = _time.monotonic()
