@@ -5,10 +5,8 @@ deliberate fail-closed placeholder, since kali_runner requires a real
 authorized_scope), which kali_runner then rejects with a 400 Bad Request on
 every dispatch -- with no signal at creation time that anything was wrong.
 POST/PATCH /api/bas/schedules now reject a blank target_hint, EXCEPT when
-every selected technique accepts_range -- those default to the dispatching
-agent's own self-reported local_network_cidr at fire time instead (Marco
-3.6: the operator shouldn't have to type an internal IP for a technique
-whose whole point is testing a network segment).
+every selected technique can derive its execution target from the dispatching
+agent's own self-reported local_network_cidr.
 """
 import pytest
 from fastapi import HTTPException
@@ -34,7 +32,7 @@ def test_create_schedule_rejects_blank_target_hint_with_no_techniques_selected()
 def test_create_schedule_rejects_blank_target_hint_when_any_technique_needs_one():
     payload = routes_bas.ScheduleCreate(
         agent_id=1, target_hint="",
-        technique_keys=["port_service_scan", "owasp_web_app_scan"],  # 2nd one is app-specific
+        technique_keys=["port_service_scan", "pipeline_secrets_harvesting"],
     )
 
     with pytest.raises(HTTPException) as exc_info:
@@ -63,7 +61,7 @@ def test_patch_schedule_rejects_blank_target_hint(monkeypatch):
         def query(self, model):
             return None
 
-    fake_schedule = SimpleNamespace(id=9, technique_keys=["owasp_web_app_scan"], chain_key=None)
+    fake_schedule = SimpleNamespace(id=9, technique_keys=["pipeline_secrets_harvesting"], chain_key=None)
     monkeypatch.setattr(
         routes_bas,
         "apply_company_scope",

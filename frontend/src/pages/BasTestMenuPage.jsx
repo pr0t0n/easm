@@ -31,11 +31,30 @@ function availabilityLabel(technique, selectedAgent) {
 
 const RISK_BADGE = { safe: "b-low", elevated: "b-medium", high_risk: "b-critical" };
 
+const TARGET_FORMAT_HINT = {
+  host: "IP(s)/host(s) interno(s) alcançável(is) PELO AGENTE. Um por linha ou separados por vírgula (ex.: 10.10.10.5, app-db.internal.local).",
+  host_port: "Host:porta do serviço/aplicação (ex.: 10.10.10.5:8080, app.exemplo.com:443).",
+  url: "URL completa, com protocolo (ex.: https://exemplo.com/webhook).",
+  domain: "Domínio, sem protocolo/porta/caminho (ex.: exemplo.com).",
+};
+
+function requiredTargetPlaceholder(selectedTechniques) {
+  const formats = new Set(selectedTechniques.map((t) => t.target_format || "host"));
+  const base = formats.size === 1
+    ? (TARGET_FORMAT_HINT[[...formats][0]] || TARGET_FORMAT_HINT.host)
+    : "Alvo — formato depende da técnica selecionada (IP/host, host:porta, URL ou domínio, conforme a técnica).";
+  return `${base} Nunca use 127.0.0.1: é bloqueado como alvo inseguro.`;
+}
+
 function formatTargets(targetHint) {
   const pieces = String(targetHint || "").split(/[,;\n]+/).map((p) => p.trim()).filter(Boolean);
   if (pieces.length === 0) return "—";
   if (pieces.length === 1) return pieces[0];
   return `${pieces.length} alvos: ${pieces.join(", ")}`;
+}
+
+function canUseAgentNetwork(technique) {
+  return technique.accepts_range || ["host", "host_port"].includes(technique.target_format || "host");
 }
 
 const emptyForm = {
@@ -128,6 +147,9 @@ export default function BasTestMenuPage() {
   };
 
   const deleteRow = async (id) => {
+    if (!window.confirm(
+      "Excluir este teste? Isso também apaga o histórico de execuções e todos os achados/vulnerabilidades que ele gerou. Não pode ser desfeito."
+    )) return;
     try {
       await client.delete(`/api/bas/schedules/${id}`);
       await load();
@@ -174,8 +196,8 @@ export default function BasTestMenuPage() {
           {(() => {
             const selectedTechniques = form.technique_keys.map((k) => techniques.find((t) => t.technique_key === k)).filter(Boolean);
             const anyTechniqueSelected = selectedTechniques.length > 0;
-            const allAcceptRange = anyTechniqueSelected && selectedTechniques.every((t) => t.accepts_range);
-            const targetOptional = allAcceptRange;
+            const allNetworkBased = anyTechniqueSelected && selectedTechniques.every(canUseAgentNetwork);
+            const targetOptional = allNetworkBased;
             const selectedAgent = agents.find((a) => a.id === form.agent_id);
             return (
               <div style={{ gridColumn: "1 / -1" }}>
@@ -185,8 +207,8 @@ export default function BasTestMenuPage() {
                   style={{ ...fieldStyle, resize: "vertical", fontFamily: "inherit" }}
                   placeholder={
                     targetOptional
-                      ? "Opcional — deixe em branco para varrer automaticamente a rede do próprio agente (rede detectada acima, se o agente já reportou). Ou digite uma faixa CIDR/IP específico. Nunca use 127.0.0.1: é bloqueado como alvo inseguro."
-                      : "Alvo(s) interno(s) — IP(s) alcançável(is) PELO AGENTE. Um por linha ou separados por vírgula (ex.: 10.10.10.5, app-db.internal.local). Para port_service_scan/firewall_segmentation_test/smb_enum_cme, também aceita uma faixa CIDR (ex.: 10.10.10.0/24, até 256 hosts). Nunca use 127.0.0.1: é bloqueado como alvo inseguro."
+                      ? "Opcional — deixe em branco para usar automaticamente a máscara de rede reportada pelo agente. Ou digite uma faixa CIDR/IP específico. Nunca use 127.0.0.1: é bloqueado como alvo inseguro."
+                      : requiredTargetPlaceholder(selectedTechniques)
                   }
                   value={form.target_hint}
                   onChange={(e) => setForm({ ...form, target_hint: e.target.value })}
@@ -194,13 +216,13 @@ export default function BasTestMenuPage() {
                 {targetOptional && !form.target_hint.trim() && (
                   <div className="mono-sm muted" style={{ marginTop: 4 }}>
                     {selectedAgent?.local_network_cidr
-                      ? `Alvo em branco: vai varrer a rede do agente (${selectedAgent.local_network_cidr}) — a atestação de autorização acima cobre essa faixa inteira.`
+                      ? `Alvo em branco: vai usar a máscara de rede do agente (${selectedAgent.local_network_cidr}) como base dos testes.`
                       : "Alvo em branco: o agente ainda não reportou sua rede (aguarde um heartbeat) — o agendamento vai falhar até lá, ou digite um alvo/faixa manualmente."}
                   </div>
                 )}
-                {anyTechniqueSelected && !allAcceptRange && selectedTechniques.some((t) => t.accepts_range) && (
+                {anyTechniqueSelected && !allNetworkBased && selectedTechniques.some(canUseAgentNetwork) && (
                   <div className="mono-sm muted" style={{ marginTop: 4 }}>
-                    Uma ou mais técnicas selecionadas aceitam uma faixa CIDR como alvo (varre a faixa inteira numa única execução, até 256 hosts) — mas há também técnica(s) específica(s) na seleção, então o alvo continua obrigatório.
+                    Uma ou mais técnicas selecionadas usam a máscara de rede do agente, mas há também técnica(s) que exigem URL ou domínio explícito; nesse caso o alvo continua obrigatório.
                   </div>
                 )}
               </div>

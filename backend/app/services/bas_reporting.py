@@ -15,6 +15,7 @@ bas_exclusion.py, bas_scheduler.py).
 from __future__ import annotations
 
 from collections import Counter
+import re
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -44,9 +45,83 @@ _CATEGORY_FRAMEWORK_RELEVANCE: dict[str, set[str]] = {
     "cicd": {"nist", "iso27001", "cis_v8"},
 }
 _FRAMEWORK_LABELS = {"nist": "NIST CSF", "iso27001": "ISO 27001", "pci": "PCI DSS 4.0", "cis_v8": "CIS Controls"}
+_SMB_LINE_RE = re.compile(
+    r"^SMB\s+(?P<ip>\d+\.\d+\.\d+\.\d+)\s+445\s+(?P<host>\S+)\s+\[\*\]\s+(?P<os>.*?)\s+\(name:.*?\)\s+\(domain:(?P<domain>.*?)\)\s+\(signing:(?P<signing>True|False)\)\s+\(SMBv1:(?P<smbv1>True|False)\)"
+)
 
 
-def _real_agent_technique_keys(db: Session, *, group_ids: list[int] | None = None) -> set[str]:
+def _smb_observations(stdout: str) -> list[dict[str, Any]]:
+    observations = []
+    seen = set()
+    for line in str(stdout or "").splitlines():
+        match = _SMB_LINE_RE.search(line.strip())
+        if not match:
+            continue
+        item = match.groupdict()
+        key = (item["ip"], item["host"])
+        if key in seen:
+            continue
+        seen.add(key)
+        observations.append({
+            "ip": item["ip"],
+            "host": item["host"],
+            "os": item["os"].strip(),
+            "domain": item["domain"].strip(),
+            "signing_required": item["signing"] == "True",
+            "smbv1_enabled": item["smbv1"] == "True",
+            "evidence": line.strip(),
+        })
+    return observations
+
+
+def _nmap_open_ports(result: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = []
+    seen = set()
+    for item in result.get("open_ports") or []:
+        if not isinstance(item, dict):
+            continue
+        host = str(item.get("host") or item.get("ip") or item.get("target") or "").strip()
+        port = str(item.get("port") or "").strip()
+        protocol = str(item.get("protocol") or "tcp").strip() or "tcp"
+        service = str(item.get("service") or item.get("name") or "").strip() or "unknown"
+        if not host or not port:
+            continue
+        key = (host, port, protocol)
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append({"host": host, "port": int(port), "protocol": protocol, "service": service})
+
+    current_host = ""
+    for line in str(result.get("stdout") or "").splitlines():
+        clean = line.strip()
+        if clean.lower().startswith("nmap scan report for"):
+            current_host = clean[len("Nmap scan report for "):].strip()
+            match = re.search(r"\((\d+\.\d+\.\d+\.\d+)\)", current_host)
+            if match:
+                current_host = match.group(1)
+            else:
+                current_host = current_host.split()[0]
+            continue
+        match = re.match(r"^(?P<port>\d+)/(?P<protocol>\S+)\s+open\s+(?P<service>\S+)", clean)
+        if not match or not current_host:
+            continue
+        key = (current_host, match.group("port"), match.group("protocol"))
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append({
+            "host": current_host,
+            "port": int(match.group("port")),
+            "protocol": match.group("protocol"),
+            "service": match.group("service"),
+        })
+    return rows
+
+
+def _real_agent_technique_keys(
+    db: Session, *, group_ids: list[int] | None = None, schedule_id: int | None = None
+) -> set[str]:
     """Technique keys dispatched at least once through a REAL (non-stub)
     agent. A stub-agent dispatch always fabricates its response content, so
     it's not a genuine "this was tested" signal -- only a real-agent
@@ -59,15 +134,19 @@ def _real_agent_technique_keys(db: Session, *, group_ids: list[int] | None = Non
     )
     if group_ids is not None:
         query = query.filter(BasJob.access_group_id.in_(group_ids))
+    if schedule_id is not None:
+        query = query.filter(BasJob.schedule_id == schedule_id)
     return {row[0] for row in query.all()}
 
 
-def framework_coverage(db: Session, *, group_ids: list[int] | None = None) -> dict[str, Any]:
+def framework_coverage(
+    db: Session, *, group_ids: list[int] | None = None, schedule_id: int | None = None
+) -> dict[str, Any]:
     """Per framework: how many of the BAS-catalog techniques relevant to it
     have actually been dispatched at least once through a REAL agent
     (tested_count/total_count). A stub-only dispatch never counts as
     coverage -- see _real_agent_technique_keys."""
-    tested_keys = _real_agent_technique_keys(db, group_ids=group_ids)
+    tested_keys = _real_agent_technique_keys(db, group_ids=group_ids, schedule_id=schedule_id)
 
     result: dict[str, Any] = {}
     for fw, label in _FRAMEWORK_LABELS.items():
@@ -83,13 +162,17 @@ def framework_coverage(db: Session, *, group_ids: list[int] | None = None) -> di
     return result
 
 
-def exposure_summary(db: Session, *, group_ids: list[int] | None = None) -> dict[str, Any]:
+def exposure_summary(
+    db: Session, *, group_ids: list[int] | None = None, schedule_id: int | None = None
+) -> dict[str, Any]:
     """Raw dispatch ACTIVITY (including stub-agent smoke-test traffic) --
     unlike framework_coverage/risk_score, this never claims coverage was
     proven, so blending stub + real dispatches here is fine."""
     query = db.query(BasJob)
     if group_ids is not None:
         query = query.filter(BasJob.access_group_id.in_(group_ids))
+    if schedule_id is not None:
+        query = query.filter(BasJob.schedule_id == schedule_id)
     jobs = query.all()
 
     # BasJob.target (one row per technique x target actually dispatched) is
@@ -113,10 +196,16 @@ def exposure_summary(db: Session, *, group_ids: list[int] | None = None) -> dict
     }
 
 
-def bas_findings_view(db: Session, *, group_ids: list[int] | None = None, limit: int = 100) -> list[dict[str, Any]]:
+def bas_findings_view(
+    db: Session, *, group_ids: list[int] | None = None, schedule_id: int | None = None, limit: int = 100
+) -> list[dict[str, Any]]:
     query = db.query(Finding).filter(Finding.tool == BAS_FINDING_TOOL).order_by(Finding.created_at.desc())
-    if group_ids is not None:
-        query = query.join(BasJob, BasJob.finding_id == Finding.id).filter(BasJob.access_group_id.in_(group_ids))
+    if group_ids is not None or schedule_id is not None:
+        query = query.join(BasJob, BasJob.finding_id == Finding.id)
+        if group_ids is not None:
+            query = query.filter(BasJob.access_group_id.in_(group_ids))
+        if schedule_id is not None:
+            query = query.filter(BasJob.schedule_id == schedule_id)
     rows = query.limit(limit).all()
     return [
         {
@@ -138,7 +227,303 @@ def bas_findings_view(db: Session, *, group_ids: list[int] | None = None, limit:
     ]
 
 
-def crown_jewels_view(db: Session, *, group_ids: list[int] | None = None) -> list[dict[str, Any]]:
+def action_priorities(
+    db: Session, *, group_ids: list[int] | None = None, schedule_id: int | None = None, limit: int = 20
+) -> list[dict[str, Any]]:
+    query = (
+        db.query(BasJob, BasAgent, BasSchedule)
+        .join(BasAgent, BasAgent.id == BasJob.agent_id)
+        .join(BasSchedule, BasSchedule.id == BasJob.schedule_id)
+        .filter(BasAgent.kind == "real", BasJob.status == "completed")
+    )
+    if group_ids is not None:
+        query = query.filter(BasJob.access_group_id.in_(group_ids))
+    if schedule_id is not None:
+        query = query.filter(BasJob.schedule_id == schedule_id)
+
+    rows = query.order_by(BasJob.created_at.desc()).limit(200).all()
+    items_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def add_item(item: dict[str, Any]) -> None:
+        key = (item["priority"], item["title"])
+        existing = items_by_key.get(key)
+        if existing is None:
+            item["source_job_ids"] = [item["job_id"]]
+            items_by_key[key] = item
+            return
+        seen_targets = set(existing["affected_targets"])
+        for target in item["affected_targets"]:
+            if target not in seen_targets:
+                existing["affected_targets"].append(target)
+                seen_targets.add(target)
+        seen_evidence = set(existing["evidence"])
+        for evidence in item["evidence"]:
+            if evidence not in seen_evidence:
+                existing["evidence"].append(evidence)
+                seen_evidence.add(evidence)
+        existing["affected_count"] = len(existing["affected_targets"])
+        existing["source_job_ids"].append(item["job_id"])
+        if item["created_at"] > existing["created_at"]:
+            existing.update({
+                "job_id": item["job_id"],
+                "schedule_id": item["schedule_id"],
+                "schedule_name": item["schedule_name"],
+                "agent_id": item["agent_id"],
+                "agent_name": item["agent_name"],
+                "created_at": item["created_at"],
+            })
+
+    for job, agent, schedule in rows:
+        result = job.result or {}
+        if job.technique_key == "smb_enum_cme":
+            observations = _smb_observations(str(result.get("stdout") or ""))
+            smbv1_hosts = [o for o in observations if o["smbv1_enabled"]]
+            unsigned_hosts = [o for o in observations if not o["signing_required"]]
+            reachable_hosts = observations
+
+            if smbv1_hosts:
+                add_item({
+                    "id": f"smbv1-{job.id}",
+                    "priority": "P0",
+                    "title": "Desativar SMBv1 nos hosts encontrados",
+                    "category": "smb",
+                    "impact": "SMBv1 habilitado aumenta exposição a exploração lateral e protocolos legados inseguros.",
+                    "next_action": "Desabilitar SMBv1 por GPO/MDM, validar exceções e repetir o teste BAS na mesma máscara.",
+                    "affected_count": len(smbv1_hosts),
+                    "affected_targets": [f"{h['ip']} ({h['host']})" for h in smbv1_hosts],
+                    "evidence": [h["evidence"] for h in smbv1_hosts],
+                    "job_id": job.id,
+                    "schedule_id": schedule.id,
+                    "schedule_name": schedule.name,
+                    "agent_id": agent.id,
+                    "agent_name": agent.label or agent.hostname,
+                    "created_at": job.created_at,
+                })
+            if unsigned_hosts:
+                add_item({
+                    "id": f"smb-signing-{job.id}",
+                    "priority": "P1",
+                    "title": "Exigir SMB signing onde o teste mostrou signing desabilitado",
+                    "category": "smb",
+                    "impact": "Hosts sem SMB signing são candidatos a relay/man-in-the-middle em redes internas.",
+                    "next_action": "Aplicar política de assinatura SMB obrigatória em servidores e estações compatíveis, priorizando os ativos listados.",
+                    "affected_count": len(unsigned_hosts),
+                    "affected_targets": [f"{h['ip']} ({h['host']})" for h in unsigned_hosts],
+                    "evidence": [h["evidence"] for h in unsigned_hosts],
+                    "job_id": job.id,
+                    "schedule_id": schedule.id,
+                    "schedule_name": schedule.name,
+                    "agent_id": agent.id,
+                    "agent_name": agent.label or agent.hostname,
+                    "created_at": job.created_at,
+                })
+            if reachable_hosts:
+                add_item({
+                    "id": f"smb-reachable-{job.id}",
+                    "priority": "P2",
+                    "title": "Revisar segmentação dos hosts SMB alcançáveis",
+                    "category": "smb",
+                    "impact": "O agente conseguiu alcançar SMB/445 em múltiplos ativos dentro da máscara testada.",
+                    "next_action": "Confirmar se esses hosts deveriam estar acessíveis a partir desse segmento e bloquear fluxos desnecessários.",
+                    "affected_count": len(reachable_hosts),
+                    "affected_targets": [f"{h['ip']} ({h['host']})" for h in reachable_hosts],
+                    "evidence": [h["evidence"] for h in reachable_hosts],
+                    "job_id": job.id,
+                    "schedule_id": schedule.id,
+                    "schedule_name": schedule.name,
+                    "agent_id": agent.id,
+                    "agent_name": agent.label or agent.hostname,
+                    "created_at": job.created_at,
+                })
+
+    priority_rank = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
+    items = list(items_by_key.values())
+    return sorted(items, key=lambda item: (priority_rank.get(item["priority"], 9), -item["affected_count"]))[:limit]
+
+
+def attack_path_inventory(
+    db: Session, *, group_ids: list[int] | None = None, schedule_id: int | None = None
+) -> dict[str, Any]:
+    query = (
+        db.query(BasJob, BasAgent, BasSchedule)
+        .join(BasAgent, BasAgent.id == BasJob.agent_id)
+        .join(BasSchedule, BasSchedule.id == BasJob.schedule_id)
+        .filter(BasAgent.kind == "real", BasJob.status == "completed")
+    )
+    if group_ids is not None:
+        query = query.filter(BasJob.access_group_id.in_(group_ids))
+    if schedule_id is not None:
+        query = query.filter(BasJob.schedule_id == schedule_id)
+
+    rows = query.order_by(BasJob.created_at.desc()).limit(200).all()
+    assets: dict[str, dict[str, Any]] = {}
+
+    def ensure_asset(ip: str, job: BasJob, agent: BasAgent, schedule: BasSchedule) -> dict[str, Any]:
+        asset = assets.get(ip)
+        if asset is None:
+            asset = {
+                "ip": ip,
+                "hostname": ip,
+                "os": "",
+                "domain": "",
+                "first_seen": job.created_at,
+                "last_seen": job.created_at,
+                "source_job_ids": [],
+                "agent_ids": [],
+                "schedule_ids": [],
+                "services": [],
+                "vulnerabilities": [],
+                "risk_level": "low",
+            }
+            assets[ip] = asset
+        asset["last_seen"] = max(asset["last_seen"], job.created_at)
+        asset["first_seen"] = min(asset["first_seen"], job.created_at)
+        if job.id not in asset["source_job_ids"]:
+            asset["source_job_ids"].append(job.id)
+        if agent.id not in asset["agent_ids"]:
+            asset["agent_ids"].append(agent.id)
+        if schedule.id not in asset["schedule_ids"]:
+            asset["schedule_ids"].append(schedule.id)
+        return asset
+
+    for job, agent, schedule in rows:
+        result = job.result or {}
+        if job.technique_key in {"port_service_scan", "firewall_segmentation_test"}:
+            for port in _nmap_open_ports(result):
+                asset = ensure_asset(port["host"], job, agent, schedule)
+                service = {
+                    "name": str(port["service"]).upper() if str(port["service"]).lower() != "unknown" else f"TCP/{port['port']}",
+                    "port": port["port"],
+                    "protocol": port["protocol"],
+                    "application": "HTTP service" if port["port"] in {80, 443, 8000, 8008, 8080, 8443, 8888} or "http" in str(port["service"]).lower() else str(port["service"]),
+                    "version": str(port["service"]),
+                    "evidence": f"{port['host']}: {port['port']}/{port['protocol']} open {port['service']}",
+                }
+                if not any(s["port"] == service["port"] and s["protocol"] == service["protocol"] for s in asset["services"]):
+                    asset["services"].append(service)
+            continue
+        if job.technique_key != "smb_enum_cme":
+            continue
+        for observation in _smb_observations(str(result.get("stdout") or "")):
+            asset = ensure_asset(observation["ip"], job, agent, schedule)
+            asset["hostname"] = observation["host"]
+            asset["os"] = observation["os"]
+            asset["domain"] = observation["domain"]
+
+            service = {
+                "name": "SMB",
+                "port": 445,
+                "protocol": "tcp",
+                "application": "Microsoft SMB",
+                "version": "SMBv1 habilitado" if observation["smbv1_enabled"] else "SMBv2/3 observado",
+                "evidence": observation["evidence"],
+            }
+            if not any(s["name"] == service["name"] and s["port"] == service["port"] for s in asset["services"]):
+                asset["services"].append(service)
+
+            if observation["smbv1_enabled"] and not any(v["id"] == "smbv1_enabled" for v in asset["vulnerabilities"]):
+                asset["vulnerabilities"].append({
+                    "id": "smbv1_enabled",
+                    "severity": "high",
+                    "title": "SMBv1 habilitado",
+                    "recommendation": "Desativar SMBv1 e validar compatibilidade de aplicações legadas.",
+                })
+                asset["risk_level"] = "high"
+            if not observation["signing_required"] and not any(v["id"] == "smb_signing_disabled" for v in asset["vulnerabilities"]):
+                asset["vulnerabilities"].append({
+                    "id": "smb_signing_disabled",
+                    "severity": "medium",
+                    "title": "SMB signing não obrigatório",
+                    "recommendation": "Exigir SMB signing por política nos hosts compatíveis.",
+                })
+                if asset["risk_level"] != "high":
+                    asset["risk_level"] = "medium"
+
+    sorted_assets = sorted(
+        assets.values(),
+        key=lambda asset: ({"high": 0, "medium": 1, "low": 2}.get(asset["risk_level"], 9), asset["ip"]),
+    )
+    applications: dict[tuple[str, str], dict[str, Any]] = {}
+    vulnerability_summary: dict[str, dict[str, Any]] = {}
+
+    for asset in sorted_assets:
+        for service in asset["services"]:
+            key = (service["application"], service["version"])
+            app = applications.setdefault(key, {
+                "name": service["application"],
+                "version": service["version"],
+                "protocol": service["protocol"],
+                "port": service["port"],
+                "hosts": [],
+            })
+            app["hosts"].append({"ip": asset["ip"], "hostname": asset["hostname"], "risk_level": asset["risk_level"]})
+        for vulnerability in asset["vulnerabilities"]:
+            summary = vulnerability_summary.setdefault(vulnerability["id"], {
+                "id": vulnerability["id"],
+                "severity": vulnerability["severity"],
+                "title": vulnerability["title"],
+                "recommendation": vulnerability["recommendation"],
+                "affected_assets": [],
+            })
+            summary["affected_assets"].append({"ip": asset["ip"], "hostname": asset["hostname"]})
+
+    attack_steps = []
+    if sorted_assets:
+        attack_steps.append({
+            "order": 1,
+            "title": "Entrada pelo segmento do agente",
+            "description": "O agente real alcançou serviços internos a partir da máscara reportada.",
+            "evidence": f"{len(sorted_assets)} ativo(s) SMB/445 alcançável(is)",
+            "status": "observed",
+        })
+    if any(v["id"] == "smb_signing_disabled" for asset in sorted_assets for v in asset["vulnerabilities"]):
+        attack_steps.append({
+            "order": 2,
+            "title": "Possibilidade de relay SMB/NTLM",
+            "description": "Hosts sem assinatura SMB obrigatória aumentam a viabilidade de relay em rede interna.",
+            "evidence": f"{len(vulnerability_summary.get('smb_signing_disabled', {}).get('affected_assets', []))} ativo(s) sem signing obrigatório",
+            "status": "needs_fix",
+        })
+    if any(v["id"] == "smbv1_enabled" for asset in sorted_assets for v in asset["vulnerabilities"]):
+        attack_steps.append({
+            "order": 3,
+            "title": "Exploração de legado SMBv1",
+            "description": "SMBv1 habilitado indica protocolo legado com risco elevado e deve ser removido.",
+            "evidence": f"{len(vulnerability_summary.get('smbv1_enabled', {}).get('affected_assets', []))} ativo(s) com SMBv1",
+            "status": "critical_fix",
+        })
+
+    recommended_tests = []
+    tested_keys = {job.technique_key for job, _, _ in rows}
+    if "smb_enum_cme" in tested_keys and "network_share_discovery" not in tested_keys:
+        recommended_tests.append("network_share_discovery para validar compartilhamentos e permissões por host.")
+    if "smb_enum_cme" in tested_keys and "ad_scouting_ldap" not in tested_keys:
+        recommended_tests.append("ad_scouting_ldap para correlacionar hosts SMB com domínio, OU e contas.")
+    if "port_service_scan" not in tested_keys:
+        recommended_tests.append("port_service_scan na mesma máscara para enriquecer CMDB com portas e versões além de SMB.")
+
+    return {
+        "summary": {
+            "assets": len(sorted_assets),
+            "applications": len(applications),
+            "vulnerabilities": len(vulnerability_summary),
+            "high_risk_assets": sum(1 for asset in sorted_assets if asset["risk_level"] == "high"),
+            "medium_risk_assets": sum(1 for asset in sorted_assets if asset["risk_level"] == "medium"),
+        },
+        "attack_steps": attack_steps,
+        "cmdb_assets": sorted_assets[:50],
+        "applications": sorted(applications.values(), key=lambda app: (-len(app["hosts"]), app["name"], app["version"])),
+        "vulnerabilities": sorted(
+            vulnerability_summary.values(),
+            key=lambda item: ({"critical": 0, "high": 1, "medium": 2, "low": 3}.get(item["severity"], 9), -len(item["affected_assets"])),
+        ),
+        "recommended_tests": recommended_tests,
+    }
+
+
+def crown_jewels_view(
+    db: Session, *, group_ids: list[int] | None = None, schedule_id: int | None = None
+) -> list[dict[str, Any]]:
     """Reuses the platform's real crown-jewel keyword identifier
     (crown_jewel_analyzer.identify_crown_jewels) against BAS schedules'
     target_hints -- the same "does this hostname look high-value" signal
@@ -146,6 +531,8 @@ def crown_jewels_view(db: Session, *, group_ids: list[int] | None = None) -> lis
     query = db.query(BasSchedule)
     if group_ids is not None:
         query = query.filter(BasSchedule.access_group_id.in_(group_ids))
+    if schedule_id is not None:
+        query = query.filter(BasSchedule.id == schedule_id)
     schedules = query.all()
 
     # target_hint can now be a comma/semicolon/newline-separated list -- split
@@ -161,7 +548,10 @@ def crown_jewels_view(db: Session, *, group_ids: list[int] | None = None) -> lis
     # BasJob.target (the actual per-dispatch target) is the accurate count
     # now -- a schedule's raw target_hint is no longer 1:1 with what a single
     # job ran against.
-    job_counts = Counter(row.target for row in db.query(BasJob).all() if row.target)
+    job_count_query = db.query(BasJob)
+    if schedule_id is not None:
+        job_count_query = job_count_query.filter(BasJob.schedule_id == schedule_id)
+    job_counts = Counter(row.target for row in job_count_query.all() if row.target)
 
     return [
         {"target": target, "label": label, "boost": boost, "jobs_run": job_counts.get(target, 0)}
@@ -169,7 +559,9 @@ def crown_jewels_view(db: Session, *, group_ids: list[int] | None = None) -> lis
     ]
 
 
-def risk_score(db: Session, *, group_ids: list[int] | None = None) -> dict[str, Any]:
+def risk_score(
+    db: Session, *, group_ids: list[int] | None = None, schedule_id: int | None = None
+) -> dict[str, Any]:
     """0-100: share of REAL-agent dispatches whose relay actually completed
     vs. genuinely failed/blocked at the network or tool level -- exactly the
     "how many techniques worked vs. were blocked" metric requested. Stub
@@ -183,6 +575,8 @@ def risk_score(db: Session, *, group_ids: list[int] | None = None) -> dict[str, 
     query = db.query(BasJob.status).join(BasAgent, BasAgent.id == BasJob.agent_id).filter(BasAgent.kind == "real")
     if group_ids is not None:
         query = query.filter(BasJob.access_group_id.in_(group_ids))
+    if schedule_id is not None:
+        query = query.filter(BasJob.schedule_id == schedule_id)
     statuses = [row[0] for row in query.all()]
     completed = sum(1 for s in statuses if s == "completed")
     failed = sum(1 for s in statuses if s == "failed")
@@ -195,7 +589,9 @@ def risk_score(db: Session, *, group_ids: list[int] | None = None) -> dict[str, 
     }
 
 
-def attack_heatmap(db: Session, *, group_ids: list[int] | None = None) -> list[dict[str, Any]]:
+def attack_heatmap(
+    db: Session, *, group_ids: list[int] | None = None, schedule_id: int | None = None
+) -> list[dict[str, Any]]:
     """One row per cataloged MITRE technique reference: how many times it's
     been dispatched (0 = never tested -- a coverage gap, not a finding).
     Dispatch/completion counts here are raw ACTIVITY (stub + real blended),
@@ -204,6 +600,8 @@ def attack_heatmap(db: Session, *, group_ids: list[int] | None = None) -> list[d
     query = db.query(BasJob.technique_key, BasJob.status)
     if group_ids is not None:
         query = query.filter(BasJob.access_group_id.in_(group_ids))
+    if schedule_id is not None:
+        query = query.filter(BasJob.schedule_id == schedule_id)
     counts = Counter()
     completed_counts = Counter()
     for technique_key, status in query.all():
@@ -226,7 +624,9 @@ def attack_heatmap(db: Session, *, group_ids: list[int] | None = None) -> list[d
     return sorted(rows, key=lambda r: (-r["times_tested"], r["mitre_id"]))
 
 
-def chain_attack_path(db: Session, *, group_ids: list[int] | None = None, limit: int = 10) -> list[dict[str, Any]]:
+def chain_attack_path(
+    db: Session, *, group_ids: list[int] | None = None, schedule_id: int | None = None, limit: int = 10
+) -> list[dict[str, Any]]:
     """The actual kill-chain path for each fired chain schedule (BasSchedule.
     chain_key set) -- a real, ordered sequence of what was attempted and what
     genuinely happened at each step, grouped by the shadow ScanJob one
@@ -246,6 +646,8 @@ def chain_attack_path(db: Session, *, group_ids: list[int] | None = None, limit:
     )
     if group_ids is not None:
         query = query.filter(BasJob.access_group_id.in_(group_ids))
+    if schedule_id is not None:
+        query = query.filter(BasJob.schedule_id == schedule_id)
     rows = query.order_by(BasJob.created_at.asc()).all()
 
     from app.services.bas_chain_catalog import get_chain
@@ -282,19 +684,30 @@ def chain_attack_path(db: Session, *, group_ids: list[int] | None = None, limit:
     return paths[:limit]
 
 
-def executive_report(db: Session, *, group_ids: list[int] | None = None) -> dict[str, Any]:
+def executive_report(
+    db: Session, *, group_ids: list[int] | None = None, schedule_id: int | None = None
+) -> dict[str, Any]:
     """Assembles the "Relatório BAS" document payload from the panels above --
     no new computation beyond a short narrative summary string built from
     those same real numbers. Every figure here is either a coverage/activity
     metric or the worked-vs-blocked risk_score ratio -- same honesty rule as
-    the rest of this module (see module docstring)."""
-    coverage = framework_coverage(db, group_ids=group_ids)
-    exposure = exposure_summary(db, group_ids=group_ids)
-    score = risk_score(db, group_ids=group_ids)
-    jewels = crown_jewels_view(db, group_ids=group_ids)
-    heatmap = attack_heatmap(db, group_ids=group_ids)
-    findings = bas_findings_view(db, group_ids=group_ids, limit=50)
-    chain_paths = chain_attack_path(db, group_ids=group_ids)
+    the rest of this module (see module docstring). schedule_id, when given,
+    scopes every panel to that one named test/agendamento instead of the
+    platform-wide aggregate -- the operator picking "just this one report"
+    from the report page instead of "all reports"."""
+    selected_schedule_name = None
+    if schedule_id is not None:
+        schedule_row = db.query(BasSchedule).filter(BasSchedule.id == schedule_id).first()
+        selected_schedule_name = schedule_row.name if schedule_row else None
+
+    coverage = framework_coverage(db, group_ids=group_ids, schedule_id=schedule_id)
+    exposure = exposure_summary(db, group_ids=group_ids, schedule_id=schedule_id)
+    score = risk_score(db, group_ids=group_ids, schedule_id=schedule_id)
+    jewels = crown_jewels_view(db, group_ids=group_ids, schedule_id=schedule_id)
+    heatmap = attack_heatmap(db, group_ids=group_ids, schedule_id=schedule_id)
+    findings = bas_findings_view(db, group_ids=group_ids, schedule_id=schedule_id, limit=50)
+    chain_paths = chain_attack_path(db, group_ids=group_ids, schedule_id=schedule_id)
+    priorities = action_priorities(db, group_ids=group_ids, schedule_id=schedule_id)
 
     total_techniques = len(list_techniques())
     tested_techniques = sum(1 for row in heatmap if row["times_tested"] > 0)
@@ -304,6 +717,7 @@ def executive_report(db: Session, *, group_ids: list[int] | None = None) -> dict
     severity_order = ["critical", "high", "medium", "low", "info"]
     severity_counts = {sev: sum(1 for f in real_findings if f["severity"] == sev) for sev in severity_order}
     vulnerable_findings = [f for f in real_findings if f["severity"] != "info"]
+    blocking_priorities = [p for p in priorities if p["priority"] in {"P0", "P1"}]
 
     if score["resolved_total"] == 0:
         narrative = (
@@ -311,13 +725,18 @@ def executive_report(db: Session, *, group_ids: list[int] | None = None) -> dict
             f"{tested_techniques}/{total_techniques} técnicas catalogadas já foram disparadas ao menos uma vez."
         )
     else:
-        risk_clause = (
-            f"{len(vulnerable_findings)} achado(s) real(is) indicam risco concreto "
-            f"({severity_counts['critical']} crítico(s), {severity_counts['high']} alto(s), {severity_counts['medium']} médio(s), "
-            f"{severity_counts['low']} baixo(s))."
-            if vulnerable_findings
-            else "Nenhum achado real indicou risco concreto até agora -- os alvos testados responderam de forma esperada."
-        )
+        if vulnerable_findings:
+            risk_clause = (
+                f"{len(vulnerable_findings)} achado(s) real(is) indicam risco concreto "
+                f"({severity_counts['critical']} crítico(s), {severity_counts['high']} alto(s), {severity_counts['medium']} médio(s), "
+                f"{severity_counts['low']} baixo(s))."
+            )
+        elif blocking_priorities:
+            risk_clause = (
+                f"{len(blocking_priorities)} prioridade(s) P0/P1 foram extraídas dos resultados reais e exigem correção."
+            )
+        else:
+            risk_clause = "Nenhum achado real indicou risco concreto até agora -- os alvos testados responderam de forma esperada."
         narrative = (
             f"Neste escopo, {tested_techniques}/{total_techniques} técnicas catalogadas foram disparadas, "
             f"cobrindo {len(exposure['categories_tested'])} categoria(s) em {exposure['distinct_targets_tested']} alvo(s) interno(s). "
@@ -329,6 +748,8 @@ def executive_report(db: Session, *, group_ids: list[int] | None = None) -> dict
 
     return {
         "narrative": narrative,
+        "schedule_id": schedule_id,
+        "schedule_name": selected_schedule_name,
         "total_techniques": total_techniques,
         "tested_techniques": tested_techniques,
         "risk_score": score,
@@ -338,5 +759,6 @@ def executive_report(db: Session, *, group_ids: list[int] | None = None) -> dict
         "crown_jewels": jewels,
         "attack_heatmap": heatmap,
         "findings": findings,
+        "action_priorities": priorities,
         "chain_attack_paths": chain_paths,
     }

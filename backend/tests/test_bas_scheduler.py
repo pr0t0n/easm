@@ -187,6 +187,48 @@ def test_fire_schedule_defaults_to_the_agents_own_network_when_target_hint_is_bl
     assert len(result["job_ids"]) == 1
 
 
+def test_fire_schedule_expands_agent_network_for_host_based_techniques():
+    db = MagicMock()
+    agent = _agent(local_network_cidr="10.10.10.0/30")
+    db.query.return_value.filter.return_value.first.return_value = agent
+
+    schedule = _schedule(target_hint="", agent_id=13)
+    schedule.stop_on_failure = False
+    schedule.technique_keys = ["network_share_discovery"]
+
+    with patch(
+        "app.services.bas_scheduler.dispatch_bas_technique",
+        return_value={"dispatched": True, "result": {"status": "executed"}, "agent_kind": "real"},
+    ) as mock_dispatch:
+        result = fire_schedule(db, schedule)
+
+    assert [call.kwargs["target_hint"] for call in mock_dispatch.call_args_list] == ["10.10.10.1", "10.10.10.2"]
+    assert len(result["job_ids"]) == 2
+
+
+def test_fire_schedule_skips_host_fanout_when_agent_network_is_too_large():
+    db = MagicMock()
+    agent = _agent(local_network_cidr="10.10.0.0/16")
+    db.query.return_value.filter.return_value.first.return_value = agent
+
+    schedule = _schedule(target_hint="", agent_id=13)
+    schedule.stop_on_failure = False
+    schedule.technique_keys = ["network_share_discovery"]
+
+    with patch("app.services.bas_scheduler.dispatch_bas_technique") as mock_dispatch:
+        result = fire_schedule(db, schedule)
+
+    mock_dispatch.assert_not_called()
+    assert result["job_ids"] == []
+    assert result["skipped"] == [
+        {
+            "technique_key": "network_share_discovery",
+            "target": "10.10.0.0/16",
+            "reason": "network_fanout_too_large:65536_hosts_max_256",
+        }
+    ]
+
+
 def test_fire_schedule_skips_everything_with_a_clear_reason_when_agent_network_is_unknown():
     """The agent binary predates local_network_cidr, or hasn't sent a
     heartbeat yet -- never guess a target, never fall back to a meaningless
@@ -316,6 +358,18 @@ def test_extract_key_findings_pulls_open_ports_from_nmap():
     stdout = "PORT     STATE SERVICE\n3000/tcp open  http\nNot shown: 98 closed tcp ports\n"
     findings = _extract_key_findings("port_service_scan", "network", {"stdout": stdout})
     assert findings == ["3000/tcp open  http"]
+
+
+def test_smb_cme_findings_and_severity_reflect_signing_and_smbv1():
+    stdout = "\n".join([
+        "SMB                      10.125.133.225  445    BR-SEN1-PC0214   [*] Windows 11 / Server 2025 Build 26100 x64 (name:BR-SEN1-PC0214) (domain:falconcorp.net) (signing:False) (SMBv1:False)",
+        "SMB                      10.125.135.102  445    NBK-DANIEL       [*] Windows 10 Home Single Language 26200 x64 (name:NBK-DANIEL) (domain:NBK-DANIEL) (signing:False) (SMBv1:True)",
+    ])
+
+    findings = _extract_key_findings("smb_enum_cme", "smb", {"stdout": stdout})
+
+    assert len(findings) == 2
+    assert _derive_severity("smb_enum_cme", findings) == "high"
 
 
 def test_extract_key_findings_pulls_secret_grep_hits_and_excludes_exit_code_line():

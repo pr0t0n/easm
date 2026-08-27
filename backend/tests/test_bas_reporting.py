@@ -226,6 +226,7 @@ def test_executive_report_narrative_reflects_zero_resolved_jobs():
              {"technique_key": "smb_enum_cme", "times_tested": 0}, {"technique_key": "ad_kerberoast", "times_tested": 0},
          ]), \
          patch.object(bas_reporting, "bas_findings_view", return_value=[]), \
+         patch.object(bas_reporting, "action_priorities", return_value=[]), \
          patch.object(bas_reporting, "chain_attack_path", return_value=[]):
         result = bas_reporting.executive_report(db)
 
@@ -251,6 +252,7 @@ def test_executive_report_narrative_reflects_real_resolved_jobs():
          patch.object(bas_reporting, "bas_findings_view", return_value=[
              {"id": 1, "title": "BAS: smb_enum_cme", "severity": "info", "simulated": False},
          ]), \
+         patch.object(bas_reporting, "action_priorities", return_value=[]), \
          patch.object(bas_reporting, "chain_attack_path", return_value=[]):
         result = bas_reporting.executive_report(db)
 
@@ -274,13 +276,74 @@ def test_executive_report_narrative_calls_out_real_vulnerable_findings():
              {"id": 1, "title": "BAS: OWASP Web Application Scan", "severity": "medium", "simulated": False},
              {"id": 2, "title": "BAS: stub finding", "severity": "critical", "simulated": True},  # must NOT count
          ]), \
+         patch.object(bas_reporting, "action_priorities", return_value=[{"priority": "P1"}]), \
          patch.object(bas_reporting, "chain_attack_path", return_value=[{"chain_key": "web_to_secrets_chain"}]):
         result = bas_reporting.executive_report(db)
 
     assert result["severity_counts"]["medium"] == 1
     assert result["severity_counts"]["critical"] == 0  # the stub one is excluded
     assert "1 achado(s) real(is) indicam risco concreto" in result["narrative"]
+    assert result["action_priorities"] == [{"priority": "P1"}]
     assert result["chain_attack_paths"] == [{"chain_key": "web_to_secrets_chain"}]
+
+
+def test_action_priorities_extracts_smbv1_and_unsigned_smb_from_real_job_stdout():
+    from datetime import datetime
+
+    stdout = "\n".join([
+        "SMB                      10.125.133.225  445    BR-SEN1-PC0214   [*] Windows 11 / Server 2025 Build 26100 x64 (name:BR-SEN1-PC0214) (domain:falconcorp.net) (signing:False) (SMBv1:False)",
+        "SMB                      10.125.135.102  445    NBK-DANIEL       [*] Windows 10 Home Single Language 26200 x64 (name:NBK-DANIEL) (domain:NBK-DANIEL) (signing:False) (SMBv1:True)",
+        "SMB                      10.125.138.34   445    BBTMF-9RK90L3    [*] Windows 11 / Server 2025 Build 26100 x64 (name:BBTMF-9RK90L3) (domain:BBTMF-9RK90L3) (signing:True) (SMBv1:False)",
+    ])
+    job = SimpleNamespace(
+        id=74, technique_key="smb_enum_cme", result={"stdout": stdout}, created_at=datetime(2026, 8, 26, 21, 21),
+    )
+    agent = SimpleNamespace(id=19, kind="real", label=None, hostname="kali")
+    schedule = SimpleNamespace(id=10, name="teste")
+    query = _query_chain([(job, agent, schedule)])
+    db = MagicMock()
+    db.query.return_value = query
+
+    rows = bas_reporting.action_priorities(db)
+
+    assert [row["priority"] for row in rows] == ["P0", "P1", "P2"]
+    assert rows[0]["affected_targets"] == ["10.125.135.102 (NBK-DANIEL)"]
+    assert rows[1]["affected_count"] == 2
+    assert rows[2]["affected_count"] == 3
+
+
+def test_attack_path_inventory_builds_cmdb_apps_vulnerabilities_and_steps():
+    from datetime import datetime
+
+    stdout = "\n".join([
+        "SMB                      10.125.133.225  445    BR-SEN1-PC0214   [*] Windows 11 / Server 2025 Build 26100 x64 (name:BR-SEN1-PC0214) (domain:falconcorp.net) (signing:False) (SMBv1:False)",
+        "SMB                      10.125.135.102  445    NBK-DANIEL       [*] Windows 10 Home Single Language 26200 x64 (name:NBK-DANIEL) (domain:NBK-DANIEL) (signing:False) (SMBv1:True)",
+    ])
+    job = SimpleNamespace(
+        id=75, technique_key="smb_enum_cme", status="completed", result={"stdout": stdout}, created_at=datetime(2026, 8, 26, 22, 2),
+    )
+    agent = SimpleNamespace(id=19, kind="real")
+    schedule = SimpleNamespace(id=10, name="teste")
+    db = MagicMock()
+    db.query.return_value = _query_chain([(job, agent, schedule)])
+
+    result = bas_reporting.attack_path_inventory(db)
+
+    assert result["summary"] == {
+        "assets": 2,
+        "applications": 2,
+        "vulnerabilities": 2,
+        "high_risk_assets": 1,
+        "medium_risk_assets": 1,
+    }
+    assert [asset["ip"] for asset in result["cmdb_assets"]] == ["10.125.135.102", "10.125.133.225"]
+    assert {app["version"] for app in result["applications"]} == {"SMBv1 habilitado", "SMBv2/3 observado"}
+    assert {v["id"] for v in result["vulnerabilities"]} == {"smbv1_enabled", "smb_signing_disabled"}
+    assert [step["title"] for step in result["attack_steps"]] == [
+        "Entrada pelo segmento do agente",
+        "Possibilidade de relay SMB/NTLM",
+        "Exploração de legado SMBv1",
+    ]
 
 
 def test_chain_attack_path_groups_steps_by_the_shadow_scan_job_in_order():

@@ -184,12 +184,13 @@ def test_dispatch_strips_cidr_for_a_technique_that_does_not_accept_a_range():
     )
 
 
-def test_dispatch_refuses_a_range_larger_than_the_host_cap_without_calling_kali():
-    """Every accepts_range profile has a fixed timeout sized for one host
-    (120-240s, bas_internal.yaml) through a SOCKS5-proxied tool -- a /16
-    would silently run out of time and cover only a sliver of the range with
-    no signal anything was truncated. Reject up front instead."""
-    with patch("app.services.bas_dispatcher.execute_via_kali") as mock_exec:
+def test_dispatch_allows_a_range_larger_than_the_old_host_cap():
+    """The operator explicitly wants unbounded CIDR ranges dispatched -- a
+    fixed per-call kali-runner timeout (120-240s, bas_internal.yaml) may
+    still mean a huge range only gets partial coverage before timing out,
+    but that's now visible via the Operations Center's live BAS job view
+    rather than silently rejected up front."""
+    with patch("app.services.bas_dispatcher.execute_via_kali", return_value={"status": "executed"}) as mock_exec:
         outcome = dispatch_bas_technique(
             technique_key="port_service_scan",
             target_hint="10.10.0.0/16",  # 65536 addresses
@@ -198,9 +199,10 @@ def test_dispatch_refuses_a_range_larger_than_the_host_cap_without_calling_kali(
             schedule=_schedule(),
         )
 
-    assert outcome["dispatched"] is False
-    assert outcome["reason"] == "range_too_large:65536_hosts_max_256"
-    mock_exec.assert_not_called()
+    assert outcome["dispatched"] is True
+    mock_exec.assert_called_once_with(
+        "nmap-portscan-bas", "10.10.0.0/16", scan_id=42, scan_mode="unit", env_vars=_STUB_ENV_VARS,
+    )
 
 
 def test_dispatch_allows_a_range_exactly_at_the_host_cap():

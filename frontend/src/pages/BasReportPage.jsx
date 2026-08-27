@@ -2,14 +2,6 @@ import { Fragment, useEffect, useState } from "react";
 import client from "../api/client";
 import "../styles/dashboard.css";
 
-/* Relatório BAS (Breach & Attack Simulation) — dado real de /api/bas/report.
-   Cada achado carrega seu próprio flag `simulated`: só é simulado quando a
-   técnica foi disparada via um agente stub (bas_agent_stub) -- um agente
-   real (certificado mTLS assinado pela CA da plataforma) produz tráfego e
-   resultado reais, e conta normalmente. Severidade/recomendação/achados-chave
-   vêm do conteúdo REAL observado (bas_scheduler._extract_key_findings /
-   _derive_severity) -- nunca um valor fixo. */
-
 const FW_LABEL_ORDER = ["nist", "iso27001", "pci", "cis_v8"];
 const SEV_ORDER = ["critical", "high", "medium", "low", "info"];
 const SEV_LABEL = { critical: "Crítico", high: "Alto", medium: "Médio", low: "Baixo", info: "Info" };
@@ -27,15 +19,21 @@ export default function BasReportPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [expandedFindingId, setExpandedFindingId] = useState(null);
+  const [schedules, setSchedules] = useState([]);
+  const [scheduleId, setScheduleId] = useState("");
+
+  useEffect(() => {
+    client.get("/api/bas/schedules").then(({ data }) => setSchedules(data || [])).catch(() => {});
+  }, []);
 
   useEffect(() => {
     setLoading(true);
     client
-      .get("/api/bas/report")
+      .get("/api/bas/report", { params: scheduleId ? { schedule_id: scheduleId } : {} })
       .then(({ data }) => setData(data || null))
       .catch(() => setError("Falha ao carregar o relatório BAS."))
       .finally(() => setLoading(false));
-  }, []);
+  }, [scheduleId]);
 
   if (loading) {
     return <main className="dash"><div className="content" style={{ padding: "32px 40px" }}><div className="dash-state"><div><div className="spin" /><p className="st-title">Gerando relatório BAS…</p></div></div></div></main>;
@@ -50,6 +48,7 @@ export default function BasReportPage() {
   const jewels = data?.crown_jewels || [];
   const heatmap = data?.attack_heatmap || [];
   const findings = data?.findings || [];
+  const actionPriorities = data?.action_priorities || [];
   const chainPaths = data?.chain_attack_paths || [];
   const severityCounts = data?.severity_counts || {};
   const tone = riskScoreTone(score.score);
@@ -67,6 +66,15 @@ export default function BasReportPage() {
     <main className="dash">
       <div className="content report-shell">
         <section className="report-actions no-print">
+          <div>
+            <label className="sk-mono muted" style={{ fontSize: 11, marginRight: 8 }}>Relatório:</label>
+            <select value={scheduleId} onChange={(e) => setScheduleId(e.target.value)}>
+              <option value="">Todos os testes (agregado)</option>
+              {schedules.map((s) => (
+                <option key={s.id} value={s.id}>{s.name || `agendamento #${s.id}`}</option>
+              ))}
+            </select>
+          </div>
           <div className="report-actions-right">
             <button className="sk-btn-ghost" onClick={() => window.print()}>Imprimir / PDF</button>
           </div>
@@ -74,7 +82,10 @@ export default function BasReportPage() {
 
         <header className="report-head">
           <div>
-            <div className="sk-eyebrow" style={{ color: "var(--brand-700)" }}>Relatório BAS · Breach &amp; Attack Simulation · confidencial</div>
+            <div className="sk-eyebrow" style={{ color: "var(--brand-700)" }}>
+              Relatório BAS · Breach &amp; Attack Simulation · confidencial
+              {data?.schedule_name && <> · {data.schedule_name}</>}
+            </div>
             <h1>Cobertura, risco e caminhos de ataque reais observados</h1>
             <p className="report-meta sk-mono">
               {data?.total_techniques || 0} técnica(s) catalogada(s) · {data?.tested_techniques || 0} já disparada(s) ·
@@ -104,7 +115,38 @@ export default function BasReportPage() {
         </section>
 
         <section className="report-section">
-          <div className="sk-eyebrow">02 · Vulnerabilidades por severidade</div>
+          <div className="sk-eyebrow">02 · Onde corrigir primeiro</div>
+          <span className="report-sub">prioridades extraídas dos resultados reais dos testes, com evidência e próxima ação</span>
+          {actionPriorities.length === 0 ? (
+            <div className="report-empty" style={{ marginTop: 10 }}>Nenhuma prioridade real extraída dos testes concluídos neste escopo.</div>
+          ) : (
+            <div style={{ display: "grid", gap: 10, marginTop: 12 }}>
+              {actionPriorities.slice(0, 8).map((item) => (
+                <div key={item.id} style={{ border: "1px solid var(--line)", borderRadius: 8, padding: "11px 13px" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "baseline" }}>
+                    <div>
+                      <b style={{ fontSize: 13 }}>{item.priority} · {item.title}</b>
+                      <div className="report-sub" style={{ marginTop: 3 }}>{item.impact}</div>
+                    </div>
+                    <span className="sk-mono muted" style={{ fontSize: 11 }}>{item.affected_count} ativo(s)</span>
+                  </div>
+                  <p style={{ margin: "8px 0 0", fontSize: 12 }}>{item.next_action}</p>
+                  {(item.affected_targets || []).length > 0 && (
+                    <div className="sk-mono" style={{ fontSize: 11, marginTop: 8 }}>
+                      {(item.affected_targets || []).slice(0, 8).join(" · ")}
+                    </div>
+                  )}
+                  <div className="sk-mono muted" style={{ fontSize: 10, marginTop: 6 }}>
+                    job #{item.job_id}{(item.source_job_ids || []).length > 1 ? ` · ${item.source_job_ids.length} evidências` : ""} · {item.schedule_name || `agendamento #${item.schedule_id}`} · agente {item.agent_name || `#${item.agent_id}`}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+
+        <section className="report-section">
+          <div className="sk-eyebrow">03 · Vulnerabilidades por severidade</div>
           <span className="report-sub">severidade derivada do conteúdo real observado por técnica — nunca um valor fixo</span>
           <div style={{ display: "grid", gap: 8, marginTop: 12 }}>
             {SEV_ORDER.filter((s) => s !== "info").map((sev) => {
@@ -127,7 +169,7 @@ export default function BasReportPage() {
 
         <div className="report-two-col">
           <section className="report-section">
-            <div className="sk-eyebrow">03 · Cobertura por framework</div>
+            <div className="sk-eyebrow">04 · Cobertura por framework</div>
             <span className="report-sub">técnicas relevantes já testadas por um agente real</span>
             <div style={{ display: "grid", gap: 10, marginTop: 10 }}>
               {FW_LABEL_ORDER.filter((k) => coverage[k]).map((key) => {
@@ -149,7 +191,7 @@ export default function BasReportPage() {
           </section>
 
           <section className="report-section">
-            <div className="sk-eyebrow">04 · Exposição / superfície testada</div>
+            <div className="sk-eyebrow">05 · Exposição / superfície testada</div>
             <div className="report-kpis">
               <div><span>Categorias testadas</span><strong className="sk-mono">{(exposure.categories_tested || []).length}</strong></div>
               <div><span>Disparos totais</span><strong className="sk-mono">{exposure.total_dispatches || 0}</strong></div>
@@ -163,7 +205,7 @@ export default function BasReportPage() {
         </div>
 
         <section className="report-section">
-          <div className="sk-eyebrow">05 · Attack Path (chains disparadas)</div>
+          <div className="sk-eyebrow">06 · Attack Path (chains disparadas)</div>
           <span className="report-sub">sequência real de cada chain disparada — o que foi tentado, em ordem, e o que de fato aconteceu em cada etapa</span>
           {chainPaths.length === 0 ? (
             <div className="report-empty" style={{ marginTop: 10 }}>Nenhuma chain disparada ainda — veja a página de Testes/Agendamento BAS.</div>
@@ -204,7 +246,7 @@ export default function BasReportPage() {
         </section>
 
         <section className="report-section">
-          <div className="sk-eyebrow">06 · Joias da coroa em risco</div>
+          <div className="sk-eyebrow">07 · Joias da coroa em risco</div>
           {jewels.length === 0 ? (
             <div className="report-empty">Nenhuma joia da coroa identificada nos alvos internos configurados.</div>
           ) : (
@@ -220,7 +262,7 @@ export default function BasReportPage() {
         </section>
 
         <section className="report-section">
-          <div className="sk-eyebrow">07 · Attack Heat Map (MITRE ATT&amp;CK)</div>
+          <div className="sk-eyebrow">08 · Attack Heat Map (MITRE ATT&amp;CK)</div>
           <span className="report-sub">técnicas nunca disparadas são lacunas de cobertura, não "sem risco"</span>
           <div style={{ display: "grid", gap: 14, marginTop: 10 }}>
             {Object.entries(heatmapByCategory).map(([category, rows]) => (
@@ -246,7 +288,7 @@ export default function BasReportPage() {
         </section>
 
         <section className="report-section">
-          <div className="sk-eyebrow">08 · Achados, vulnerabilidades e recomendações</div>
+          <div className="sk-eyebrow">09 · Achados, vulnerabilidades e recomendações</div>
           <span className="report-sub">clique num achado real para ver o que foi observado de fato e como corrigir</span>
           <div className="attack-table-wrap">
             <table className="attack-table report-plan">

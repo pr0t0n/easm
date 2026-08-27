@@ -1,54 +1,77 @@
 """Regression test: DELETE /api/bas/schedules/{id} must not violate the
-bas_jobs -> bas_schedules FK (no ON DELETE clause) when the schedule has
-already fired at least once. Confirmed live: deleting schedule #9 500'd
-with psycopg2.errors.ForeignKeyViolation on bas_jobs_schedule_id_fkey after
-its jobs #68/#69 had run. delete_schedule now nulls BasJob.schedule_id for
-that schedule's jobs (preserving them as historical dispatch records)
-before deleting the schedule row itself.
+bas_jobs -> findings FK (bas_jobs_finding_id_fkey) when the schedule has
+already fired at least once. delete_schedule now purges everything the
+schedule produced -- its BasJobs, the BAS findings those jobs raised, and
+the shadow ScanJob rows -- so a deleted test stops showing up in the
+dashboard/report/heatmap. BasJob rows must be deleted before the Finding
+rows they reference (same FK order as delete_agent/delete_jobs).
 """
 from types import SimpleNamespace
 
 from app.api import routes_bas
-from app.models.models import BasJob, BasSchedule
+from app.models.models import BasJob, BasSchedule, Finding, ScanJob
 
 
-class _UpdateQuery:
-    def __init__(self, recorder):
+class _DeleteQuery:
+    def __init__(self, recorder, name, rows=None):
         self._recorder = recorder
+        self._name = name
+        self._rows = rows
 
     def filter(self, *args, **kwargs):
         return self
 
+    def distinct(self):
+        return self
+
+    def all(self):
+        return self._rows or []
+
+    def delete(self, synchronize_session=False):
+        self._recorder.append(self._name)
+        return len(self._rows or [])
+
     def update(self, values, synchronize_session=False):
-        self._recorder.append(("bas_job_update", dict(values)))
-        return 2
+        self._recorder.append(self._name)
+        return len(self._rows or [])
 
 
 class _FakeDb:
-    def __init__(self, schedule):
+    """`_purge_bas_scan_jobs` also touches WorkerHeartbeat/Asset/etc. --
+    those aren't relevant to the bas_jobs-before-findings ordering this test
+    exists to check, so anything not explicitly named below falls through to
+    a no-op stub instead of raising."""
+
+    def __init__(self, schedule, jobs):
         self._schedule = schedule
+        self._jobs = jobs
         self.calls = []
         self.deleted = []
         self.committed = False
 
     def query(self, target):
         if target is BasJob:
-            return _UpdateQuery(self.calls)
+            return _DeleteQuery(self.calls, "bas_job_delete", self._jobs)
+        if target is Finding:
+            return _DeleteQuery(self.calls, "finding_delete")
+        if target is ScanJob:
+            return _DeleteQuery(self.calls, "scan_job_delete")
         if target is BasSchedule:
-            return None
-        raise AssertionError(f"unexpected query target: {target}")
+            return None  # apply_company_scope is monkeypatched to ignore this
+        return _DeleteQuery(self.calls, f"other:{getattr(target, '__name__', target)}")
 
     def delete(self, obj):
-        self.calls.append(("schedule_delete", None))
+        self.calls.append("schedule_delete")
         self.deleted.append(obj)
 
     def commit(self):
         self.committed = True
 
 
-def test_delete_schedule_nulls_bas_job_schedule_id_before_deleting(monkeypatch):
+def test_delete_schedule_deletes_bas_jobs_and_findings_before_schedule(monkeypatch):
     schedule = SimpleNamespace(id=9)
-    db = _FakeDb(schedule)
+    jobs = [SimpleNamespace(id=68, finding_id=1068, scan_job_id=2068), SimpleNamespace(id=69, finding_id=None, scan_job_id=2069)]
+    db = _FakeDb(schedule, jobs)
     monkeypatch.setattr(
         routes_bas,
         "apply_company_scope",
@@ -57,11 +80,11 @@ def test_delete_schedule_nulls_bas_job_schedule_id_before_deleting(monkeypatch):
 
     routes_bas.delete_schedule(9, db=db, current_user=SimpleNamespace(id=1, is_admin=True))
 
-    call_names = [name for name, _ in db.calls]
-    assert call_names == ["bas_job_update", "schedule_delete"], (
-        "BasJob.schedule_id must be nulled BEFORE the schedule is deleted, "
-        f"got order={call_names}"
+    assert db.calls.index("bas_job_delete") < db.calls.index("finding_delete"), (
+        "BasJob rows must be deleted BEFORE the Finding rows they reference "
+        f"(bas_jobs.finding_id -> findings.id), got order={db.calls}"
     )
-    assert db.calls[0][1] == {BasJob.schedule_id: None}
+    assert "scan_job_delete" in db.calls
+    assert db.calls[-1] == "schedule_delete", "schedule delete must come after cleaning up its dependents"
     assert db.deleted == [schedule]
     assert db.committed is True

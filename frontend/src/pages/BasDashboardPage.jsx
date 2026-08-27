@@ -68,18 +68,68 @@ export default function BasDashboardPage() {
     if (navigator.clipboard) navigator.clipboard.writeText(String(value || ""));
   };
 
+  const deleteAgent = async (agent) => {
+    const label = agent.label || agent.hostname || `agente #${agent.id}`;
+    if (!window.confirm(
+      `Remover "${label}"? Isso apaga o agente, seus agendamentos (testes) e todas as vulnerabilidades/achados que ele gerou. Não pode ser desfeito.`
+    )) return;
+    try {
+      await client.delete(`/api/bas/agents/${agent.id}`);
+      toastSuccess(`Agente "${label}" removido.`);
+      await load();
+    } catch (error) {
+      const detail = error?.response?.data?.detail;
+      toastError(typeof detail === "string" ? detail : "Falha ao remover agente.");
+    }
+  };
+
   // "backend" is the container-internal default GET /install-config returns
   // when no admin override was ever saved -- meaningless to a real agent.
   // The operator's own browser already reached this platform through a
-  // real, current, externally-reachable address, so use that instead of
-  // asking the operator to go find and type their LAN IP by hand.
+  // real, current, externally-reachable address, so use that as the primary
+  // suggestion -- correct for an agent outside Docker (LAN/host/VM). For an
+  // agent running as a sibling container on the same docker-compose network,
+  // that address is unreachable; container_network_ip (the backend's own
+  // docker-bridge IP, detected server-side) is shown alongside it instead.
   const isAutoDetectedHost = installConfig?.callback_host === "backend";
-  const effectiveHost = isAutoDetectedHost ? window.location.hostname : (installConfig?.callback_host || "");
+  const browserHost = window.location.hostname;
+  const effectiveHost = isAutoDetectedHost ? browserHost : (installConfig?.callback_host || "");
+  const containerIp = installConfig?.container_network_ip;
+  // Shown regardless of whether callback_host is auto-detected or a saved
+  // override -- a saved external LAN IP (case: agent outside Docker) must
+  // not hide the docker-network IP (case: agent as a sibling container),
+  // since an operator may need either depending on where THIS agent runs.
+  const showContainerIpHint = containerIp && containerIp !== effectiveHost;
+  // A saved override never expires on its own -- if it no longer matches
+  // the address this very page just used to load (the freshest possible
+  // signal that the network changed), it's very likely stale/dead rather
+  // than an intentional pin. Surface that instead of silently serving a
+  // dead IP forever and making the operator dig it up and retype it.
+  // Guard against loopback: opening the dashboard via localhost/127.0.0.1
+  // (very common for local dev) is meaningless to a remote BAS agent, so
+  // never suggest replacing a real saved LAN IP with that.
+  const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
+  const overrideLooksStale = !isAutoDetectedHost && installConfig?.callback_host
+    && installConfig.callback_host !== browserHost && !LOOPBACK_HOSTS.has(browserHost);
 
   const startEditingCallback = () => {
     setCallbackHostInput(effectiveHost);
     setCallbackPortInput(installConfig?.callback_port || "");
     setEditingCallback(true);
+  };
+
+  const useDetectedHostNow = async () => {
+    try {
+      await client.put("/api/bas/install-config", {
+        callback_host: browserHost,
+        callback_port: installConfig?.callback_port || "",
+      });
+      toastSuccess("IP atualizado para o endereço detectado agora.");
+      await load();
+    } catch (error) {
+      const detail = error?.response?.data?.detail;
+      toastError(typeof detail === "string" ? detail : "Falha ao atualizar IP.");
+    }
   };
 
   const saveCallback = async () => {
@@ -141,15 +191,25 @@ export default function BasDashboardPage() {
         <div className="card-h"><div><h3>Credenciais de instalação</h3><div className="sub">IP/porta de conexão + gerar um novo token de enrollment</div></div></div>
         {installConfig && !editingCallback && (
           <>
-            {isAutoDetectedHost && (
-              <div className="mono-sm muted" style={{ marginBottom: 10 }}>
-                IP detectado automaticamente pelo navegador (endereço usado para acessar esta página agora).
-                Se o agente precisar alcançar a plataforma por um caminho de rede diferente do seu, edite abaixo.
+            {overrideLooksStale && (
+              <div className="mono-sm" style={{ marginBottom: 10, padding: "10px 12px", borderRadius: 8, border: "1px solid var(--sev-high-border)", background: "var(--sev-high-bg)", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                <span>
+                  O IP salvo (<strong>{installConfig.callback_host}</strong>) é diferente do endereço usado para acessar esta página agora
+                  (<strong>{browserHost}</strong>) — a rede provavelmente mudou e o IP salvo pode estar morto.
+                </span>
+                <button className="btn btn-primary" onClick={useDetectedHostNow}>Usar {browserHost} agora</button>
               </div>
             )}
+            <div className="mono-sm muted" style={{ marginBottom: 10 }}>
+              {isAutoDetectedHost
+                ? "IP detectado automaticamente pelo navegador (endereço usado para acessar esta página agora)."
+                : "IP salvo manualmente."}{" "}
+              Use o campo abaixo se o agente roda fora do Docker (máquina real, VM, outro host na LAN).
+              {showContainerIpHint && " Se o agente é outro container na mesma rede docker desta plataforma, use o IP de rede docker abaixo em vez deste."}
+            </div>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
               <div>
-                <div className="mono-sm muted">IP / host da plataforma</div>
+                <div className="mono-sm muted">IP / host da plataforma (fora do Docker)</div>
                 <div className="mono" style={{ fontWeight: 600, cursor: "pointer" }} onClick={() => copy(effectiveHost)} title="clique para copiar">
                   {effectiveHost}
                 </div>
@@ -161,6 +221,14 @@ export default function BasDashboardPage() {
                 </div>
               </div>
             </div>
+            {showContainerIpHint && (
+              <div style={{ marginBottom: 10 }}>
+                <div className="mono-sm muted">IP de rede docker (agente rodando como outro container nesta mesma rede)</div>
+                <div className="mono" style={{ fontWeight: 600, cursor: "pointer" }} onClick={() => copy(containerIp)} title="clique para copiar">
+                  {containerIp}
+                </div>
+              </div>
+            )}
             <button className="btn" onClick={startEditingCallback} style={{ marginBottom: 14 }}>Editar IP/porta</button>
           </>
         )}
@@ -206,6 +274,9 @@ export default function BasDashboardPage() {
               <span className={`b ${a.status === "online" ? "b-low" : "b-neutral"}`} style={{ marginLeft: 8 }}>{a.status}</span>
               <div className="mono-sm muted" style={{ marginTop: 4 }}>{a.os} · último heartbeat: {a.last_heartbeat_at || "—"}</div>
             </div>
+            <button className="btn" onClick={() => deleteAgent(a)} title="Remove o agente, seus agendamentos e as vulnerabilidades que ele gerou">
+              Remover
+            </button>
           </div>
         ))}
       </section>

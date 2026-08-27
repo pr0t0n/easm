@@ -40,15 +40,6 @@ _RELAY_HOST = "bas_relay"
 _RELAY_FORWARD_PORT_BASE = 20000
 _DEFAULT_SOCKS_PORT = 1080
 
-# Every BAS profile that accepts_range (nmap-based/crackmapexec-based) has a
-# fixed kali-runner timeout sized for ONE host (120-240s -- see
-# bas_internal.yaml), not tuned per range size. Each TCP connect is also
-# proxied through proxychains/SOCKS5, far slower than a direct scan. A large
-# CIDR would silently run out of time and cover only part of the range with
-# no signal that anything was truncated -- reject up front instead of
-# guessing at a bigger timeout that still wouldn't scale to /16s etc.
-_MAX_RANGE_HOSTS = 256
-
 
 def _tunnel_env_vars(bas_agent: Any) -> dict[str, str]:
     if getattr(bas_agent, "kind", "stub") == "real":
@@ -135,16 +126,6 @@ def dispatch_bas_technique(
         target_hint, technique.get("target_format", "host"),
         accepts_range=bool(technique.get("accepts_range")),
     )
-    if "/" in normalized_target:
-        try:
-            network = ipaddress.ip_network(normalized_target, strict=False)
-            if network.num_addresses > _MAX_RANGE_HOSTS:
-                return {
-                    "dispatched": False,
-                    "reason": f"range_too_large:{network.num_addresses}_hosts_max_{_MAX_RANGE_HOSTS}",
-                }
-        except ValueError:
-            pass
     logger.info(
         "bas_dispatcher: dispatching technique=%s tool=%s agent_id=%s agent_kind=%s tunnel=%s:%s "
         "target_hint=%s target_format=%s normalized_target=%s scan_id=%s",

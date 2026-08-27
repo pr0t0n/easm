@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import secrets
+import socket
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -270,6 +271,148 @@ def patch_agent(agent_id: int, payload: AgentPatch, db: Session = Depends(get_db
     return {"id": agent.id, "label": agent.label, "status": agent.status}
 
 
+def _purge_bas_scan_jobs(db: Session, scan_job_ids: list[int]) -> int:
+    """Deletes the BAS shadow ScanJob rows for `scan_job_ids` plus every
+    dependent row they've accumulated. A BAS shadow scan dispatches through
+    the exact same execute_via_kali/watchdog/asset-upsert machinery a normal
+    scan uses (see bas_dispatcher.py), so it picks up the same generic
+    dependent rows -- confirmed live: scan_logs (watchdog heartbeats logged
+    every minute the shadow scan stays non-terminal), executed_tool_runs,
+    agent_trace_events, skill_scores, audit_events, a stale worker_heartbeats
+    lease, and even a discovered Asset row -- and a plain ScanJob delete
+    500s with a ForeignKeyViolation on the first one it hits. Same table
+    order/logic as routes_scans.py's reset_operational_scans. The BAS
+    pipeline never reaches the full offensive-pentest pipeline (hypotheses,
+    evidence artifacts, coverage, etc.), so those tables are deliberately
+    not touched here.
+
+    A shadow scan can also trigger a real deeper recon pipeline against a
+    host it discovers (confirmed live: a firewall_segmentation_test hit
+    fired off a genuine naabu/nmap/ffuf/katana pass against the internal IP
+    it found, logging WAF-bypass/port/endpoint Finding rows against the same
+    scan_job_id, none of them tool="bas-agent"). Those are real findings, not
+    BAS-test residue -- any scan_job_id that still has ANY Finding row left
+    after the caller's own BAS-tagged Finding cleanup is skipped entirely
+    here (ScanJob kept, Asset/Vulnerability kept) so a deleted test can never
+    take real findings down with it."""
+    if not scan_job_ids:
+        return 0
+    from app.models.models import (
+        AgentTraceEvent,
+        Asset,
+        AssetRatingHistory,
+        AuditEvent,
+        ExecutedToolRun,
+        PentestOutcomeMetric,
+        ScanAuditLog,
+        ScanLog,
+        SkillScore,
+        Vulnerability,
+        WorkerHeartbeat,
+    )
+
+    still_referenced = {
+        row[0] for row in db.query(Finding.scan_job_id).filter(Finding.scan_job_id.in_(scan_job_ids)).distinct().all()
+    }
+    deletable_ids = [sid for sid in scan_job_ids if sid not in still_referenced]
+    if not deletable_ids:
+        return 0
+
+    db.query(WorkerHeartbeat).filter(WorkerHeartbeat.current_scan_id.in_(deletable_ids)).update(
+        {WorkerHeartbeat.current_scan_id: None, WorkerHeartbeat.status: "idle", WorkerHeartbeat.last_task_name: None},
+        synchronize_session=False,
+    )
+    asset_ids = [row[0] for row in db.query(Asset.id).filter(Asset.last_scan_id.in_(deletable_ids)).all()]
+    if asset_ids:
+        db.query(Vulnerability).filter(Vulnerability.asset_id.in_(asset_ids)).delete(synchronize_session=False)
+        db.query(AssetRatingHistory).filter(AssetRatingHistory.asset_id.in_(asset_ids)).delete(synchronize_session=False)
+        db.query(Asset).filter(Asset.id.in_(asset_ids)).delete(synchronize_session=False)
+    db.query(AssetRatingHistory).filter(AssetRatingHistory.scan_id.in_(deletable_ids)).update(
+        {AssetRatingHistory.scan_id: None}, synchronize_session=False,
+    )
+    db.query(ExecutedToolRun).filter(ExecutedToolRun.scan_job_id.in_(deletable_ids)).delete(synchronize_session=False)
+    db.query(ScanAuditLog).filter(ScanAuditLog.scan_job_id.in_(deletable_ids)).delete(synchronize_session=False)
+    db.query(AgentTraceEvent).filter(AgentTraceEvent.scan_id.in_(deletable_ids)).delete(synchronize_session=False)
+    db.query(SkillScore).filter(SkillScore.scan_id.in_(deletable_ids)).delete(synchronize_session=False)
+    db.query(AuditEvent).filter(AuditEvent.scan_job_id.in_(deletable_ids)).delete(synchronize_session=False)
+    db.query(PentestOutcomeMetric).filter(PentestOutcomeMetric.last_scan_job_id.in_(deletable_ids)).update(
+        {PentestOutcomeMetric.last_scan_job_id: None}, synchronize_session=False,
+    )
+    db.query(ScanLog).filter(ScanLog.scan_job_id.in_(deletable_ids)).delete(synchronize_session=False)
+    return db.query(ScanJob).filter(ScanJob.id.in_(deletable_ids), ScanJob.mode == "bas").delete(synchronize_session=False)
+
+
+@router.delete("/agents/{agent_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_agent(agent_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
+    """Hard-deletes an agent and everything scoped to it -- its schedules
+    (BasSchedule.agent_id is NOT NULL, so a schedule can't outlive its
+    agent), their jobs, and the BAS findings those jobs produced. Manual
+    dependency-order cleanup, same reason as the earlier DELETE /scans/{id}
+    fix (see git history): no ON DELETE CASCADE configured on these FKs, so
+    deleting the agent row directly would 500 on the first dependent row
+    instead of actually removing anything."""
+    from app.services.bas_exclusion import BAS_FINDING_TOOL
+
+    agent = apply_company_scope(db.query(BasAgent), current_user, BasAgent).filter(BasAgent.id == agent_id).first()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agente não encontrado")
+
+    jobs = db.query(BasJob).filter(BasJob.agent_id == agent_id).all()
+    finding_ids = [j.finding_id for j in jobs if j.finding_id]
+    scan_job_ids = [j.scan_job_id for j in jobs if j.scan_job_id]
+    # BasJob.finding_id -> findings.id, so the job row (the referencING side)
+    # must go before the finding row it points to -- deleting findings first
+    # 500s with a ForeignKeyViolation on bas_jobs_finding_id_fkey (confirmed
+    # live testing this endpoint).
+    db.query(BasJob).filter(BasJob.agent_id == agent_id).delete(synchronize_session=False)
+    if finding_ids:
+        db.query(Finding).filter(Finding.id.in_(finding_ids), Finding.tool == BAS_FINDING_TOOL).delete(
+            synchronize_session=False
+        )
+    _purge_bas_scan_jobs(db, scan_job_ids)
+    db.query(BasSchedule).filter(BasSchedule.agent_id == agent_id).delete(synchronize_session=False)
+    db.delete(agent)
+    db.commit()
+
+
+@router.delete("/jobs")
+def delete_jobs(
+    schedule_id: int | None = None,
+    agent_id: int | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Wipes BAS test-run history (jobs + the BAS findings they produced)
+    without touching agents/schedules -- resets risk score, exposure,
+    vulnerabilities and the attack heatmap back to empty, since every one of
+    those panels is computed live from BasJob/Finding rows, never a stored
+    total (see bas_reporting.py). Scope with schedule_id/agent_id to clear
+    just one test's history, or call with neither to wipe everything this
+    user can see."""
+    from app.services.bas_exclusion import BAS_FINDING_TOOL
+
+    query = apply_company_scope(db.query(BasJob), current_user, BasJob)
+    if schedule_id is not None:
+        query = query.filter(BasJob.schedule_id == schedule_id)
+    if agent_id is not None:
+        query = query.filter(BasJob.agent_id == agent_id)
+    jobs = query.all()
+    job_ids = [j.id for j in jobs]
+    finding_ids = [j.finding_id for j in jobs if j.finding_id]
+    scan_job_ids = [j.scan_job_id for j in jobs if j.scan_job_id]
+
+    # Same FK direction as delete_agent above: jobs before findings.
+    if job_ids:
+        db.query(BasJob).filter(BasJob.id.in_(job_ids)).delete(synchronize_session=False)
+    if finding_ids:
+        db.query(Finding).filter(Finding.id.in_(finding_ids), Finding.tool == BAS_FINDING_TOOL).delete(
+            synchronize_session=False
+        )
+    scans_deleted = _purge_bas_scan_jobs(db, scan_job_ids)
+    db.commit()
+    return {"ok": True, "jobs_deleted": len(job_ids), "findings_deleted": len(finding_ids), "scan_jobs_deleted": scans_deleted}
+
+
 @router.get("/agents/{agent_id}/revocation-status")
 def agent_revocation_status(agent_id: int, db: Session = Depends(get_db)):
     """Called by bas-relay (never by a user/browser) to enforce revocation
@@ -338,18 +481,19 @@ def _resolve_chain_technique_keys(chain_key: str, requested_keys: list[str]) -> 
 
 
 def _schedule_requires_target_hint(technique_keys: list[str]) -> bool:
-    """A schedule may omit target_hint ONLY when every one of its techniques
-    accepts_range -- in that case bas_scheduler.fire_schedule defaults the
-    target to the dispatching BasAgent's own self-reported
-    local_network_cidr (see network.go) instead of requiring the operator to
-    type an internal IP they may not know. A single app/service/domain-
-    specific technique in the mix still needs an explicit target -- there is
-    no way to guess "the app's URL" from a network interface."""
+    """A schedule may omit target_hint only when every selected technique can
+    derive targets from the dispatching BasAgent's own local_network_cidr."""
     if not technique_keys:
         return True  # nothing selected yet -- fall back to the safe default
     for key in technique_keys:
         technique = get_technique(key)
-        if technique is None or not technique.get("accepts_range"):
+        if technique is None:
+            return True
+        if technique.get("accepts_range"):
+            continue
+        if technique.get("target_format", "host") in {"host", "host_port"}:
+            continue
+        else:
             return True
     return False
 
@@ -401,7 +545,7 @@ def create_schedule(payload: ScheduleCreate, db: Session = Depends(get_db), curr
         # it up front instead.
         raise HTTPException(
             status_code=400,
-            detail="Alvo (target_hint) é obrigatório quando alguma técnica selecionada não aceita faixa de rede automática",
+            detail="Alvo (target_hint) é obrigatório quando alguma técnica selecionada exige URL ou domínio explícito",
         )
 
     access_group_id = resolve_company_group_id(
@@ -480,7 +624,7 @@ def patch_schedule(schedule_id: int, payload: SchedulePatch, db: Session = Depen
         if _schedule_requires_target_hint(effective_keys or []):
             raise HTTPException(
                 status_code=400,
-                detail="Alvo (target_hint) é obrigatório quando alguma técnica selecionada não aceita faixa de rede automática",
+                detail="Alvo (target_hint) é obrigatório quando alguma técnica selecionada exige URL ou domínio explícito",
             )
     for field in ("name", "target_hint", "technique_keys", "frequency", "run_time", "day_of_week", "day_of_month", "enabled", "max_authorized_risk_tier"):
         if payload.chain_key is not None and field == "technique_keys":
@@ -500,17 +644,27 @@ def patch_schedule(schedule_id: int, payload: SchedulePatch, db: Session = Depen
 
 @router.delete("/schedules/{schedule_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_schedule(schedule_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
+    """Deleting a test wipes everything it produced -- its BasJobs, the BAS
+    findings those jobs raised, and the shadow ScanJob rows -- so the
+    dashboard/report/heatmap stop showing data for a test that no longer
+    exists. Same FK order as delete_agent/delete_jobs: bas_jobs before
+    findings (bas_jobs.finding_id -> findings.id references the finding, so
+    the referencing row has to go first)."""
+    from app.services.bas_exclusion import BAS_FINDING_TOOL
+
     schedule = apply_company_scope(db.query(BasSchedule), current_user, BasSchedule).filter(BasSchedule.id == schedule_id).first()
     if not schedule:
         raise HTTPException(status_code=404, detail="Agendamento não encontrado")
-    # BasJob.schedule_id has no ON DELETE clause -- any schedule that has
-    # ever fired (has BasJob rows) 500s here otherwise. Null the FK instead
-    # of deleting the jobs: they're real dispatch history (technique/target/
-    # result/finding_id) that stays meaningful on its own after the schedule
-    # that triggered them is gone.
-    db.query(BasJob).filter(BasJob.schedule_id == schedule_id).update(
-        {BasJob.schedule_id: None}, synchronize_session=False,
-    )
+
+    jobs = db.query(BasJob).filter(BasJob.schedule_id == schedule_id).all()
+    finding_ids = [j.finding_id for j in jobs if j.finding_id]
+    scan_job_ids = [j.scan_job_id for j in jobs if j.scan_job_id]
+    db.query(BasJob).filter(BasJob.schedule_id == schedule_id).delete(synchronize_session=False)
+    if finding_ids:
+        db.query(Finding).filter(Finding.id.in_(finding_ids), Finding.tool == BAS_FINDING_TOOL).delete(
+            synchronize_session=False
+        )
+    _purge_bas_scan_jobs(db, scan_job_ids)
     db.delete(schedule)
     db.commit()
 
@@ -538,12 +692,16 @@ def run_schedule_now(schedule_id: int, db: Session = Depends(get_db), current_us
 # ── Report ───────────────────────────────────────────────────────────────────
 
 @router.get("/report")
-def report(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def report(
+    schedule_id: int | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     from app.api.deps import user_company_group_ids
     from app.services import bas_reporting
 
     group_ids = None if current_user.is_admin else user_company_group_ids(current_user)
-    return bas_reporting.executive_report(db, group_ids=group_ids)
+    return bas_reporting.executive_report(db, group_ids=group_ids, schedule_id=schedule_id)
 
 
 # ── Dashboard / Operations Center ────────────────────────────────────────────
@@ -579,6 +737,14 @@ def operations_center(db: Session = Depends(get_db), current_user: User = Depend
     all_jobs = apply_company_scope(db.query(BasJob), current_user, BasJob).all()
     recent_jobs = apply_company_scope(db.query(BasJob), current_user, BasJob) \
         .order_by(BasJob.created_at.desc()).limit(10).all()
+    # A job now becomes visible here the instant it's dispatched (bas_scheduler
+    # commits before the blocking kali_runner call, not just after it returns)
+    # -- these are the ones actually in flight right now, separate from the
+    # already-resolved "recent_jobs" list above so the UI can show a live
+    # "running now" section instead of only ever showing final outcomes.
+    active_jobs = apply_company_scope(db.query(BasJob), current_user, BasJob) \
+        .filter(BasJob.status.in_(["queued", "dispatched_to_kali", "running"])) \
+        .order_by(BasJob.dispatched_at.desc()).all()
     group_ids = None if current_user.is_admin else user_company_group_ids(current_user)
 
     # Seeded from the full catalog first -- every cataloged technique shows
@@ -604,16 +770,42 @@ def operations_center(db: Session = Depends(get_db), current_user: User = Depend
     return {
         "agents": [
             {"id": a.id, "label": a.label or a.hostname, "os": a.os, "status": a.status,
-             "kind": a.kind, "last_heartbeat_at": a.last_heartbeat_at}
+             "kind": a.kind, "last_heartbeat_at": a.last_heartbeat_at, "local_network_cidr": a.local_network_cidr}
             for a in agents
         ],
+        "schedules": [
+            {
+                "id": s.id,
+                "name": s.name,
+                "agent_id": s.agent_id,
+                "enabled": s.enabled,
+                "target_hint": s.target_hint,
+                "technique_keys": s.technique_keys,
+                "last_run_at": s.last_run_at,
+            }
+            for s in schedules
+        ],
         "technique_stats": by_technique,
+        "active_jobs": [
+            {
+                "id": j.id, "technique_key": j.technique_key, "risk_tier": j.risk_tier,
+                "target": j.target, "status": j.status, "agent_id": j.agent_id,
+                "dispatched_at": j.dispatched_at,
+                "simulated": agent_kind_by_id.get(j.agent_id, "stub") != "real",
+            }
+            for j in active_jobs
+        ],
         "recent_jobs": [
             {
                 "id": j.id, "technique_key": j.technique_key, "risk_tier": j.risk_tier,
                 "target": j.target,
                 "status": j.status, "agent_id": j.agent_id, "created_at": j.created_at,
-                "finished_at": j.finished_at,
+                "dispatched_at": j.dispatched_at, "finished_at": j.finished_at,
+                # Why it didn't complete cleanly -- a skip reason (e.g.
+                # "range_too_large_..." back when that existed, or a guardrail
+                # denial) or a dispatch/tunnel failure. None for a clean
+                # "completed" job.
+                "last_error": j.last_error,
                 # Per-job, sourced from the actual dispatching agent's kind --
                 # only a stub-agent job is simulated (see bas_exclusion.py).
                 "simulated": agent_kind_by_id.get(j.agent_id, "stub") != "real",
@@ -623,6 +815,8 @@ def operations_center(db: Session = Depends(get_db), current_user: User = Depend
         "framework_coverage": bas_reporting.framework_coverage(db, group_ids=group_ids),
         "exposure": bas_reporting.exposure_summary(db, group_ids=group_ids),
         "findings": bas_reporting.bas_findings_view(db, group_ids=group_ids),
+        "action_priorities": bas_reporting.action_priorities(db, group_ids=group_ids),
+        "attack_path_inventory": bas_reporting.attack_path_inventory(db, group_ids=group_ids),
         "crown_jewels": bas_reporting.crown_jewels_view(db, group_ids=group_ids),
         "attack_heatmap": bas_reporting.attack_heatmap(db, group_ids=group_ids),
         "risk_score": bas_reporting.risk_score(db, group_ids=group_ids),
@@ -631,6 +825,24 @@ def operations_center(db: Session = Depends(get_db), current_user: User = Depend
 
 
 # ── Agent binary download + install config ──────────────────────────────────
+
+def _detect_container_network_ip() -> str | None:
+    """The backend container's own address on the docker-compose bridge
+    network (e.g. 172.20.0.13) -- what a BAS agent running as a *sibling
+    container on the same docker network* needs to dial. Distinct from
+    window.location.hostname (the frontend's guess, correct only for an
+    agent reachable via the operator's own browser path -- LAN/host, not
+    docker-internal). UDP connect() doesn't send any packet, it only asks
+    the kernel to pick the local address for that route, so this works
+    even with no real egress and without any container-internal env var.
+    """
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+    except OSError:
+        return None
+
 
 @router.get("/install-config")
 def install_config(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
@@ -642,6 +854,7 @@ def install_config(db: Session = Depends(get_db), current_user: User = Depends(g
         "callback_host": _setting("bas_agent_callback_host", "backend"),
         "callback_port": _setting("bas_agent_callback_port", str(settings.backend_host_port)),
         "mtls_port": settings.bas_mtls_external_port,
+        "container_network_ip": _detect_container_network_ip(),
     }
 
 
