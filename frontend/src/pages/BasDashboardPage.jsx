@@ -1,12 +1,28 @@
 import { useEffect, useState } from "react";
 import client from "../api/client";
+import { authStore } from "../store/auth";
 import { toastError, toastSuccess } from "../utils/toast";
+
+const HEARTBEAT_INTERVAL_MS = 60_000;
 
 const fieldStyle = {
   width: "100%", padding: "9px 12px", borderRadius: 8,
   border: "1px solid var(--line)", background: "var(--canvas)",
   fontSize: 13, color: "var(--ink)",
 };
+
+// Opening the dashboard via localhost/127.0.0.1 (common in local dev) is
+// meaningless to a remote BAS agent, so never treat that as "the real IP".
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
+
+// A saved callback_host override never expires on its own. window.location.hostname
+// is the freshest proof of reachability there is -- the address that just
+// successfully loaded this page. Once the saved value drifts from it, it's almost
+// certainly a dead/stale IP from a network change rather than an intentional pin.
+function isCallbackHostStale(cfg, browserHost) {
+  if (!cfg?.callback_host || cfg.callback_host === "backend") return false;
+  return cfg.callback_host !== browserHost && !LOOPBACK_HOSTS.has(browserHost);
+}
 
 export default function BasDashboardPage() {
   const [summary, setSummary] = useState(null);
@@ -18,7 +34,9 @@ export default function BasDashboardPage() {
   const [callbackHostInput, setCallbackHostInput] = useState("");
   const [callbackPortInput, setCallbackPortInput] = useState("");
 
-  const load = async () => {
+  const isAdmin = Boolean(authStore.me?.is_admin);
+
+  const load = async (silent = false) => {
     try {
       const [{ data: s }, { data: a }, { data: cfg }] = await Promise.all([
         client.get("/api/bas/dashboard/summary"),
@@ -28,13 +46,41 @@ export default function BasDashboardPage() {
       setSummary(s);
       setAgents(a);
       setInstallConfig(cfg);
+      await healStaleHost(cfg);
     } catch (error) {
+      if (silent) return;
       const detail = error?.response?.data?.detail;
       toastError(typeof detail === "string" ? detail : "Falha ao carregar o painel BAS.");
     }
   };
 
-  useEffect(() => { load(); }, []);
+  // Auto-correct a stale callback_host instead of waiting for an admin to
+  // notice the banner and click "Usar X agora". Only admins can write
+  // install-config (PUT requires_admin), so this is a no-op for viewers
+  // rather than a failing request on every heartbeat tick.
+  const healStaleHost = async (cfg) => {
+    if (!isAdmin) return;
+    const browser = window.location.hostname;
+    if (!isCallbackHostStale(cfg, browser)) return;
+    try {
+      const previous = cfg.callback_host;
+      await client.put("/api/bas/install-config", {
+        callback_host: browser,
+        callback_port: cfg.callback_port || "",
+      }, { _skipToast: true });
+      toastSuccess(`IP atualizado automaticamente: ${previous} → ${browser}`);
+      const { data: fresh } = await client.get("/api/bas/install-config");
+      setInstallConfig(fresh);
+    } catch {
+      // Best-effort self-heal; the manual banner/button remain as a fallback.
+    }
+  };
+
+  useEffect(() => {
+    load();
+    const heartbeat = setInterval(() => load(true), HEARTBEAT_INTERVAL_MS);
+    return () => clearInterval(heartbeat);
+  }, []);
 
   const generateToken = async () => {
     try {
@@ -100,17 +146,10 @@ export default function BasDashboardPage() {
   // not hide the docker-network IP (case: agent as a sibling container),
   // since an operator may need either depending on where THIS agent runs.
   const showContainerIpHint = containerIp && containerIp !== effectiveHost;
-  // A saved override never expires on its own -- if it no longer matches
-  // the address this very page just used to load (the freshest possible
-  // signal that the network changed), it's very likely stale/dead rather
-  // than an intentional pin. Surface that instead of silently serving a
-  // dead IP forever and making the operator dig it up and retype it.
-  // Guard against loopback: opening the dashboard via localhost/127.0.0.1
-  // (very common for local dev) is meaningless to a remote BAS agent, so
-  // never suggest replacing a real saved LAN IP with that.
-  const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
-  const overrideLooksStale = !isAutoDetectedHost && installConfig?.callback_host
-    && installConfig.callback_host !== browserHost && !LOOPBACK_HOSTS.has(browserHost);
+  // healStaleHost() already auto-corrects this for admins; this stays as
+  // the visible signal (and manual fallback) for the brief window before
+  // the heal completes, and for non-admin viewers who can't trigger it.
+  const overrideLooksStale = isCallbackHostStale(installConfig, browserHost);
 
   const startEditingCallback = () => {
     setCallbackHostInput(effectiveHost);
@@ -197,7 +236,9 @@ export default function BasDashboardPage() {
                   O IP salvo (<strong>{installConfig.callback_host}</strong>) é diferente do endereço usado para acessar esta página agora
                   (<strong>{browserHost}</strong>) — a rede provavelmente mudou e o IP salvo pode estar morto.
                 </span>
-                <button className="btn btn-primary" onClick={useDetectedHostNow}>Usar {browserHost} agora</button>
+                {isAdmin && (
+                  <button className="btn btn-primary" onClick={useDetectedHostNow}>Usar {browserHost} agora</button>
+                )}
               </div>
             )}
             <div className="mono-sm muted" style={{ marginBottom: 10 }}>
@@ -229,10 +270,12 @@ export default function BasDashboardPage() {
                 </div>
               </div>
             )}
-            <button className="btn" onClick={startEditingCallback} style={{ marginBottom: 14 }}>Editar IP/porta</button>
+            {isAdmin && (
+              <button className="btn" onClick={startEditingCallback} style={{ marginBottom: 14 }}>Editar IP/porta</button>
+            )}
           </>
         )}
-        {editingCallback && (
+        {isAdmin && editingCallback && (
           <div style={{ display: "flex", gap: 8, alignItems: "flex-end", marginBottom: 14, flexWrap: "wrap" }}>
             <div>
               <div className="mono-sm muted" style={{ marginBottom: 4 }}>IP / host da plataforma</div>

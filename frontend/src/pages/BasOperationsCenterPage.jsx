@@ -101,6 +101,9 @@ export default function BasOperationsCenterPage() {
   const applications = attackInventory.applications || [];
   const observedVulnerabilities = attackInventory.vulnerabilities || [];
   const recommendedTests = attackInventory.recommended_tests || [];
+  const portScan = center?.port_scan_observability || {};
+  const portScanSummary = portScan.summary || {};
+  const portScanRows = portScan.scans || [];
   const crownJewels = center?.crown_jewels || [];
   const heatmap = center?.attack_heatmap || [];
   const chainPaths = center?.chain_attack_paths || [];
@@ -291,6 +294,38 @@ export default function BasOperationsCenterPage() {
               </div>
             </div>
           </div>
+        </div>
+      </TvPanel>
+
+      <TvPanel title="Port Scan" right={`${portScanSummary.scanned_ips || 0} IP(s) · ${portScanSummary.open_port_count || 0} porta(s) aberta(s)`} span={3} style={{ marginBottom: 12 }}>
+        <div style={{ display: "grid", gap: 8 }}>
+          {portScanRows.length === 0 && <div style={{ fontSize: 11, color: TV.muted }}>Nenhum port scan real concluído ainda.</div>}
+          {portScanRows.map((scan) => (
+            <div key={scan.job_id} style={{ background: TV.surface2, borderRadius: 8, padding: "10px 12px", border: `1px solid ${TV.border}` }}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 12, marginBottom: 6 }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 12, color: TV.text, fontWeight: 700 }}>#{scan.job_id} · {scan.target || "sem alvo"}</div>
+                  <div style={{ fontSize: 10.5, color: TV.muted }}>{scan.agent_label} · {scan.scanned_ips || 0} IP(s) varrido(s) · {scan.hosts_up || 0} host(s) tratado(s) como ativo(s)</div>
+                </div>
+                <div style={{ textAlign: "right" }}>
+                  <div style={{ color: scan.open_port_count > 0 ? "#d4a500" : "#7fe0b0", fontSize: 18, fontWeight: 800 }}>{scan.open_port_count || 0}</div>
+                  <div style={{ color: TV.muted, fontSize: 10 }}>porta(s) aberta(s)</div>
+                </div>
+              </div>
+              {scan.open_port_count > 0 ? (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                  {(scan.open_ports || []).slice(0, 20).map((port) => (
+                    <span key={`${scan.job_id}-${port.host}-${port.port}-${port.protocol}`} style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: TV.text, border: `1px solid ${TV.border}`, borderRadius: 6, padding: "3px 6px" }}>
+                      {port.host}:{port.port}/{port.protocol} {port.service || ""}
+                    </span>
+                  ))}
+                </div>
+              ) : (
+                <div style={{ fontSize: 10.5, color: TV.muted }}>Resultado real: varredura concluída sem portas abertas nos top 100 TCP do alvo.</div>
+              )}
+              {scan.last_error && <div style={{ fontSize: 10, color: "#d4a500", marginTop: 6 }}>observação: {scan.last_error}</div>}
+            </div>
+          ))}
         </div>
       </TvPanel>
 

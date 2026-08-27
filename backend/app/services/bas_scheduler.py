@@ -113,6 +113,11 @@ def _extract_key_findings(technique_key: str, category: str, result: dict[str, A
                     findings.append(f"{host}: {port}/{protocol} open {service}".strip())
             if findings:
                 return findings
+        summary = result.get("nmap_summary") or {}
+        if isinstance(summary, dict) and summary:
+            scanned = summary.get("ip_addresses") or summary.get("reported_hosts") or 0
+            hosts_up = summary.get("hosts_up") or summary.get("reported_hosts") or 0
+            return [f"Nmap concluiu sem portas abertas: {scanned} IP(s) varrido(s), {hosts_up} host(s) tratado(s) como ativo(s)."]
 
     stdout = str(result.get("stdout") or "")
     lines = [ln.strip() for ln in stdout.splitlines() if ln.strip()]
@@ -172,6 +177,8 @@ def _derive_severity(technique_key: str, key_findings: list[str]) -> str:
     if technique_key == "owasp_web_app_scan":
         return "medium"  # real misconfiguration-class findings (headers, CORS, etc.)
     if technique_key in ("port_service_scan", "firewall_segmentation_test", "network_share_discovery"):
+        if all(str(ln).startswith("Nmap concluiu sem portas abertas") for ln in key_findings):
+            return "info"
         return "low"  # real reachability/exposure, not itself a vulnerability
     return "info"
 
@@ -341,6 +348,7 @@ def fire_schedule(db: Session, schedule: BasSchedule) -> dict[str, Any]:
                     job.kali_job_id = str(result.get("dispatch_task_id") or "")
                     job.result = result
                     job.status = "completed" if result.get("status") == "executed" else "failed"
+                    job.last_error = None if job.status == "completed" else str(result.get("stderr") or result.get("error") or "")[:2000]
                     job.finished_at = datetime.now()
                     db.flush()
 

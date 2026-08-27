@@ -76,8 +76,13 @@ RUN apt-get update && \
 # Responder is installed but never dispatched in Phase 1 (poisoning needs a
 # real agent on the customer's L2 segment, not a TCP-only SOCKS tunnel --
 # see bas_technique_catalog.py's availability="future_agent_required").
+# smbclient/samba-common-bin: enum4linux-ng shells out to nmblookup, net,
+# rpcclient and smbclient itself -- without them it exits 1 with a warning
+# instead of a crash, so it stays within allowed_return_codes and silently
+# produces no enumeration data.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends proxychains4 smbmap ldap-utils && \
+    apt-get install -y --no-install-recommends proxychains4 smbmap ldap-utils \
+      smbclient samba-common-bin && \
     (apt-get install -y --no-install-recommends responder python3-netifaces || true) && \
     rm -rf /var/lib/apt/lists/*
 # PyPI package is named "bloodhound" (not "bloodhound-python") -- it installs
@@ -86,10 +91,16 @@ RUN pipx install impacket && \
     pipx install bloodhound
 
 # enum4linux-ng isn't on PyPI (it's a git-distributed script) -- clone it and
-# expose a thin wrapper on PATH instead of pipx-installing it.
+# expose a thin wrapper on PATH instead of pipx-installing it. The wrapper
+# calls /usr/bin/python3 explicitly, NOT the bare `python3` off PATH: at
+# runtime the kali-runner service's own venv (/opt/runner-venv/bin) is
+# prepended to PATH ahead of the system python, and requirements.txt below
+# is installed into the SYSTEM python's site-packages -- an unqualified
+# `python3` would silently resolve to the venv instead and fail on import
+# with "No module named 'impacket'" despite the dependency being installed.
 RUN git clone --depth 1 https://github.com/cddmp/enum4linux-ng.git /opt/tools/src/enum4linux-ng && \
     pip install --break-system-packages --no-cache-dir -r /opt/tools/src/enum4linux-ng/requirements.txt && \
-    printf '#!/bin/sh\nexec python3 /opt/tools/src/enum4linux-ng/enum4linux-ng.py "$@"\n' > /opt/tools/bin/enum4linux-ng && \
+    printf '#!/bin/sh\nexec /usr/bin/python3 /opt/tools/src/enum4linux-ng/enum4linux-ng.py "$@"\n' > /opt/tools/bin/enum4linux-ng && \
     chmod +x /opt/tools/bin/enum4linux-ng
 
 # gitleaks: git-secrets scanner for the BAS "Hardcoded Secrets in Source Code

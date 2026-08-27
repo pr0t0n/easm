@@ -817,6 +817,7 @@ def operations_center(db: Session = Depends(get_db), current_user: User = Depend
         "findings": bas_reporting.bas_findings_view(db, group_ids=group_ids),
         "action_priorities": bas_reporting.action_priorities(db, group_ids=group_ids),
         "attack_path_inventory": bas_reporting.attack_path_inventory(db, group_ids=group_ids),
+        "port_scan_observability": bas_reporting.port_scan_observability(db, group_ids=group_ids),
         "crown_jewels": bas_reporting.crown_jewels_view(db, group_ids=group_ids),
         "attack_heatmap": bas_reporting.attack_heatmap(db, group_ids=group_ids),
         "risk_score": bas_reporting.risk_score(db, group_ids=group_ids),

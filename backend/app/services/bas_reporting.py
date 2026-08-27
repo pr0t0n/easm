@@ -119,6 +119,35 @@ def _nmap_open_ports(result: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
+def _nmap_summary(result: dict[str, Any]) -> dict[str, Any]:
+    summary = dict(result.get("nmap_summary") or {})
+    stdout = str(result.get("stdout") or "")
+    report_count = 0
+    no_open_count = 0
+    for line in stdout.splitlines():
+        clean = line.strip()
+        if clean.lower().startswith("nmap scan report for"):
+            report_count += 1
+        if clean.lower().startswith("all ") and " scanned ports " in clean.lower() and " ignored states" in clean.lower():
+            no_open_count += 1
+        match = re.match(
+            r"^Nmap done:\s+(?P<addresses>\d+)\s+IP addresses\s+\((?P<hosts>\d+)\s+hosts up\)\s+scanned in\s+(?P<seconds>[\d.]+)\s+seconds",
+            clean,
+            re.IGNORECASE,
+        )
+        if match:
+            summary.update({
+                "ip_addresses": int(match.group("addresses")),
+                "hosts_up": int(match.group("hosts")),
+                "duration_seconds": float(match.group("seconds")),
+            })
+    if report_count:
+        summary.setdefault("reported_hosts", report_count)
+    if no_open_count:
+        summary.setdefault("hosts_without_open_ports", no_open_count)
+    return summary
+
+
 def _real_agent_technique_keys(
     db: Session, *, group_ids: list[int] | None = None, schedule_id: int | None = None
 ) -> set[str]:
@@ -193,6 +222,60 @@ def exposure_summary(
         "total_dispatches": len(jobs),
         "real_tunnel_roundtrips": real_tunnel_roundtrips,
         "failed_dispatches": sum(1 for j in jobs if j.status == "failed"),
+    }
+
+
+def port_scan_observability(
+    db: Session, *, group_ids: list[int] | None = None, schedule_id: int | None = None, limit: int = 10
+) -> dict[str, Any]:
+    query = (
+        db.query(BasJob, BasAgent)
+        .join(BasAgent, BasAgent.id == BasJob.agent_id)
+        .filter(
+            BasAgent.kind == "real",
+            BasJob.technique_key.in_(("port_service_scan", "firewall_segmentation_test")),
+            BasJob.status == "completed",
+        )
+    )
+    if group_ids is not None:
+        query = query.filter(BasJob.access_group_id.in_(group_ids))
+    if schedule_id is not None:
+        query = query.filter(BasJob.schedule_id == schedule_id)
+
+    scans = []
+    total_open_ports = 0
+    total_scanned_ips = 0
+    for job, agent in query.order_by(BasJob.created_at.desc()).limit(limit).all():
+        result = job.result or {}
+        open_ports = _nmap_open_ports(result)
+        summary = _nmap_summary(result)
+        scanned_ips = int(summary.get("ip_addresses") or summary.get("reported_hosts") or 0)
+        total_scanned_ips += scanned_ips
+        total_open_ports += len(open_ports)
+        scans.append({
+            "job_id": job.id,
+            "agent_id": agent.id,
+            "agent_label": agent.label or agent.os or f"agente #{agent.id}",
+            "target": job.target,
+            "created_at": job.created_at,
+            "finished_at": job.finished_at,
+            "last_error": job.last_error,
+            "scanned_ips": scanned_ips,
+            "hosts_up": int(summary.get("hosts_up") or summary.get("reported_hosts") or 0),
+            "duration_seconds": summary.get("duration_seconds") or result.get("duration_seconds"),
+            "open_ports": open_ports[:50],
+            "open_port_count": len(open_ports),
+            "hosts_without_open_ports": int(summary.get("hosts_without_open_ports") or 0),
+        })
+
+    return {
+        "scans": scans,
+        "summary": {
+            "scan_count": len(scans),
+            "scanned_ips": total_scanned_ips,
+            "open_port_count": total_open_ports,
+            "scans_without_open_ports": sum(1 for scan in scans if scan["open_port_count"] == 0),
+        },
     }
 
 

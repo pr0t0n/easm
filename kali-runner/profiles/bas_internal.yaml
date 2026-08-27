@@ -146,7 +146,7 @@ port_service_scan:
   # -sT (TCP connect scan) required: proxychains only intercepts connect(),
   # never nmap's default raw-socket SYN scan (-sS).
   cmd: ["proxychains4", "-f", "{env_BAS_PROXYCHAINS_CONF}",
-        "nmap", "-Pn", "-sT", "-sV", "--top-ports", "100", "{target}"]
+        "nmap", "-Pn", "-sT", "-sV", "--open", "--top-ports", "100", "{target}"]
   timeout: 240
   allowed_return_codes: [0, 1]
   parser: raw

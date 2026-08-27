@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from typing import Any, Optional
 
@@ -579,10 +580,26 @@ def normalize_kali_result(
     # skip markers before emitting its terminal status. Trust that decision
     # here so tools like gospider can treat rc=1/no-output as a completed
     # no-finding run instead of a platform error.
-    is_ok = runner_status == "done"
+    stdout = result.get("stdout") or ""
+    stderr = result.get("stderr") or ""
+    stderr_lower = stderr.lower()
+    # A profile's allowed_return_codes (e.g. [0, 1]) exists for a tool's own
+    # legitimate "ran fine, nothing found" exit codes -- it can't distinguish
+    # that from the tool crashing before it ever ran its scan and happening
+    # to exit with one of those same codes (missing binary, or a Python
+    # traceback from a broken/mismatched interpreter environment). Catch
+    # both patterns here instead of trusting allowed_return_codes alone.
+    tool_execution_failed = (
+        "can't load process" in stderr_lower
+        or "no such file or directory" in stderr_lower
+        or "traceback (most recent call last):" in stderr_lower
+    )
+    is_ok = runner_status == "done" and not tool_execution_failed
     status = "executed" if is_ok else "failed"
     if runner_status == "skipped":
         status = "skipped"
+    open_ports = result.get("open_ports") or _extract_nmap_open_ports(stdout)
+    nmap_summary = result.get("nmap_summary") or _extract_nmap_summary(stdout)
     return {
         "tool": tool_name,
         "target": target,
@@ -590,8 +607,8 @@ def normalize_kali_result(
         "status": status,
         "command": result.get("command") or "",
         "return_code": result.get("return_code"),
-        "stdout": result.get("stdout") or "",
-        "stderr": result.get("stderr") or "",
+        "stdout": stdout,
+        "stderr": stderr,
         "parsed": result.get("parsed"),
         "egress_context": result.get("egress_context") or {},
         "egress_observation": result.get("egress_observation") or {},
@@ -601,8 +618,61 @@ def normalize_kali_result(
         "dispatch_task_id": result.get("job_id"),
         "evidence_path": result.get("workdir"),
         "duration_seconds": result.get("duration_seconds"),
-        "open_ports": [],  # extracted later by workflow normalization, if applicable
+        "open_ports": open_ports,
+        "nmap_summary": nmap_summary,
     }
+
+
+def _extract_nmap_open_ports(stdout: str) -> list[dict[str, Any]]:
+    current_host = ""
+    ports: list[dict[str, Any]] = []
+    for raw_line in str(stdout or "").splitlines():
+        line = raw_line.strip()
+        if line.lower().startswith("nmap scan report for"):
+            target_text = line[len("Nmap scan report for "):].strip()
+            match = re.search(r"\((\d{1,3}(?:\.\d{1,3}){3})\)", target_text)
+            current_host = match.group(1) if match else target_text.split()[0]
+            continue
+        match = re.match(r"^(\d+)/(tcp|udp)\s+open\s+(\S+)(?:\s+(.*))?$", line, re.IGNORECASE)
+        if not match or not current_host:
+            continue
+        ports.append({
+            "host": current_host,
+            "port": int(match.group(1)),
+            "protocol": match.group(2).lower(),
+            "service": match.group(3),
+            "version": (match.group(4) or "").strip(),
+            "source": "nmap",
+        })
+    return ports[:500]
+
+
+def _extract_nmap_summary(stdout: str) -> dict[str, Any]:
+    summary: dict[str, Any] = {}
+    report_count = 0
+    no_open_count = 0
+    for raw_line in str(stdout or "").splitlines():
+        line = raw_line.strip()
+        if line.lower().startswith("nmap scan report for"):
+            report_count += 1
+        if line.lower().startswith("all ") and " scanned ports " in line.lower() and " ignored states" in line.lower():
+            no_open_count += 1
+        match = re.match(
+            r"^Nmap done:\s+(?P<addresses>\d+)\s+IP addresses\s+\((?P<hosts>\d+)\s+hosts up\)\s+scanned in\s+(?P<seconds>[\d.]+)\s+seconds",
+            line,
+            re.IGNORECASE,
+        )
+        if match:
+            summary.update({
+                "ip_addresses": int(match.group("addresses")),
+                "hosts_up": int(match.group("hosts")),
+                "duration_seconds": float(match.group("seconds")),
+            })
+    if report_count:
+        summary.setdefault("reported_hosts", report_count)
+    if no_open_count:
+        summary.setdefault("hosts_without_open_ports", no_open_count)
+    return summary
 
 
 def _kali_failure(
