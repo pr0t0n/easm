@@ -215,7 +215,12 @@ def _host_from_target(value: str) -> str:
 
 def _asset_refs_from_text(text: str) -> list[dict[str, Any]]:
     refs: dict[str, dict[str, Any]] = {}
-    for observation in _smb_observations(text):
+    clean_lines = [
+        line for line in str(text or "").splitlines()
+        if "proxychains" not in line.lower() and "bas_dynamic_proxychains" not in line.lower()
+    ]
+    clean_text = "\n".join(clean_lines)
+    for observation in _smb_observations(clean_text):
         ip = _valid_observed_ip(observation["ip"])
         if not ip:
             continue
@@ -228,8 +233,8 @@ def _asset_refs_from_text(text: str) -> list[dict[str, Any]]:
             "source": "smb_stdout",
             "evidence": observation["evidence"],
         }
-    for match in _IPV4_RE.finditer(str(text or "")):
-        if str(text or "")[match.end():match.end() + 1] == "/":
+    for match in _IPV4_RE.finditer(clean_text):
+        if clean_text[match.end():match.end() + 1] == "/":
             continue
         ip = _valid_observed_ip(match.group("ip"))
         if ip and ip not in refs:
@@ -966,7 +971,7 @@ def attack_path_inventory(
     query = (
         db.query(BasJob, BasAgent, BasSchedule)
         .join(BasAgent, BasAgent.id == BasJob.agent_id)
-        .join(BasSchedule, BasSchedule.id == BasJob.schedule_id)
+        .outerjoin(BasSchedule, BasSchedule.id == BasJob.schedule_id)
         .filter(BasAgent.kind == "real", BasJob.status == "completed")
     )
     if group_ids is not None:
@@ -988,7 +993,7 @@ def attack_path_inventory(
         for finding in db.query(Finding).filter(Finding.id.in_(finding_ids), Finding.tool == BAS_FINDING_TOOL).all():
             findings_by_id[finding.id] = finding
 
-    def ensure_asset(ip: str, job: BasJob, agent: BasAgent, schedule: BasSchedule) -> dict[str, Any]:
+    def ensure_asset(ip: str, job: BasJob, agent: BasAgent, schedule: BasSchedule | None) -> dict[str, Any]:
         asset = assets.get(ip)
         if asset is None:
             asset = {
@@ -1013,8 +1018,9 @@ def attack_path_inventory(
             asset["source_job_ids"].append(job.id)
         if agent.id not in asset["agent_ids"]:
             asset["agent_ids"].append(agent.id)
-        if schedule.id not in asset["schedule_ids"]:
-            asset["schedule_ids"].append(schedule.id)
+        schedule_ref = getattr(schedule, "id", None) or getattr(job, "schedule_id", None)
+        if schedule_ref and schedule_ref not in asset["schedule_ids"]:
+            asset["schedule_ids"].append(schedule_ref)
         return asset
 
     def attach_observation(asset: dict[str, Any], ref: dict[str, Any]) -> None:
@@ -1152,8 +1158,8 @@ def attack_path_inventory(
         attack_steps.append({
             "order": 1,
             "title": "Entrada pelo segmento do agente",
-            "description": "O agente real alcançou serviços internos a partir da máscara reportada.",
-            "evidence": f"{len(sorted_assets)} ativo(s) SMB/445 alcançável(is)",
+            "description": "O agente real executou testes contra ativos internos a partir da máscara reportada.",
+            "evidence": f"{len(sorted_assets)} ativo(s) observado(s) por alvo, log ou prova BAS",
             "status": "observed",
         })
     if any(v["id"] == "smb_signing_disabled" for asset in sorted_assets for v in asset["vulnerabilities"]):
@@ -1191,7 +1197,7 @@ def attack_path_inventory(
             "medium_risk_assets": sum(1 for asset in sorted_assets if asset["risk_level"] == "medium"),
         },
         "attack_steps": attack_steps,
-        "cmdb_assets": sorted_assets[:50],
+        "cmdb_assets": sorted_assets,
         "applications": sorted(applications.values(), key=lambda app: (-len(app["hosts"]), app["name"], app["version"])),
         "vulnerabilities": sorted(
             vulnerability_summary.values(),

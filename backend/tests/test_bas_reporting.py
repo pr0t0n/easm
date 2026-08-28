@@ -17,6 +17,7 @@ def _query_chain(rows):
     q = MagicMock()
     q.filter.return_value = q
     q.join.return_value = q
+    q.outerjoin.return_value = q
     q.distinct.return_value = q
     q.order_by.return_value = q
     q.limit.return_value = q
@@ -184,6 +185,17 @@ def test_bas_findings_view_extracts_affected_assets_from_evidence():
 
     assert rows[0]["affected_assets"][0]["ip"] == "10.99.0.12"
     assert rows[0]["affected_assets"][0]["source"] == "log_text"
+
+
+def test_asset_refs_ignore_proxychains_infrastructure_ips():
+    refs = bas_reporting._asset_refs_from_text(
+        "\n".join([
+            "[proxychains] Dynamic chain  ...  172.20.0.10:20020  ...  192.168.16.220:445 <--socket error or timeout!",
+            "[*] Target ........... 192.168.16.220",
+        ])
+    )
+
+    assert [ref["ip"] for ref in refs] == ["192.168.16.220"]
 
 
 def test_crown_jewels_view_reuses_the_real_keyword_identifier():
@@ -530,6 +542,7 @@ def test_attack_path_inventory_includes_attempted_host_without_valid_finding():
     job = SimpleNamespace(
         id=92,
         scan_job_id=124,
+        schedule_id=10,
         finding_id=None,
         technique_key="smb_enum_enum4linux",
         status="completed",
@@ -538,7 +551,7 @@ def test_attack_path_inventory_includes_attempted_host_without_valid_finding():
         created_at=datetime(2026, 8, 28, 13, 9),
     )
     agent = SimpleNamespace(id=19, kind="real")
-    schedule = SimpleNamespace(id=10, name="teste")
+    schedule = None
     log = SimpleNamespace(scan_job_id=124, message="Target 192.168.16.220 connection refused", created_at=datetime(2026, 8, 28, 13, 10))
     db = MagicMock()
 
@@ -554,6 +567,7 @@ def test_attack_path_inventory_includes_attempted_host_without_valid_finding():
     result = bas_reporting.attack_path_inventory(db)
 
     assert [asset["ip"] for asset in result["cmdb_assets"]] == ["192.168.16.220"]
+    assert result["cmdb_assets"][0]["schedule_ids"] == [10]
     assert result["cmdb_assets"][0]["vulnerabilities"] == []
     assert result["cmdb_assets"][0]["observations"]
 
