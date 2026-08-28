@@ -59,3 +59,21 @@ def test_bas_proof_rejects_stub_agent_output():
 
     assert proof["valid"] is False
     assert proof["status"] == "simulated"
+
+
+def test_bas_proof_accepts_cloud_identity_posture_evidence_with_info_severity():
+    proof = build_bas_proof(
+        technique=get_technique("azure_entra_id_discovery"),
+        job=_job(target="example.com"),
+        agent=SimpleNamespace(id=5, kind="real"),
+        result={
+            "status": "executed",
+            "command": "curl https://login.microsoftonline.com/getuserrealm.srf?login=user@example.com",
+            "stdout": "{\"NameSpaceType\":\"Managed\",\"FederationBrandName\":\"Example\"}",
+        },
+        key_findings=["{\"NameSpaceType\":\"Managed\",\"FederationBrandName\":\"Example\"}"],
+        severity="info",
+    )
+
+    assert proof["valid"] is True
+    assert proof["requirements"]["impact_or_control_observed"] is True

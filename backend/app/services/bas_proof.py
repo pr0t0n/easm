@@ -21,12 +21,14 @@ def _raw_evidence(result: dict[str, Any], key_findings: list[str]) -> str:
     return ""
 
 
-def _control_observed(result: dict[str, Any], key_findings: list[str], severity: str) -> bool:
+def _control_observed(technique: dict[str, Any], result: dict[str, Any], key_findings: list[str], severity: str) -> bool:
     if severity and severity != "info":
         return True
     if result.get("open_ports"):
         return True
     if key_findings and any(str(item).startswith("Nmap concluiu sem portas abertas") for item in key_findings):
+        return True
+    if key_findings and technique.get("category") in {"cloud", "cloud_identity", "saas", "identity"}:
         return True
     observation = result.get("egress_observation") or result.get("egress_context") or {}
     return bool(observation)
@@ -53,7 +55,7 @@ def build_bas_proof(
         "target_bound": bool(target),
         "parsed_evidence": bool(key_findings),
         "objective_evidence": bool(evidence),
-        "impact_or_control_observed": _control_observed(result, key_findings, severity),
+        "impact_or_control_observed": _control_observed(technique, result, key_findings, severity),
         "replay_available": bool(command and target and technique.get("technique_key") and getattr(agent, "id", None)),
     }
     valid = agent_kind == "real" and all(requirements.values())

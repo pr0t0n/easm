@@ -46,3 +46,14 @@ def test_internal_pentest_chain_covers_agent_based_pentest_flow():
         "controlled_exploit_validation",
         "source_code_secrets_scan",
     ]
+
+
+def test_cloud_identity_chain_uses_only_dispatchable_steps():
+    chain = get_chain("cloud_identity_bas")
+    assert chain is not None
+    assert chain["technique_keys"] == [
+        "azure_entra_id_discovery",
+        "m365_tenant_exposure_check",
+        "cloud_directory_scouting",
+    ]
+    assert all(get_technique(key)["availability"] in {"available", "simulated"} for key in chain["technique_keys"])

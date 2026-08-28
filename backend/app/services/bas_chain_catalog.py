@@ -49,6 +49,18 @@ BAS_CHAIN_CATALOG: list[dict[str, Any]] = [
         "technique_keys": ["cloud_directory_scouting", "source_code_secrets_scan"],
     },
     {
+        "chain_key": "cloud_identity_bas",
+        "display_name": "Cloud & Identity BAS",
+        "description": (
+            "Cloud and SaaS identity validation flow for domain-based tenant discovery, M365 exposure, and identity attack-surface proof."
+        ),
+        "technique_keys": [
+            "azure_entra_id_discovery",
+            "m365_tenant_exposure_check",
+            "cloud_directory_scouting",
+        ],
+    },
+    {
         "chain_key": "internal_pentest_from_agent",
         "display_name": "Internal Pentest From Agent",
         "description": (

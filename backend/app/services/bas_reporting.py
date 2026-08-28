@@ -47,6 +47,8 @@ _CATEGORY_FRAMEWORK_RELEVANCE: dict[str, set[str]] = {
     "identity": {"nist", "iso27001", "pci", "cis_v8"},
     "lateral_movement": {"nist", "iso27001", "pci", "cis_v8"},
     "exploit_validation": {"nist", "iso27001", "pci", "cis_v8"},
+    "cloud_identity": {"nist", "iso27001", "pci", "cis_v8"},
+    "saas": {"nist", "iso27001", "pci", "cis_v8"},
 }
 _FRAMEWORK_LABELS = {"nist": "NIST CSF", "iso27001": "ISO 27001", "pci": "PCI DSS 4.0", "cis_v8": "CIS Controls"}
 _SMB_LINE_RE = re.compile(
@@ -1198,6 +1200,9 @@ def _technical_pentest_report_payload(
             "ad_enumeration",
             "safe_lateral_movement_simulation",
             "controlled_exploit_validation",
+            "cloud_identity_validation",
+            "saas_exposure_validation",
+            "conditional_access_telemetry_validation",
             "replayable_retest",
         ],
         "validated_findings": proofed_findings,

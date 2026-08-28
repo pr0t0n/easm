@@ -443,3 +443,11 @@ def test_extract_key_findings_supports_internal_pentest_techniques():
     ]
     assert _derive_severity("safe_credential_checks", ["SMB 10.10.10.5 445 HOST (signing:False)"]) == "medium"
     assert _derive_severity("controlled_exploit_validation", ["+ [1] missing security header"]) == "medium"
+
+
+def test_extract_key_findings_supports_cloud_identity_discovery():
+    stdout = '{"NameSpaceType":"Managed","FederationBrandName":"Example","cloud":"m365"}\nEXIT_CODE:0\n'
+    assert _extract_key_findings("azure_entra_id_discovery", "cloud_identity", {"stdout": stdout}) == [
+        '{"NameSpaceType":"Managed","FederationBrandName":"Example","cloud":"m365"}'
+    ]
+    assert _derive_severity("m365_tenant_exposure_check", ["tenant discovered"]) == "info"

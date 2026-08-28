@@ -74,11 +74,24 @@ def test_host_only_technique_never_allowed_even_at_high_risk_ceiling():
 def test_new_safe_tier_discovery_techniques_are_authorized_without_attestation():
     for key in (
         "network_share_discovery", "ad_scouting_ldap", "cloud_directory_scouting",
+        "azure_entra_id_discovery", "m365_tenant_exposure_check",
         "port_service_scan", "chat_webhook_discovery", "owasp_web_app_scan",
         "pipeline_secrets_harvesting", "source_code_secrets_scan",
+        "safe_credential_checks", "lateral_movement_simulation_safe",
     ):
         result = check_bas_authorization(_schedule(max_tier="safe", attested=False), key)
         assert result["allowed"] is True, key
+
+
+def test_planned_cloud_identity_integrations_are_not_dispatchable_yet():
+    for key in (
+        "aws_iam_path_analysis", "google_workspace_exposure_check", "okta_misconfiguration_check",
+        "mfa_bypass_simulation_safe", "token_abuse_simulation", "conditional_access_validation",
+        "impossible_travel_telemetry",
+    ):
+        result = check_bas_authorization(_schedule(max_tier="high_risk", attested=True, attested_by=7), key)
+        assert result["allowed"] is False, key
+        assert result["reason"] == "technique_not_executable:planned", key
 
 
 def test_netlogon_zerologon_check_is_elevated_tier_not_safe():

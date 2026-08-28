@@ -44,6 +44,8 @@ def test_dispatch_calls_execute_via_kali_for_new_discovery_techniques():
         "network_share_discovery": ("smbmap-bas", "10.10.10.5"),
         "ad_scouting_ldap": ("ldapsearch-bas", "10.10.10.5"),
         "cloud_directory_scouting": ("curl-clouddir-bas", "10.10.10.5"),
+        "azure_entra_id_discovery": ("curl-clouddir-bas", "10.10.10.5"),
+        "m365_tenant_exposure_check": ("curl-clouddir-bas", "10.10.10.5"),
         "port_service_scan": ("nmap-portscan-bas", "10.10.10.5"),
         "chat_webhook_discovery": ("curl-chatwebhook-bas", "http://10.10.10.5"),
         "owasp_web_app_scan": ("nikto-owasp-bas", "10.10.10.5"),
@@ -114,6 +116,21 @@ def test_dispatch_refuses_host_only_techniques_even_with_authorized_schedule():
             )
         assert outcome["dispatched"] is False, technique_key
         assert outcome["reason"] == "technique_not_executable:future_agent_required", technique_key
+        mock_exec.assert_not_called()
+
+
+def test_dispatch_refuses_planned_cloud_identity_integrations():
+    for technique_key in ("aws_iam_path_analysis", "okta_misconfiguration_check", "conditional_access_validation"):
+        with patch("app.services.bas_dispatcher.execute_via_kali") as mock_exec:
+            outcome = dispatch_bas_technique(
+                technique_key=technique_key,
+                target_hint="example.com",
+                bas_agent=SimpleNamespace(id=1),
+                scan_id=42,
+                schedule=_schedule(max_tier="high_risk", attested=True, attested_by=7),
+            )
+        assert outcome["dispatched"] is False, technique_key
+        assert outcome["reason"] == "technique_not_executable:planned", technique_key
         mock_exec.assert_not_called()
 
 

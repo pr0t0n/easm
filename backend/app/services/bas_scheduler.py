@@ -153,6 +153,10 @@ def _extract_key_findings(technique_key: str, category: str, result: dict[str, A
         return hits[:15]
     if technique_key == "netlogon_zerologon_check":
         return [ln for ln in lines if "vulnerable" in ln.lower()][:5]
+    if technique_key in ("cloud_directory_scouting", "azure_entra_id_discovery", "m365_tenant_exposure_check"):
+        return [ln for ln in lines if any(token in ln.lower() for token in ("tenant", "federation", "managed", "namespace", "cloud", "microsoft", "azure", "entra"))][:15] or [
+            ln for ln in lines if not ln.upper().startswith("EXIT_CODE")
+        ][:5]
     # Generic fallback: last few non-boilerplate lines, so the report never
     # shows literally nothing for a technique with no dedicated extractor.
     return [ln for ln in lines if not ln.upper().startswith("EXIT_CODE")][-5:]
@@ -185,6 +189,8 @@ def _derive_severity(technique_key: str, key_findings: list[str]) -> str:
         return "medium"
     if technique_key == "controlled_exploit_validation":
         return "medium"
+    if technique_key in ("cloud_directory_scouting", "azure_entra_id_discovery", "m365_tenant_exposure_check"):
+        return "info"
     return "info"
 
 

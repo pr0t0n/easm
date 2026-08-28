@@ -18,10 +18,20 @@ _DISPATCHED_BUT_INEFFECTIVE_POISONING_KEYS = {"llmnr_nbtns_poisoning", "mdns_poi
 # Responder, which IS a real dispatchable tool) -- stay hard-blocked with no
 # kali_tool_name, same as the no-tool poisoning keys above.
 _HOST_ONLY_NO_TOOL_KEYS = {"credential_dumping_mimikatz", "dotfile_config_harvesting", "kubeconfig_theft"}
+_PLANNED_CLOUD_IDENTITY_KEYS = {
+    "aws_iam_path_analysis",
+    "google_workspace_exposure_check",
+    "okta_misconfiguration_check",
+    "mfa_bypass_simulation_safe",
+    "token_abuse_simulation",
+    "conditional_access_validation",
+    "impossible_travel_telemetry",
+}
 _TUNNELABLE_KEYS = {
     "smb_enum_cme", "smb_enum_enum4linux", "ad_bloodhound_collect", "ad_kerberoast", "ntlm_relay_smb",
     "vmware_vcenter_default_creds", "firewall_segmentation_test",
-    "network_share_discovery", "ad_scouting_ldap", "cloud_directory_scouting", "port_service_scan",
+    "network_share_discovery", "ad_scouting_ldap", "cloud_directory_scouting", "azure_entra_id_discovery",
+    "m365_tenant_exposure_check", "port_service_scan",
     "chat_webhook_discovery", "netlogon_zerologon_check", "owasp_web_app_scan",
     "pipeline_secrets_harvesting", "source_code_secrets_scan", "safe_credential_checks",
     "lateral_movement_simulation_safe", "controlled_exploit_validation",
@@ -67,6 +77,15 @@ def test_host_only_techniques_have_no_kali_tool_and_stay_hard_blocked():
         assert technique["kali_tool_name"] is None, key
 
 
+def test_cloud_identity_api_integrations_are_visible_but_planned_until_read_only_connectors_exist():
+    for key in _PLANNED_CLOUD_IDENTITY_KEYS:
+        technique = get_technique(key)
+        assert technique is not None, key
+        assert technique["availability"] == "planned", key
+        assert technique["execution_backend"] is None, key
+        assert technique["kali_tool_name"] is None, key
+
+
 def test_every_tunnelable_technique_has_a_kali_tool_mapped():
     for key in _TUNNELABLE_KEYS:
         technique = get_technique(key)
@@ -94,4 +113,5 @@ def test_list_techniques_returns_every_registered_entry():
     assert _NO_TOOL_POISONING_KEYS <= keys
     assert _DISPATCHED_BUT_INEFFECTIVE_POISONING_KEYS <= keys
     assert _HOST_ONLY_NO_TOOL_KEYS <= keys
+    assert _PLANNED_CLOUD_IDENTITY_KEYS <= keys
     assert _TUNNELABLE_KEYS <= keys
