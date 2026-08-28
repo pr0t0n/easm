@@ -139,7 +139,7 @@ function TrendChart({ points }) {
 
 export default function BasControlCenterPage() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const tab = ["panel", "deploy", "cmdb", "vulns"].includes(searchParams.get("tab")) ? searchParams.get("tab") : "panel";
+  const tab = ["panel", "runs", "deploy", "cmdb", "vulns"].includes(searchParams.get("tab")) ? searchParams.get("tab") : "panel";
   const setTab = (next) => setSearchParams((prev) => { const p = new URLSearchParams(prev); p.set("tab", next); return p; });
 
   const isAdmin = Boolean(authStore.me?.is_admin);
@@ -151,17 +151,19 @@ export default function BasControlCenterPage() {
   const [chains, setChains] = useState([]);
   const [schedules, setSchedules] = useState([]);
   const [segments, setSegments] = useState([]);
+  const [ops, setOps] = useState(null);
   const activeRunCount = cc?.active_runs?.length || 0;
 
   const loadAll = useCallback(async (silent = false) => {
     try {
-      const [{ data: c }, { data: a }, { data: t }, { data: ch }, { data: s }, { data: seg }] = await Promise.all([
+      const [{ data: c }, { data: a }, { data: t }, { data: ch }, { data: s }, { data: seg }, { data: o }] = await Promise.all([
         client.get("/api/bas/control-center"),
         client.get("/api/bas/agents"),
         client.get("/api/bas/techniques"),
         client.get("/api/bas/chains"),
         client.get("/api/bas/schedules"),
         client.get("/api/bas/network-segments"),
+        client.get("/api/bas/operations-center"),
       ]);
       setCc(c);
       setAgents(a);
@@ -169,6 +171,7 @@ export default function BasControlCenterPage() {
       setChains(ch);
       setSchedules(s);
       setSegments(seg);
+      setOps(o);
       setLastUpdated(new Date());
     } catch (error) {
       if (silent) return;
@@ -195,7 +198,7 @@ export default function BasControlCenterPage() {
           <div style={{ fontWeight: 400, fontSize: 11, lineHeight: "14px", color: TV.muted }}>Breach &amp; Attack Simulation</div>
         </div>
         <div style={{ display: "flex", gap: 2, padding: 3, background: TV.surface2, border: `1px solid ${TV.border}`, borderRadius: 8 }}>
-          {[["panel", "Painel"], ["deploy", "Implantação & agendamento"], ["cmdb", "CMDB"], ["vulns", "Vulnerabilidades"]].map(([key, label]) => (
+          {[["panel", "Painel"], ["runs", "Execuções"], ["deploy", "Implantação & agendamento"], ["cmdb", "CMDB"], ["vulns", "Vulnerabilidades"]].map(([key, label]) => (
             <button key={key} onClick={() => setTab(key)} style={{
               border: 0, cursor: "pointer", fontWeight: 600, fontSize: 12, lineHeight: "16px", padding: "8px 14px", borderRadius: 6,
               background: tab === key ? "#e96363" : "transparent", color: tab === key ? "#fff" : TV.muted,
@@ -212,7 +215,8 @@ export default function BasControlCenterPage() {
         </div>
       </header>
 
-      {tab === "panel" && <PanelTab cc={cc} agents={agents} schedules={schedules} setTab={setTab} />}
+      {tab === "panel" && <PanelTab cc={cc} agents={agents} schedules={schedules} ops={ops} setTab={setTab} />}
+      {tab === "runs" && <RunsTab cc={cc} ops={ops} agents={agents} schedules={schedules} setTab={setTab} />}
       {tab === "deploy" && (
         <DeployTab
           isAdmin={isAdmin} agents={agents} techniques={techniques} chains={chains} schedules={schedules}
@@ -227,7 +231,7 @@ export default function BasControlCenterPage() {
 
 // ── Painel ────────────────────────────────────────────────────────────────
 
-function PanelTab({ cc, agents, schedules, setTab }) {
+function PanelTab({ cc, agents, schedules, ops, setTab }) {
   const [controlMatrixPage, setControlMatrixPage] = useState(1);
   const controlMatrixCellCount = cc?.control_matrix?.cells?.length || 0;
 
@@ -239,7 +243,6 @@ function PanelTab({ cc, agents, schedules, setTab }) {
   const score = cc.resilience_score;
   const color = scoreColorFor(score.score);
 
-  const statusColor = { online: "#1f8a59", offline: TV.muted, pending: "#d4a500", revoked: "#d64545" };
   const findings = cc.findings || [];
   const realFindings = findings.filter((f) => !f.simulated && f.proof_valid);
   const openBySeverity = { critical: 0, high: 0, medium: 0, low: 0 };
@@ -255,6 +258,11 @@ function PanelTab({ cc, agents, schedules, setTab }) {
   const controlMatrixPageStart = (controlMatrixSafePage - 1) * CONTROL_MATRIX_PAGE_SIZE;
   const controlMatrixPageCells = controlMatrixCells.slice(controlMatrixPageStart, controlMatrixPageStart + CONTROL_MATRIX_PAGE_SIZE);
   const activeRuns = cc.active_runs || [];
+  const cmdbAssets = cc.cmdb?.cmdb_assets || [];
+  const observedAssets = cmdbAssets.filter((asset) => (asset.observations || []).length > 0).length;
+  const reachableAssets = cmdbAssets.filter((asset) => (asset.services || []).length > 0).length;
+  const validatedAssets = cmdbAssets.filter((asset) => (asset.vulnerabilities || []).length > 0).length;
+  const unprovenFindings = findings.filter((f) => !f.simulated && !f.proof_valid).length;
 
   const kpis = [
     { label: "Achados reais abertos", value: realFindings.length, sub: `${openBySeverity.critical} críticos · ${openBySeverity.high} altos`, color: "#d64545", pct: realFindings.length ? 100 : 0 },
@@ -315,29 +323,7 @@ function PanelTab({ cc, agents, schedules, setTab }) {
       <section style={{ display: "grid", gridTemplateColumns: "minmax(0,1.15fr) minmax(0,1fr)", gap: 16 }}>
         <ActiveRunsPanel activeRuns={activeRuns} setTab={setTab} />
 
-        <Card>
-          <div style={{ display: "flex", alignItems: "baseline", gap: 12 }}>
-            <CardTitle sub={`${agents.filter((a) => a.status === "online").length} online · ${agents.filter((a) => a.status === "pending").length} pendente(s) · ${agents.filter((a) => a.status === "offline").length} offline`}>Agentes instalados</CardTitle>
-            <button onClick={() => setTab("deploy")} style={{ marginLeft: "auto", border: 0, background: "transparent", cursor: "pointer", fontWeight: 600, fontSize: 12, lineHeight: "16px", color: "#e96363" }}>
-              Implantar / agendar
-            </button>
-          </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {agents.length === 0 && <Empty>Nenhum agente enrolado ainda.</Empty>}
-            {agents.map((a) => (
-              <div key={a.id} style={{ display: "grid", gridTemplateColumns: "14px minmax(0,1fr) auto", gap: 10, alignItems: "center", padding: "11px 12px", borderRadius: 10, background: TV.surface2, border: `1px solid ${TV.border}` }}>
-                <span style={{ width: 8, height: 8, borderRadius: 999, background: statusColor[a.status] || TV.muted }} />
-                <div style={{ display: "flex", flexDirection: "column", gap: 3, minWidth: 0 }}>
-                  <span style={{ fontWeight: 600, fontSize: 13, lineHeight: "16px", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{a.label || a.hostname || `agente #${a.id}`}</span>
-                  <span style={{ fontWeight: 400, fontSize: 11, lineHeight: "14px", color: TV.muted }}>{a.os}</span>
-                  <span style={{ fontWeight: 600, fontSize: 10.5, lineHeight: "14px", color: statusColor[a.status] || TV.muted, textTransform: "uppercase", letterSpacing: ".5px" }}>
-                    {a.kind === "real" ? "Real" : "Stub"} · {a.status} · {a.local_network_cidr || "sem rede"}
-                  </span>
-                </div>
-              </div>
-            ))}
-          </div>
-        </Card>
+        <AgentFleetPanel agents={agents} fleet={ops?.agent_fleet} setTab={setTab} />
 
         <Card>
           <CardTitle sub="Proven = prova validada · Bloqueado = falhou · Não confirmado = completou sem prova">Test depth · kill chain</CardTitle>
@@ -358,6 +344,21 @@ function PanelTab({ cc, agents, schedules, setTab }) {
             <Legend color={OUTCOME_COLOR.blocked} label="Bloqueado" />
           </div>
         </Card>
+      </section>
+
+      <section style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0,1fr))", gap: 12 }}>
+        {[
+          ["Ativos observados", observedAssets, "target/log/stdout"],
+          ["Alcançáveis", reachableAssets, "serviço/fingerprint"],
+          ["Com achado validado", validatedAssets, "prova BAS"],
+          ["Sem prova suficiente", unprovenFindings, "execução sem finding"],
+        ].map(([label, value, sub]) => (
+          <Card key={label} style={{ padding: 14 }}>
+            <span style={{ fontWeight: 600, fontSize: 10, lineHeight: "13px", color: TV.label, textTransform: "uppercase", letterSpacing: ".6px" }}>{label}</span>
+            <span style={{ fontWeight: 800, fontSize: 24, lineHeight: "28px", color: label === "Com achado validado" ? "#d64545" : label === "Alcançáveis" ? "#4b73ff" : TV.text }}>{value}</span>
+            <span style={{ fontWeight: 400, fontSize: 11, lineHeight: "14px", color: TV.muted }}>{sub}</span>
+          </Card>
+        ))}
       </section>
 
       <Card>
@@ -524,18 +525,19 @@ function PanelTab({ cc, agents, schedules, setTab }) {
               Ver CMDB completo
             </button>
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1.5fr) 110px 96px 74px", gap: 12, padding: "0 12px 8px", borderBottom: `1px solid ${TV.border}` }}>
-            {["Asset", "Business unit", "Risco", "Findings"].map((h) => (
+          <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1.4fr) 100px 110px 86px 74px", gap: 12, padding: "0 12px 8px", borderBottom: `1px solid ${TV.border}` }}>
+            {["Asset", "Status", "Business unit", "Risco", "Findings"].map((h) => (
               <span key={h} style={{ fontWeight: 600, fontSize: 10, lineHeight: "13px", color: TV.label, letterSpacing: ".7px", textTransform: "uppercase" }}>{h}</span>
             ))}
           </div>
           {(cc.cmdb?.cmdb_assets || []).length === 0 && <Empty>Nenhum ativo descoberto por BAS ainda.</Empty>}
           {(cc.cmdb?.cmdb_assets || []).slice(0, 8).map((a) => (
-            <div key={a.ip} style={{ display: "grid", gridTemplateColumns: "minmax(0,1.5fr) 110px 96px 74px", gap: 12, alignItems: "center", padding: "11px 12px", borderBottom: `1px solid ${TV.border}` }}>
+            <div key={a.ip} style={{ display: "grid", gridTemplateColumns: "minmax(0,1.4fr) 100px 110px 86px 74px", gap: 12, alignItems: "center", padding: "11px 12px", borderBottom: `1px solid ${TV.border}` }}>
               <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
                 <span style={{ fontWeight: 600, fontSize: 12, lineHeight: "16px", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{a.hostname || a.ip}</span>
                 <span style={{ fontWeight: 400, fontSize: 10, lineHeight: "13px", color: TV.label }}>{a.ip} · {a.os || "SO desconhecido"}</span>
               </div>
+              <Pill color={assetStatus(a).color}>{assetStatus(a).label}</Pill>
               <span style={{ fontWeight: 400, fontSize: 11, lineHeight: "14px", color: TV.text }}>{a.business_unit || "não classificado"}</span>
               <Pill color={RISK_COLOR[a.risk_level] || TV.muted}>{a.risk_level}</Pill>
               <span style={{ fontWeight: 600, fontSize: 12, lineHeight: "16px", color: a.vulnerabilities?.length ? "#d64545" : TV.muted, textAlign: "right" }}>{a.vulnerabilities?.length || 0}</span>
@@ -628,7 +630,7 @@ function ActiveRunsPanel({ activeRuns, setTab }) {
         {activeRuns.slice(0, 5).map((run) => {
           const progress = Math.max(0, Math.min(99, Number(run.mission_progress || 0)));
           return (
-            <div key={run.scan_job_id} style={{ display: "grid", gridTemplateColumns: "minmax(0,1.25fr) minmax(0,1fr) 78px", gap: 12, alignItems: "center", background: TV.surface2, border: `1px solid ${TV.border}`, borderRadius: 8, padding: "10px 12px" }}>
+            <div key={run.scan_job_id} style={{ display: "grid", gridTemplateColumns: "minmax(0,1.25fr) minmax(0,1fr) 84px", gap: 12, alignItems: "center", background: TV.surface2, border: `1px solid ${TV.border}`, borderRadius: 8, padding: "10px 12px" }}>
               <div style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 0 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
                   <span style={{ width: 8, height: 8, borderRadius: 999, background: "#4b73ff", boxShadow: "0 0 0 3px #4b73ff22", flex: "none" }} />
@@ -643,12 +645,150 @@ function ActiveRunsPanel({ activeRuns, setTab }) {
                 <Bar pct={progress} color="#4b73ff" height={5} bg="#263246" />
                 <span style={{ fontWeight: 400, fontSize: 10, lineHeight: "13px", color: TV.label }}>{run.jobs_resolved || 0}/{run.total_hint || run.jobs_total_seen || 1} unidade(s) resolvida(s){run.active_technique_key ? ` · ${run.active_technique_key}` : ""}</span>
               </div>
-              <span style={{ fontWeight: 800, fontSize: 15, lineHeight: "19px", color: "#4b73ff", textAlign: "right" }}>{progress}%</span>
+              <button onClick={() => setTab("runs")} style={{ border: `1px solid ${TV.border}`, background: "transparent", borderRadius: 8, cursor: "pointer", fontWeight: 700, fontSize: 10.5, lineHeight: "14px", color: "#4b73ff", padding: "6px 8px" }}>
+                {progress}%
+              </button>
             </div>
           );
         })}
       </div>
     </Card>
+  );
+}
+
+function healthColor(grade) {
+  if (grade === "healthy") return "#1f8a59";
+  if (grade === "degraded") return "#d4a500";
+  if (grade === "critical") return "#d64545";
+  return TV.muted;
+}
+
+function formatDateTime(value) {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "—";
+  return date.toLocaleString();
+}
+
+function assetStatus(asset) {
+  if ((asset.vulnerabilities || []).length > 0) return { label: "validado", color: "#d64545" };
+  if ((asset.services || []).length > 0) return { label: "alcançável", color: "#4b73ff" };
+  if ((asset.observations || []).length > 0) return { label: "observado", color: "#d4a500" };
+  return { label: "sem evidência", color: TV.muted };
+}
+
+function AgentFleetPanel({ agents, fleet, setTab }) {
+  const rows = fleet?.agents || agents.map((agent) => ({ ...agent, ...(agent.fleet || {}) }));
+  const summary = fleet?.summary || {
+    agents: rows.length,
+    online: rows.filter((agent) => agent.status === "online").length,
+    healthy: rows.filter((agent) => agent.health?.grade === "healthy").length,
+    degraded: rows.filter((agent) => agent.health?.grade === "degraded").length,
+    critical: rows.filter((agent) => agent.health?.grade === "critical").length,
+  };
+  return (
+    <Card>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 12 }}>
+        <CardTitle sub={`${summary.online || 0}/${summary.agents || 0} online · ${summary.healthy || 0} healthy · ${summary.degraded || 0} degraded · ${summary.critical || 0} critical`}>Agent fleet</CardTitle>
+        <button onClick={() => setTab("deploy")} style={{ marginLeft: "auto", border: 0, background: "transparent", cursor: "pointer", fontWeight: 600, fontSize: 12, lineHeight: "16px", color: "#e96363" }}>
+          Implantar / configurar
+        </button>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 330, overflowY: "auto", paddingRight: 4 }}>
+        {rows.length === 0 && <Empty>Nenhum agente enrolado ainda.</Empty>}
+        {rows.map((agent) => {
+          const health = agent.health || agent.fleet?.health || {};
+          const capabilities = agent.capabilities || agent.fleet?.capabilities || {};
+          const tools = Array.isArray(capabilities.tools) ? capabilities.tools.length : Object.keys(capabilities.tools || {}).length;
+          return (
+            <div key={agent.id} style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) 58px", gap: 10, alignItems: "center", padding: "11px 12px", borderRadius: 10, background: TV.surface2, border: `1px solid ${TV.border}` }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: 5, minWidth: 0 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+                  <span style={{ width: 8, height: 8, borderRadius: 999, background: agent.status === "online" ? "#1f8a59" : agent.status === "pending" ? "#d4a500" : TV.muted, flex: "none" }} />
+                  <span style={{ fontWeight: 700, fontSize: 12.5, lineHeight: "16px", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{agent.label || agent.hostname || `agente #${agent.id}`}</span>
+                  <Pill color={healthColor(health.grade)}>{health.grade || "unknown"}</Pill>
+                </div>
+                <span style={{ fontWeight: 400, fontSize: 10.5, lineHeight: "14px", color: TV.label, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                  {agent.os || "SO"} {agent.os_version || ""} · {agent.arch || "arch n/a"} · v{agent.agent_version || "n/a"} · {agent.local_network_cidr || "sem rede"}
+                </span>
+                <span style={{ fontWeight: 400, fontSize: 10.5, lineHeight: "14px", color: TV.muted, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                  IP {agent.last_seen_ip || "—"} · heartbeat {formatDateTime(agent.last_heartbeat_at)} · tools {tools || "n/a"} · {(agent.tags || []).join(", ") || agent.site || agent.agent_group || "sem tags"}
+                </span>
+              </div>
+              <span style={{ fontWeight: 800, fontSize: 18, lineHeight: "22px", color: healthColor(health.grade), textAlign: "right" }}>{health.score ?? 0}</span>
+            </div>
+          );
+        })}
+      </div>
+    </Card>
+  );
+}
+
+function RunsTab({ cc, ops, agents, schedules, setTab }) {
+  const activeRuns = cc?.active_runs || [];
+  const activeJobs = ops?.active_jobs || [];
+  const recentJobs = ops?.recent_jobs || [];
+  const agentById = useMemo(() => Object.fromEntries((agents || []).map((agent) => [agent.id, agent])), [agents]);
+  const scheduleById = useMemo(() => Object.fromEntries((schedules || []).map((schedule) => [schedule.id, schedule])), [schedules]);
+  const pipeline = [
+    ["Schedule", schedules.length],
+    ["ScanJob", activeRuns.length],
+    ["BasJob", activeJobs.length + recentJobs.length],
+    ["Kali Task", activeJobs.filter((job) => job.status === "dispatched_to_kali" || job.status === "running").length],
+    ["Evidence", recentJobs.filter((job) => job.proof_status && job.proof_status !== "missing").length],
+    ["Proof", recentJobs.filter((job) => job.proof_valid).length],
+    ["Finding", (cc?.findings || []).filter((finding) => finding.proof_valid).length],
+    ["CMDB", cc?.cmdb?.summary?.assets || 0],
+  ];
+  const rows = [
+    ...activeJobs.map((job) => ({ ...job, live: true, created_at: job.dispatched_at })),
+    ...recentJobs.map((job) => ({ ...job, live: false })),
+  ];
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <ActiveRunsPanel activeRuns={activeRuns} setTab={setTab} />
+      <Card>
+        <CardTitle sub="Schedule → ScanJob → BasJob → Kali → Evidence → Proof → Finding → CMDB">Fluxo integrado</CardTitle>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(8, minmax(0,1fr))", gap: 8 }}>
+          {pipeline.map(([label, value], index) => (
+            <div key={label} style={{ display: "flex", flexDirection: "column", gap: 6, padding: "10px 12px", background: TV.surface2, border: `1px solid ${TV.border}`, borderRadius: 8 }}>
+              <span style={{ fontWeight: 700, fontSize: 17, lineHeight: "21px", color: index >= 5 ? "#1f8a59" : "#4b73ff" }}>{value}</span>
+              <span style={{ fontWeight: 600, fontSize: 10, lineHeight: "13px", color: TV.label, textTransform: "uppercase", letterSpacing: ".5px" }}>{label}</span>
+            </div>
+          ))}
+        </div>
+      </Card>
+      <Card>
+        <CardTitle sub={`${rows.length} job(s) visíveis`}>Timeline técnica</CardTitle>
+        <div style={{ display: "grid", gridTemplateColumns: "80px minmax(0,1fr) 130px 130px 110px 95px", gap: 12, padding: "0 12px 8px", borderBottom: `1px solid ${TV.border}` }}>
+          {["Job", "Técnica / alvo", "Agente", "Schedule", "Status", "Prova"].map((h) => (
+            <span key={h} style={{ fontWeight: 600, fontSize: 10, lineHeight: "13px", color: TV.label, textTransform: "uppercase", letterSpacing: ".6px" }}>{h}</span>
+          ))}
+        </div>
+        {rows.length === 0 && <Empty>Nenhum job BAS registrado ainda.</Empty>}
+        <div style={{ maxHeight: 520, overflowY: "auto" }}>
+          {rows.map((job) => {
+            const agent = agentById[job.agent_id] || {};
+            const schedule = scheduleById[job.schedule_id] || {};
+            const proofColor = job.proof_valid ? "#1f8a59" : job.proof_status === "insufficient_evidence" ? "#d4a500" : TV.muted;
+            return (
+              <div key={`${job.live ? "active" : "recent"}-${job.id}`} style={{ display: "grid", gridTemplateColumns: "80px minmax(0,1fr) 130px 130px 110px 95px", gap: 12, alignItems: "center", padding: "10px 12px", borderBottom: `1px solid ${TV.border}` }}>
+                <span style={{ fontWeight: 700, fontSize: 11.5, lineHeight: "15px", color: job.live ? "#4b73ff" : TV.text, fontFamily: "var(--font-mono,monospace)" }}>#{job.id}</span>
+                <span style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
+                  <span style={{ fontWeight: 700, fontSize: 11.5, lineHeight: "15px", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{job.technique_key}</span>
+                  <span style={{ fontWeight: 400, fontSize: 10.5, lineHeight: "14px", color: TV.label, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{job.target || "sem alvo"} · {formatDateTime(job.created_at || job.dispatched_at)}</span>
+                  {job.last_error && <span style={{ fontWeight: 400, fontSize: 10, lineHeight: "13px", color: "#d64545", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{job.last_error}</span>}
+                </span>
+                <span style={{ fontWeight: 600, fontSize: 11, lineHeight: "15px", color: TV.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{agent.label || agent.hostname || `#${job.agent_id || "—"}`}</span>
+                <span style={{ fontWeight: 400, fontSize: 11, lineHeight: "15px", color: TV.muted, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{schedule.name || job.schedule_id || "—"}</span>
+                <Pill color={job.status === "completed" ? "#1f8a59" : job.status === "failed" ? "#d64545" : job.live ? "#4b73ff" : TV.muted}>{job.status}</Pill>
+                <Pill color={proofColor}>{job.proof_valid ? "validada" : job.proof_status || "missing"}</Pill>
+              </div>
+            );
+          })}
+        </div>
+      </Card>
+    </div>
   );
 }
 
@@ -1190,7 +1330,7 @@ function Field({ label, children }) {
 // ── CMDB ──────────────────────────────────────────────────────────────────
 
 function CmdbTab({ cc, segments, reload }) {
-  const [filters, setFilters] = useState({ port: "", host: "", ip: "", os: "" });
+  const [filters, setFilters] = useState({ port: "", host: "", ip: "", os: "", status: "" });
   const [editingAsset, setEditingAsset] = useState(null);
   const [tagForm, setTagForm] = useState(null);
 
@@ -1201,6 +1341,7 @@ function CmdbTab({ cc, segments, reload }) {
       if (filters.host && !a.hostname?.toLowerCase().includes(filters.host.toLowerCase())) continue;
       if (filters.ip && !a.ip.includes(filters.ip)) continue;
       if (filters.os && !a.os?.toLowerCase().includes(filters.os.toLowerCase())) continue;
+      if (filters.status && assetStatus(a).label !== filters.status) continue;
       const services = (a.services || []).length ? a.services : (a.observations || []).map((obs) => ({
         name: obs.source || "observed",
         port: "—",
@@ -1245,35 +1386,45 @@ function CmdbTab({ cc, segments, reload }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <Card>
-        <CardTitle sub={`${new Set(assets.map((a) => a.ip)).size} host(s) · ${rows.length} porta(s) no filtro atual`}>CMDB · inventário de hosts e portas</CardTitle>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0,1fr)) auto", gap: 8 }}>
+        <CardTitle sub={`${new Set(rows.map((row) => row.asset.ip)).size} host(s) · ${rows.length} evidência(s) no filtro atual`}>CMDB · inventário de hosts e portas</CardTitle>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0,1fr)) auto", gap: 8 }}>
           <input className="ops-tv-select" style={fieldStyle} placeholder="Porta ou serviço" value={filters.port} onChange={(e) => setFilters({ ...filters, port: e.target.value })} />
           <input className="ops-tv-select" style={fieldStyle} placeholder="Hostname" value={filters.host} onChange={(e) => setFilters({ ...filters, host: e.target.value })} />
           <input className="ops-tv-select" style={fieldStyle} placeholder="IP" value={filters.ip} onChange={(e) => setFilters({ ...filters, ip: e.target.value })} />
-          <button className="btn" onClick={() => setFilters({ port: "", host: "", ip: "", os: "" })} style={{ background: "transparent", border: `1px solid ${TV.border}`, color: TV.text }}>Limpar</button>
+          <select className="ops-tv-select" style={fieldStyle} value={filters.status} onChange={(e) => setFilters({ ...filters, status: e.target.value })}>
+            <option value="">Todos os status</option>
+            <option value="observado">Observado</option>
+            <option value="alcançável">Alcançável</option>
+            <option value="validado">Validado</option>
+            <option value="sem evidência">Sem evidência</option>
+          </select>
+          <button className="btn" onClick={() => setFilters({ port: "", host: "", ip: "", os: "", status: "" })} style={{ background: "transparent", border: `1px solid ${TV.border}`, color: TV.text }}>Limpar</button>
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "110px minmax(0,1fr) 90px 110px 110px 100px 80px", gap: 12, padding: "0 12px 8px", borderBottom: `1px solid ${TV.border}` }}>
-          {["IP", "Hostname", "Porta", "Business unit", "Criticidade", "Risco", "Vulns"].map((h) => (
+        <div style={{ display: "grid", gridTemplateColumns: "110px minmax(0,1fr) 96px 90px 110px 110px 100px 80px", gap: 12, padding: "0 12px 8px", borderBottom: `1px solid ${TV.border}` }}>
+          {["IP", "Hostname", "Status", "Porta", "Business unit", "Criticidade", "Risco", "Vulns"].map((h) => (
             <span key={h} style={{ fontWeight: 600, fontSize: 10, lineHeight: "13px", color: TV.label, textTransform: "uppercase", letterSpacing: ".6px" }}>{h}</span>
           ))}
         </div>
         {rows.length === 0 && <Empty>Nenhum host com essa porta/serviço no CMDB atual.</Empty>}
-        {rows.map(({ asset, svc }) => (
-          <div key={`${asset.ip}:${svc.port}`} style={{ display: "grid", gridTemplateColumns: "110px minmax(0,1fr) 90px 110px 110px 100px 80px", gap: 12, alignItems: "center", padding: "10px 12px", borderBottom: `1px solid ${TV.border}` }}>
-            <span style={{ fontWeight: 600, fontSize: 12, lineHeight: "16px", fontFamily: "var(--font-mono,monospace)" }}>{asset.ip}</span>
-            <span style={{ fontWeight: 400, fontSize: 12, lineHeight: "16px", color: TV.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{asset.hostname}</span>
-            <span style={{ fontWeight: 600, fontSize: 12, lineHeight: "16px", fontFamily: "var(--font-mono,monospace)" }}>{svc.port}/{svc.protocol}</span>
-            <span style={{ fontWeight: 400, fontSize: 11.5, lineHeight: "16px", color: asset.classified ? TV.text : TV.label }}>{asset.business_unit || "—"}</span>
-            <span style={{ fontWeight: 400, fontSize: 11.5, lineHeight: "16px", color: TV.text }}>{asset.criticality || "—"}</span>
-            <Pill color={RISK_COLOR[asset.risk_level] || TV.muted}>{asset.risk_level}</Pill>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, justifyContent: "flex-end" }}>
-              <span style={{ fontWeight: 400, fontSize: 11, lineHeight: "16px", color: TV.muted }}>{asset.vulnerabilities?.length || 0}</span>
-              <button className="btn" style={{ padding: "2px 8px", fontSize: 11, background: "transparent", border: `1px solid ${TV.border}`, color: TV.text }} onClick={() => openTagForm(asset)}>
-                {asset.classified ? "editar" : "classificar"}
-              </button>
+        <div style={{ maxHeight: 620, overflowY: "auto" }}>
+          {rows.map(({ asset, svc }, idx) => (
+            <div key={`${asset.ip}:${svc.port}:${idx}`} style={{ display: "grid", gridTemplateColumns: "110px minmax(0,1fr) 96px 90px 110px 110px 100px 80px", gap: 12, alignItems: "center", padding: "10px 12px", borderBottom: `1px solid ${TV.border}` }}>
+              <span style={{ fontWeight: 600, fontSize: 12, lineHeight: "16px", fontFamily: "var(--font-mono,monospace)" }}>{asset.ip}</span>
+              <span style={{ fontWeight: 400, fontSize: 12, lineHeight: "16px", color: TV.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{asset.hostname}</span>
+              <Pill color={assetStatus(asset).color}>{assetStatus(asset).label}</Pill>
+              <span style={{ fontWeight: 600, fontSize: 12, lineHeight: "16px", fontFamily: "var(--font-mono,monospace)" }}>{svc.port}/{svc.protocol}</span>
+              <span style={{ fontWeight: 400, fontSize: 11.5, lineHeight: "16px", color: asset.classified ? TV.text : TV.label }}>{asset.business_unit || "—"}</span>
+              <span style={{ fontWeight: 400, fontSize: 11.5, lineHeight: "16px", color: TV.text }}>{asset.criticality || "—"}</span>
+              <Pill color={RISK_COLOR[asset.risk_level] || TV.muted}>{asset.risk_level}</Pill>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, justifyContent: "flex-end" }}>
+                <span style={{ fontWeight: 400, fontSize: 11, lineHeight: "16px", color: TV.muted }}>{asset.vulnerabilities?.length || 0}</span>
+                <button className="btn" style={{ padding: "2px 8px", fontSize: 11, background: "transparent", border: `1px solid ${TV.border}`, color: TV.text }} onClick={() => openTagForm(asset)}>
+                  {asset.classified ? "editar" : "classificar"}
+                </button>
+              </div>
             </div>
-          </div>
-        ))}
+          ))}
+        </div>
       </Card>
 
       {editingAsset && tagForm && (

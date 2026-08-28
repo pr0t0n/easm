@@ -1109,7 +1109,7 @@ def operations_center(db: Session = Depends(get_db), current_user: User = Depend
     # explicitly-capped query so the two don't fight over one limit.
     all_jobs = apply_company_scope(db.query(BasJob), current_user, BasJob).all()
     recent_jobs = apply_company_scope(db.query(BasJob), current_user, BasJob) \
-        .order_by(BasJob.created_at.desc()).limit(10).all()
+        .order_by(BasJob.created_at.desc()).limit(50).all()
     # A job now becomes visible here the instant it's dispatched (bas_scheduler
     # commits before the blocking kali_runner call, not just after it returns)
     # -- these are the ones actually in flight right now, separate from the
@@ -1168,7 +1168,8 @@ def operations_center(db: Session = Depends(get_db), current_user: User = Depend
         "technique_stats": by_technique,
         "active_jobs": [
             {
-                "id": j.id, "technique_key": j.technique_key, "risk_tier": j.risk_tier,
+                "id": j.id, "schedule_id": j.schedule_id, "scan_job_id": j.scan_job_id,
+                "technique_key": j.technique_key, "risk_tier": j.risk_tier,
                 "target": j.target, "status": j.status, "agent_id": j.agent_id,
                 "dispatched_at": j.dispatched_at,
                 "simulated": agent_kind_by_id.get(j.agent_id, "stub") != "real",
@@ -1179,7 +1180,8 @@ def operations_center(db: Session = Depends(get_db), current_user: User = Depend
         ],
         "recent_jobs": [
             {
-                "id": j.id, "technique_key": j.technique_key, "risk_tier": j.risk_tier,
+                "id": j.id, "schedule_id": j.schedule_id, "scan_job_id": j.scan_job_id,
+                "technique_key": j.technique_key, "risk_tier": j.risk_tier,
                 "target": j.target,
                 "status": j.status, "agent_id": j.agent_id, "created_at": j.created_at,
                 "dispatched_at": j.dispatched_at, "finished_at": j.finished_at,
