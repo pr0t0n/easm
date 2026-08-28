@@ -36,6 +36,8 @@ const RISK_TIER_META = {
   elevated: { label: "Elevated", desc: "Kerberoasting, etc.", color: "#d4a500" },
   high_risk: { label: "High risk", desc: "NTLM relay, etc.", color: "#d64545" },
 };
+const CONTROL_MATRIX_STATUS_LABEL = { tested: "testado", prevented: "prevenido", detected: "detectado", missed: "perdido", not_applicable: "sem teste" };
+const CONTROL_MATRIX_STATUS_COLOR = { tested: TV.muted, prevented: "#1f8a59", detected: "#4b73ff", missed: "#d64545", not_applicable: TV.label };
 const RISK_TIER_ORDER = { safe: 0, elevated: 1, high_risk: 2 };
 const FREQ_LABEL = { daily: "Diário", weekly: "Semanal", monthly: "Mensal", every_3_hours: "A cada 3 horas", every_6_hours: "A cada 6 horas", every_12_hours: "A cada 12 horas" };
 
@@ -233,6 +235,10 @@ function PanelTab({ cc, agents, schedules, setTab }) {
   realFindings.forEach((f) => { if (openBySeverity[f.severity] != null) openBySeverity[f.severity]++; });
   const categoryTotals = (cc.category_coverage || []).reduce((acc, c) => ({ tested: acc.tested + c.tested, total: acc.total + c.total }), { tested: 0, total: 0 });
   const categoriesWithCoverage = (cc.category_coverage || []).filter((c) => c.tested > 0).length;
+  const controlMatrix = cc.control_matrix || {};
+  const controlMatrixSummary = controlMatrix.summary || {};
+  const controlMatrixFrameworks = controlMatrix.frameworks || [];
+  const controlMatrixCells = controlMatrix.cells || [];
 
   const kpis = [
     { label: "Achados reais abertos", value: realFindings.length, sub: `${openBySeverity.critical} críticos · ${openBySeverity.high} altos`, color: "#d64545", pct: realFindings.length ? 100 : 0 },
@@ -365,6 +371,51 @@ function PanelTab({ cc, agents, schedules, setTab }) {
           <Legend color={OUTCOME_COLOR.blocked} label="Bloqueado" />
           <Legend color={OUTCOME_COLOR.not_tested} label="Não testado" />
         </div>
+      </Card>
+
+      <Card>
+        <CardTitle sub={`${controlMatrixSummary.controls || 0} controle(s) · ${controlMatrixSummary.cells || 0} célula(s)`}>Control Matrix</CardTitle>
+        <section style={{ display: "grid", gridTemplateColumns: "minmax(220px,.65fr) minmax(0,1.35fr)", gap: 14 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {controlMatrixFrameworks.length === 0 && <Empty>Nenhuma matriz de controle calculada ainda.</Empty>}
+            {controlMatrixFrameworks.map((fw) => (
+              <div key={fw.framework} style={{ background: TV.surface2, border: `1px solid ${TV.border}`, borderRadius: 10, padding: "10px 12px", display: "flex", flexDirection: "column", gap: 7 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                  <span style={{ fontWeight: 700, fontSize: 12, lineHeight: "16px" }}>{fw.label}</span>
+                  <span style={{ fontWeight: 600, fontSize: 11, lineHeight: "16px", color: TV.muted }}>{fw.tested}/{fw.applicable}</span>
+                </div>
+                <Bar pct={fw.coverage_pct || 0} color={(fw.coverage_pct || 0) >= 60 ? "#1f8a59" : (fw.coverage_pct || 0) > 0 ? "#d4a500" : TV.border} />
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+                  {Object.entries(fw.status_counts || {}).filter(([, count]) => count > 0).map(([status, count]) => (
+                    <span key={status} style={{ fontWeight: 600, fontSize: 10, lineHeight: "13px", color: CONTROL_MATRIX_STATUS_COLOR[status] || TV.muted, border: `1px solid ${TV.border}`, borderRadius: 999, padding: "2px 7px" }}>
+                      {CONTROL_MATRIX_STATUS_LABEL[status] || status} {count}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+          <div style={{ overflowX: "auto" }}>
+            <div style={{ display: "grid", gridTemplateColumns: "92px 160px minmax(220px,1fr) 92px 70px", gap: 10, minWidth: 720, padding: "0 10px 8px", borderBottom: `1px solid ${TV.border}` }}>
+              {["Framework", "Controle", "Técnica", "Estado", "Runs"].map((h) => (
+                <span key={h} style={{ fontWeight: 600, fontSize: 10, lineHeight: "13px", color: TV.label, textTransform: "uppercase", letterSpacing: ".6px" }}>{h}</span>
+              ))}
+            </div>
+            {controlMatrixCells.slice(0, 60).map((cell) => (
+              <div key={`${cell.framework}-${cell.control_id}-${cell.technique_key}`} style={{ display: "grid", gridTemplateColumns: "92px 160px minmax(220px,1fr) 92px 70px", gap: 10, alignItems: "center", minWidth: 720, padding: "9px 10px", borderBottom: `1px solid ${TV.border}` }}>
+                <span style={{ fontWeight: 600, fontSize: 11, lineHeight: "15px", color: TV.text }}>{cell.framework_label}</span>
+                <span style={{ fontWeight: 600, fontSize: 11, lineHeight: "15px", color: TV.text }}>{cell.control_id}</span>
+                <span style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
+                  <span style={{ fontWeight: 600, fontSize: 11, lineHeight: "15px", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{cell.technique_name}</span>
+                  <span style={{ fontWeight: 400, fontSize: 10, lineHeight: "13px", color: TV.label, fontFamily: "var(--font-mono,monospace)" }}>{cell.technique_key}</span>
+                </span>
+                <Pill color={CONTROL_MATRIX_STATUS_COLOR[cell.status] || TV.muted}>{CONTROL_MATRIX_STATUS_LABEL[cell.status] || cell.status}</Pill>
+                <span style={{ fontWeight: 600, fontSize: 11, lineHeight: "15px", color: TV.muted, textAlign: "right" }}>{cell.times_tested || 0}</span>
+              </div>
+            ))}
+            {controlMatrixCells.length > 60 && <div style={{ fontWeight: 400, fontSize: 11, lineHeight: "15px", color: TV.muted, paddingTop: 8 }}>Mostrando 60 de {controlMatrixCells.length} células.</div>}
+          </div>
+        </section>
       </Card>
 
       <section style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) minmax(0,1fr) 300px", gap: 16 }}>

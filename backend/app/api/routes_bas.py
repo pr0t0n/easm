@@ -930,6 +930,7 @@ def control_center(
         "industry_benchmark": resolve_industry_benchmark(sector_key),
         "score_trend": bas_reporting.score_trend(db, **kwargs),
         "category_coverage": bas_reporting.category_coverage(db, **kwargs),
+        "control_matrix": bas_reporting.control_matrix(db, **kwargs),
         "kill_chain_stages": bas_reporting.kill_chain_stages(db, **kwargs),
         "attack_heatmap": bas_reporting.attack_heatmap(db, **kwargs),
         "protection_layers": bas_reporting.protection_layers(db, **kwargs),

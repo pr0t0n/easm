@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from app.services import bas_reporting
+from app.api import routes_bas
 
 
 def _query_chain(rows):
@@ -60,6 +61,24 @@ def test_resolve_segment_tag_none_when_nothing_matches():
 def test_segment_tag_view_unclassified_when_no_tag():
     view = bas_reporting._segment_tag_view(None)
     assert view == {"business_unit": None, "criticality": None, "controls": [], "classified": False}
+
+
+def test_control_center_payload_includes_control_matrix(monkeypatch):
+    db = MagicMock()
+    current_user = SimpleNamespace(is_admin=True)
+    monkeypatch.setattr(bas_reporting, "resilience_score", lambda db, **kwargs: {"score": None})
+    monkeypatch.setattr(bas_reporting, "score_trend", lambda db, **kwargs: [])
+    monkeypatch.setattr(bas_reporting, "category_coverage", lambda db, **kwargs: [])
+    monkeypatch.setattr(bas_reporting, "control_matrix", lambda db, **kwargs: {"summary": {"cells": 1}, "frameworks": [], "cells": []})
+    monkeypatch.setattr(bas_reporting, "kill_chain_stages", lambda db, **kwargs: [])
+    monkeypatch.setattr(bas_reporting, "attack_heatmap", lambda db, **kwargs: [])
+    monkeypatch.setattr(bas_reporting, "protection_layers", lambda db, **kwargs: [])
+    monkeypatch.setattr(bas_reporting, "attack_path_inventory", lambda db, **kwargs: {})
+    monkeypatch.setattr(bas_reporting, "bas_findings_view", lambda db, **kwargs: [])
+
+    payload = routes_bas.control_center(db=db, current_user=current_user)
+
+    assert payload["control_matrix"]["summary"]["cells"] == 1
 
 
 # ── category_coverage ────────────────────────────────────────────────────────
