@@ -1323,7 +1323,30 @@ function CmdbTab({ cc, segments, reload }) {
 
 function VulnsTab({ cc }) {
   const [sevFilter, setSevFilter] = useState("todas");
-  const findings = cc?.findings || [];
+  const cmdbAssets = cc?.cmdb?.cmdb_assets || [];
+  const findings = useMemo(() => {
+    const assets = cmdbAssets.map((asset) => ({
+      ip: String(asset.ip || "").trim(),
+      hostname: String(asset.hostname || "").trim(),
+      domain: String(asset.domain || "").trim(),
+    })).filter((asset) => asset.ip || asset.hostname || asset.domain);
+    if (!assets.length) return [];
+    return (cc?.findings || []).map((finding) => {
+      const haystack = [
+        finding.target,
+        finding.title,
+        finding.category,
+        ...(finding.key_findings || []),
+        finding.proof?.evidence,
+        finding.proof?.target,
+      ].filter(Boolean).join("\n").toLowerCase();
+      const affectedAssets = assets.filter((asset) => {
+        const keys = [asset.ip, asset.hostname, asset.domain].filter(Boolean).map((value) => value.toLowerCase());
+        return keys.some((key) => haystack.includes(key));
+      });
+      return affectedAssets.length ? { ...finding, affected_assets: affectedAssets } : null;
+    }).filter(Boolean);
+  }, [cc?.findings, cmdbAssets]);
   const sevCounts = { critical: 0, high: 0, medium: 0, low: 0 };
   findings.forEach((f) => { if (sevCounts[f.severity] != null) sevCounts[f.severity]++; });
   const filtered = sevFilter === "todas" ? findings : findings.filter((f) => f.severity === sevFilter);
@@ -1339,17 +1362,17 @@ function VulnsTab({ cc }) {
             <span style={{ width: 8, height: 8, borderRadius: 999, background: color }} />{label} {count}
           </button>
         ))}
-        <span style={{ marginLeft: "auto", fontWeight: 400, fontSize: 12, lineHeight: "16px", color: TV.label }}>{filtered.length} achado(s) no filtro atual</span>
+        <span style={{ marginLeft: "auto", fontWeight: 400, fontSize: 12, lineHeight: "16px", color: TV.label }}>{filtered.length} achado(s) ligado(s) ao CMDB</span>
       </section>
 
       <Card>
-        <CardTitle>Achados · CVE &amp; CVSS</CardTitle>
+        <CardTitle sub={`${cmdbAssets.length} ativo(s) no CMDB BAS`}>Achados · CVE &amp; CVSS</CardTitle>
         <div style={{ display: "grid", gridTemplateColumns: "88px minmax(0,1.3fr) minmax(0,0.9fr) 100px 60px 90px 130px", gap: 12, padding: "0 12px 8px", borderBottom: `1px solid ${TV.border}` }}>
           {["Severidade", "Achado", "Alvo", "CVE", "CVSS", "EPSS", "Exploit"].map((h) => (
             <span key={h} style={{ fontWeight: 600, fontSize: 10, lineHeight: "13px", color: TV.label, textTransform: "uppercase", letterSpacing: ".6px" }}>{h}</span>
           ))}
         </div>
-        {filtered.length === 0 && <Empty>Nenhum achado real neste filtro.</Empty>}
+        {filtered.length === 0 && <Empty>Nenhum achado ligado aos ativos atuais do CMDB BAS neste filtro.</Empty>}
         {filtered.map((f) => (
           <div key={f.id} style={{ display: "grid", gridTemplateColumns: "88px minmax(0,1.3fr) minmax(0,0.9fr) 100px 60px 90px 130px", gap: 12, alignItems: "center", padding: "10px 12px", borderBottom: `1px solid ${TV.border}` }}>
             <Pill color={SEVERITY_COLOR[f.severity] || TV.muted}>{f.severity}</Pill>
@@ -1357,7 +1380,10 @@ function VulnsTab({ cc }) {
               <span style={{ fontWeight: 600, fontSize: 12, lineHeight: "16px" }}>{f.title}{f.simulated ? " (simulado)" : ""}</span>
               <span style={{ fontWeight: 400, fontSize: 10.5, lineHeight: "13px", color: TV.label }}>{f.category}</span>
             </div>
-            <span style={{ fontWeight: 400, fontSize: 11.5, lineHeight: "16px", color: TV.text, fontFamily: "var(--font-mono,monospace)" }}>{f.target || "—"}</span>
+            <span style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
+              <span style={{ fontWeight: 600, fontSize: 11.5, lineHeight: "16px", color: TV.text, fontFamily: "var(--font-mono,monospace)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.affected_assets?.map((asset) => asset.ip).join(", ") || "—"}</span>
+              <span style={{ fontWeight: 400, fontSize: 10, lineHeight: "13px", color: TV.label, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.target || "sem alvo bruto"}</span>
+            </span>
             <span style={{ fontWeight: 400, fontSize: 11.5, lineHeight: "16px", color: TV.text, fontFamily: "var(--font-mono,monospace)" }}>{f.cve || "n/a"}</span>
             <span style={{ fontWeight: 600, fontSize: 12, lineHeight: "16px", color: f.cvss >= 9 ? "#d64545" : f.cvss >= 7 ? "#fe7b02" : f.cvss >= 4 ? "#d4a500" : TV.muted }}>{f.cvss ?? "n/a"}</span>
             <span style={{ fontWeight: 400, fontSize: 11, lineHeight: "16px", color: TV.muted }}>{f.epss != null ? `${Math.round(f.epss * 100)}%` : "n/a"}</span>
@@ -1370,13 +1396,20 @@ function VulnsTab({ cc }) {
 
       <Card>
         <CardTitle>Detalhes de exploração</CardTitle>
-        {filtered.length === 0 && <Empty>Nenhum achado real neste filtro.</Empty>}
+        {filtered.length === 0 && <Empty>Nenhum achado ligado aos ativos atuais do CMDB BAS neste filtro.</Empty>}
         {filtered.map((f) => (
           <div key={f.id} style={{ border: `1px solid ${TV.border}`, borderRadius: 10, padding: "12px 14px", display: "grid", gridTemplateColumns: "minmax(0,1.4fr) minmax(0,1fr)", gap: 14 }}>
             <div style={{ display: "flex", flexDirection: "column", gap: 8, minWidth: 0 }}>
               <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
                 <span style={{ fontWeight: 700, fontSize: 13, lineHeight: "16px" }}>{f.title}</span>
                 <span style={{ fontWeight: 600, fontSize: 10, lineHeight: "13px", color: SEVERITY_COLOR[f.severity] }}>{f.severity}</span>
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {(f.affected_assets || []).map((asset) => (
+                  <span key={`${f.id}-${asset.ip}-${asset.hostname}`} style={{ fontWeight: 600, fontSize: 10.5, lineHeight: "14px", color: TV.text, border: `1px solid ${TV.border}`, borderRadius: 999, padding: "2px 7px", fontFamily: "var(--font-mono,monospace)" }}>
+                    {asset.hostname && asset.hostname !== asset.ip ? `${asset.hostname} · ${asset.ip}` : asset.ip}
+                  </span>
+                ))}
               </div>
               <div>
                 <span style={{ fontWeight: 600, fontSize: 10, lineHeight: "13px", color: TV.label, textTransform: "uppercase", letterSpacing: ".5px" }}>O que foi observado</span>
