@@ -1941,6 +1941,39 @@ def bas_watchdog_tick_task():
         db.close()
 
 
+@celery.task(name="bas_scheduler.run_now", queue=PLATFORM_CONTROL_QUEUE)
+def bas_scheduler_run_now_task(schedule_id: int, scan_job_id: int, targets: list, target_was_defaulted: bool, skipped: list):
+    """Runs the dispatch loop a run-now click started (routes_bas.py already
+    created scan_job_id and returned it to the caller) off the request
+    thread -- real Kali tools over the BAS tunnel, one technique at a time,
+    can take minutes, far past any HTTP timeout. On an unhandled exception,
+    marks the shadow ScanJob failed instead of leaving it stuck at "running"
+    forever with no explanation (the same silent-stuck-scan failure mode
+    already fixed for regular pentest scans)."""
+    from app.models.models import BasSchedule, ScanJob
+    from app.services.bas_scheduler import execute_schedule_run
+
+    db: Session = SessionLocal()
+    try:
+        schedule = db.query(BasSchedule).filter(BasSchedule.id == schedule_id).first()
+        if not schedule:
+            return {"error": "schedule_not_found"}
+        try:
+            return execute_schedule_run(db, schedule, scan_job_id, targets, target_was_defaulted, skipped)
+        except Exception as exc:
+            db.rollback()
+            shadow = db.query(ScanJob).filter(ScanJob.id == scan_job_id).first()
+            if shadow:
+                shadow.status = "failed"
+                shadow.current_step = "Erro durante a execução"
+                shadow.last_error = str(exc)[:2000]
+                db.commit()
+            logger.exception("bas_scheduler_run_now_task: schedule=%s scan_job=%s failed", schedule_id, scan_job_id)
+            raise
+    finally:
+        db.close()
+
+
 # Scheduler separado
 # O heartbeat periódico em leque (um por fila de worker) é definido de forma
 # ESTÁTICA em celery_app.beat_schedule (_HEARTBEAT_SCHEDULE). on_after_configure

@@ -10,6 +10,7 @@ import ipaddress
 from datetime import datetime, timedelta
 from typing import Any
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.models.models import BasAgent, BasJob, BasSchedule, Finding, ScanJob
@@ -60,9 +61,6 @@ def _split_targets(target_hint: str, fallback: str) -> list[str]:
     return pieces or [fallback]
 
 
-_MAX_HOST_FANOUT = 256
-
-
 def _cidr_hosts(value: str) -> tuple[list[str] | None, str | None]:
     try:
         network = ipaddress.ip_network(str(value or "").strip(), strict=False)
@@ -70,8 +68,6 @@ def _cidr_hosts(value: str) -> tuple[list[str] | None, str | None]:
         return None, None
     if network.num_addresses <= 1:
         return [str(network.network_address)], None
-    if network.num_addresses > _MAX_HOST_FANOUT:
-        return None, f"network_fanout_too_large:{network.num_addresses}_hosts_max_{_MAX_HOST_FANOUT}"
     return [str(ip) for ip in network.hosts()], None
 
 
@@ -89,6 +85,28 @@ def _targets_for_technique(base_target: str, technique: dict[str, Any], *, targe
     if hosts:
         return hosts, None
     return [base_target], None
+
+
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+_FAILURE_ONLY_MARKERS = (
+    "could not", "timed out", "timeout", "aborting", "connection refused",
+    "no route to host", "connection reset", "unreachable", "failed to connect",
+    "no answer", "host is down", "network is unreachable", "socket error",
+)
+
+
+def _is_failure_only_output(lines: list[str]) -> bool:
+    """True when every substantive line is just the tool reporting it
+    couldn't reach/observe anything (a timeout, a refused connection, an
+    aborted probe) -- never real content about the target. A tool's own
+    "nothing here" banner (e.g. enum4linux-ng's "Could not get NetBIOS
+    names... timed out" / "Aborting remainder of tests since neither SMB
+    nor LDAP are accessible") is not a finding, even though it's the only
+    output the tool produced."""
+    if not lines:
+        return True
+    return all(any(marker in ln.lower() for marker in _FAILURE_ONLY_MARKERS) for ln in lines)
 
 
 def _extract_key_findings(technique_key: str, category: str, result: dict[str, Any]) -> list[str]:
@@ -148,18 +166,38 @@ def _extract_key_findings(technique_key: str, category: str, result: dict[str, A
         return findings[:50]
     if technique_key == "network_share_discovery":
         return [ln for ln in lines if "open" in ln.lower() and "share" in ln.lower()][:15]
+    if technique_key == "smb_enum_enum4linux":
+        # enum4linux-ng marks every line it prints with a colored [+]
+        # (something was actually retrieved), [-] (that specific probe
+        # failed), or [!] (a warning/abort) -- only [+] lines are a real
+        # observation about the target. Without this, an unreachable host's
+        # "[-] Could not get NetBIOS names... [!] Aborting remainder of
+        # tests since neither SMB nor LDAP are accessible" banner (the ONLY
+        # output for the overwhelming majority of hosts in a network sweep)
+        # fell through to the generic fallback below and was surfaced as a
+        # "confirmed" finding for every single one of them (live 2026-08-28).
+        clean_lines = [_ANSI_ESCAPE_RE.sub("", ln) for ln in lines]
+        return [ln for ln in clean_lines if ln.startswith("[+]")][:20]
     if technique_key in ("pipeline_secrets_harvesting", "source_code_secrets_scan"):
         hits = [ln for ln in lines if not ln.upper().startswith("EXIT_CODE") and "no leaks found" not in ln.lower()]
         return hits[:15]
     if technique_key == "netlogon_zerologon_check":
         return [ln for ln in lines if "vulnerable" in ln.lower()][:5]
     if technique_key in ("cloud_directory_scouting", "azure_entra_id_discovery", "m365_tenant_exposure_check"):
-        return [ln for ln in lines if any(token in ln.lower() for token in ("tenant", "federation", "managed", "namespace", "cloud", "microsoft", "azure", "entra"))][:15] or [
-            ln for ln in lines if not ln.upper().startswith("EXIT_CODE")
-        ][:5]
+        cloud_hits = [ln for ln in lines if any(token in ln.lower() for token in ("tenant", "federation", "managed", "namespace", "cloud", "microsoft", "azure", "entra"))][:15]
+        if cloud_hits:
+            return cloud_hits
+        fallback_tail = [ln for ln in lines if not ln.upper().startswith("EXIT_CODE")][:5]
+        return [] if _is_failure_only_output(fallback_tail) else fallback_tail
     # Generic fallback: last few non-boilerplate lines, so the report never
-    # shows literally nothing for a technique with no dedicated extractor.
-    return [ln for ln in lines if not ln.upper().startswith("EXIT_CODE")][-5:]
+    # shows literally nothing for a technique with no dedicated extractor --
+    # but never when those lines are just the tool reporting it couldn't
+    # reach/observe anything at all (a timeout/refused/aborted probe is not
+    # itself a finding about the target -- before this check it was
+    # surfaced as one for every unreachable host in a network-wide sweep,
+    # live 2026-08-28).
+    tail = [ln for ln in lines if not ln.upper().startswith("EXIT_CODE")][-5:]
+    return [] if _is_failure_only_output(tail) else tail
 
 
 def _derive_severity(technique_key: str, key_findings: list[str]) -> str:
@@ -187,6 +225,8 @@ def _derive_severity(technique_key: str, key_findings: list[str]) -> str:
         return "low"  # real reachability/exposure, not itself a vulnerability
     if technique_key == "safe_credential_checks":
         return "medium"
+    if technique_key == "smb_enum_enum4linux":
+        return "medium"  # anonymous/null-session SMB or AD enumeration actually succeeded
     if technique_key == "controlled_exploit_validation":
         return "medium"
     if technique_key in ("cloud_directory_scouting", "azure_entra_id_discovery", "m365_tenant_exposure_check"):
@@ -218,6 +258,22 @@ def _finding_from_job_result(
     job_result = dict(result)
     job_result["bas_proof"] = proof
     job.result = job_result
+    if not key_findings:
+        # No real content in, no Finding out. Before this gate, EVERY
+        # dispatch materialized a "BAS: <technique>" Finding regardless of
+        # whether anything was observed -- a host-based technique fanned out
+        # over a large network turned that into hundreds of info-severity
+        # rows for plain connection failures/timeouts (key_findings always
+        # empty for those), drowning out the real signal in the
+        # Vulnerabilidades tab and reading like a scan execution log rather
+        # than actual findings (user report, 2026-08-28). A stub agent's
+        # key_findings is always [] by construction (never allowed to claim
+        # a real observation), so this also means stub dispatches no longer
+        # produce placeholder Findings -- the BasJob row remains the
+        # execution record either way; only real, non-empty signal
+        # (open ports found, secrets found, vulnerable state confirmed, etc.)
+        # becomes a Finding now.
+        return None
     finding = Finding(
         scan_job_id=job.scan_job_id,
         title=f"BAS: {technique['display_name']}" + (" (simulado)" if is_stub else ""),
@@ -254,17 +310,12 @@ def _finding_from_job_result(
     return finding
 
 
-def fire_schedule(db: Session, schedule: BasSchedule) -> dict[str, Any]:
-    """Runs every technique in a schedule right now: creates a shadow
-    ScanJob, dispatches each authorized technique through bas_dispatcher,
-    persists the (stub) result as a Finding, and updates last_run_at."""
-    agent = db.query(BasAgent).filter(BasAgent.id == schedule.agent_id).first()
-    if not agent:
-        return {"error": "agent_not_found"}
-
-    job_ids: list[int] = []
+def _resolve_run_targets(schedule: BasSchedule, agent: BasAgent) -> dict[str, Any]:
+    """Target-resolution logic shared by a fresh run (prepare_schedule_run)
+    and a resumed one (resume_schedule_run) -- deterministic from the
+    schedule's target_hint / the agent's self-reported network, so there's
+    nothing to persist for a resume to recover; recomputing it is enough."""
     skipped: list[dict[str, str]] = []
-
     target_was_defaulted = not bool(schedule.target_hint and schedule.target_hint.strip())
     if not target_was_defaulted:
         targets = _split_targets(schedule.target_hint, agent.hostname or "internal-target")
@@ -280,11 +331,29 @@ def fire_schedule(db: Session, schedule: BasSchedule) -> dict[str, Any]:
                 "technique_key": technique_key, "target": "",
                 "reason": "agent_network_unknown_send_a_heartbeat_first",
             })
+        return {"targets": None, "target_was_defaulted": target_was_defaulted, "skipped": skipped}
+    return {"targets": targets, "target_was_defaulted": target_was_defaulted, "skipped": skipped}
+
+
+def prepare_schedule_run(db: Session, schedule: BasSchedule) -> dict[str, Any]:
+    """First (fast, synchronous) half of firing a schedule: resolves targets
+    and creates+commits the shadow ScanJob, so an HTTP caller (run-now) gets
+    a scan_job_id back immediately instead of blocking on the actual
+    dispatch loop below, which can take minutes (real Kali tools over the
+    tunnel, one technique at a time). execute_schedule_run does the rest,
+    off the request thread."""
+    agent = db.query(BasAgent).filter(BasAgent.id == schedule.agent_id).first()
+    if not agent:
+        return {"error": "agent_not_found"}
+
+    resolved = _resolve_run_targets(schedule, agent)
+    if resolved["targets"] is None:
         schedule.last_run_at = datetime.now()
         db.commit()
-        return {"scan_job_id": None, "job_ids": [], "skipped": skipped}
+        return {"scan_job_id": None, "job_ids": [], "skipped": resolved["skipped"], "queued": False}
 
     shadow = _create_shadow_scan_job(db, schedule, agent)
+    shadow.current_step = "Preparando execução"
     # Commit (not just flush) before any dispatch: resolve_authorized_scope_
     # for_dispatch opens its OWN SessionLocal() to read this ScanJob by id --
     # a separate connection can't see a row this transaction has only
@@ -292,7 +361,87 @@ def fire_schedule(db: Session, schedule: BasSchedule) -> dict[str, Any]:
     # required" until this row is actually committed.
     db.commit()
 
+    return {
+        "scan_job_id": shadow.id,
+        "targets": resolved["targets"],
+        "target_was_defaulted": resolved["target_was_defaulted"],
+        "skipped": resolved["skipped"],
+        "queued": True,
+    }
+
+
+def resume_schedule_run(db: Session, schedule: BasSchedule, scan_job_id: int) -> dict[str, Any]:
+    """Resumes a stopped run instead of starting a new one: reuses the SAME
+    shadow ScanJob (its BasJob history stays attached to one scan_job_id --
+    a resume is the same test continuing, not a new one) and flips it back
+    to "running". execute_schedule_run's own per-dispatch idempotency check
+    (skip a (technique, target) pair that already has a terminal BasJob for
+    this scan_job_id) is what actually avoids redoing work already done;
+    this only re-arms the shadow job and re-resolves targets."""
+    agent = db.query(BasAgent).filter(BasAgent.id == schedule.agent_id).first()
+    shadow = db.query(ScanJob).filter(ScanJob.id == scan_job_id).first()
+    if not agent or not shadow:
+        return {"error": "agent_or_shadow_not_found"}
+    if str(shadow.status or "").lower() != "stopped":
+        return {"error": "not_stopped"}
+
+    resolved = _resolve_run_targets(schedule, agent)
+    if resolved["targets"] is None:
+        return {"error": "agent_network_unknown", "skipped": resolved["skipped"]}
+
+    shadow.status = "running"
+    shadow.current_step = "Retomando execução…"
+    db.commit()
+
+    return {
+        "scan_job_id": shadow.id,
+        "targets": resolved["targets"],
+        "target_was_defaulted": resolved["target_was_defaulted"],
+        "skipped": resolved["skipped"],
+        "queued": True,
+    }
+
+
+def _run_was_stopped(db: Session, scan_job_id: int) -> bool:
+    """Cooperative-cancellation check for execute_schedule_run's dispatch
+    loop. A raw scalar read against the row -- not the already-loaded
+    `shadow` ORM object -- so an UPDATE committed by the stop endpoint's own
+    request/session is seen immediately instead of sitting behind
+    SQLAlchemy's identity map for this long-lived session."""
+    row = db.execute(text("SELECT status FROM scan_jobs WHERE id = :id"), {"id": scan_job_id}).first()
+    return bool(row) and str(row[0]) == "stopped"
+
+
+def execute_schedule_run(
+    db: Session,
+    schedule: BasSchedule,
+    scan_job_id: int,
+    targets: list[str],
+    target_was_defaulted: bool,
+    skipped: list[dict[str, str]],
+) -> dict[str, Any]:
+    """Second half of firing a schedule: dispatches each authorized technique
+    through bas_dispatcher against the shadow ScanJob `scan_job_id` already
+    created by prepare_schedule_run, persists the (stub) result as a
+    Finding, and updates last_run_at. Runs off the request thread (celery)
+    when triggered from run-now, so it also keeps `scan_job_id`'s
+    current_step/mission_progress current as it goes -- the same fields
+    GET /api/scans/{id}/status already exposes for regular pentest scans --
+    so a poller can show which technique/target is running right now and
+    roughly how far along the run is."""
+    agent = db.query(BasAgent).filter(BasAgent.id == schedule.agent_id).first()
+    shadow = db.query(ScanJob).filter(ScanJob.id == scan_job_id).first()
+    if not agent or not shadow:
+        return {"error": "agent_or_shadow_not_found"}
+
+    job_ids: list[int] = []
+    total_units = max(1, len(targets) * max(1, len(schedule.technique_keys)))
+    completed_units = 0
+    cancelled = False
+
     for target in targets:
+        if cancelled:
+            break
         run_targets = [target]
         selected_techniques = [get_technique(key) for key in schedule.technique_keys]
         all_host_based = bool(selected_techniques) and all(
@@ -306,15 +455,26 @@ def fire_schedule(db: Session, schedule: BasSchedule) -> dict[str, Any]:
             if target_error:
                 for technique_key in schedule.technique_keys:
                     skipped.append({"technique_key": technique_key, "target": target, "reason": target_error})
+                completed_units += len(schedule.technique_keys)
                 continue
             if hosts:
                 run_targets = hosts
 
         for run_target in run_targets:
+            if cancelled:
+                break
             for technique_key in schedule.technique_keys:
+                if _run_was_stopped(db, shadow.id):
+                    cancelled = True
+                    break
                 technique = get_technique(technique_key)
+                shadow.current_step = f"{technique['display_name'] if technique else technique_key} → {run_target}"
+                shadow.mission_progress = min(99, int(round(completed_units / total_units * 100)))
+                db.commit()
+
                 if technique is None:
                     skipped.append({"technique_key": technique_key, "target": run_target, "reason": "unknown_technique"})
+                    completed_units += 1
                     continue
                 decision = check_bas_authorization(schedule, technique_key)
                 if not decision["allowed"]:
@@ -323,6 +483,7 @@ def fire_schedule(db: Session, schedule: BasSchedule) -> dict[str, Any]:
                         "bas_scheduler: skipped technique=%s target=%s reason=%s schedule=%s",
                         technique_key, run_target, decision["reason"], schedule.id,
                     )
+                    completed_units += 1
                     continue
 
                 dispatch_targets, target_error = _targets_for_technique(
@@ -330,10 +491,28 @@ def fire_schedule(db: Session, schedule: BasSchedule) -> dict[str, Any]:
                 )
                 if target_error:
                     skipped.append({"technique_key": technique_key, "target": run_target, "reason": target_error})
+                    completed_units += 1
                     continue
 
                 stop_current_target = False
                 for dispatch_target in dispatch_targets:
+                    if _run_was_stopped(db, shadow.id):
+                        cancelled = True
+                        break
+                    # Resume idempotency: a resumed run recomputes the same
+                    # (technique, host) sequence from scratch (nothing about
+                    # it is persisted beyond the BasJob rows already
+                    # created), so anything with a terminal BasJob already
+                    # on this exact scan_job_id was already dispatched --
+                    # skip it instead of doing it twice.
+                    already_done = db.query(BasJob.id).filter(
+                        BasJob.scan_job_id == shadow.id,
+                        BasJob.technique_key == technique_key,
+                        BasJob.target == dispatch_target,
+                        BasJob.status.in_(("completed", "failed", "skipped")),
+                    ).first()
+                    if already_done:
+                        continue
                     job = BasJob(
                         schedule_id=schedule.id,
                         agent_id=agent.id,
@@ -388,14 +567,43 @@ def fire_schedule(db: Session, schedule: BasSchedule) -> dict[str, Any]:
                         )
                         stop_current_target = True
                         break
-                if stop_current_target:
+                completed_units += 1
+                if stop_current_target or cancelled:
                     break
+            if cancelled:
+                break
+
+    if cancelled:
+        # Deliberately doesn't overwrite shadow.status: the stop endpoint
+        # (routes_bas.py) already set it to "stopped" -- that's the signal
+        # this loop reacted to, and it stays the terminal status here so a
+        # cancelled run is never confused with a completed one.
+        shadow.current_step = "Interrompido pelo usuário"
+        schedule.last_run_at = datetime.now()
+        db.commit()
+        return {"scan_job_id": shadow.id, "job_ids": job_ids, "skipped": skipped, "cancelled": True}
 
     shadow.status = "completed"
+    shadow.mission_progress = 100
+    shadow.current_step = "Concluído"
     schedule.last_run_at = datetime.now()
     db.commit()
 
     return {"scan_job_id": shadow.id, "job_ids": job_ids, "skipped": skipped}
+
+
+def fire_schedule(db: Session, schedule: BasSchedule) -> dict[str, Any]:
+    """Synchronous convenience wrapper: prepares and executes a run in one
+    call. Used by the celery-beat periodic tick (bas_scheduler_tick), which
+    already runs off any HTTP request thread, so there's no need to split it
+    into prepare/execute like run-now (routes_bas.py) does."""
+    prepared = prepare_schedule_run(db, schedule)
+    if prepared.get("error") or not prepared.get("queued"):
+        return prepared
+    return execute_schedule_run(
+        db, schedule, prepared["scan_job_id"], prepared["targets"],
+        prepared["target_was_defaulted"], prepared["skipped"],
+    )
 
 
 _FREQUENCY_MINUTES = {

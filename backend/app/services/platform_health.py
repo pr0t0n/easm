@@ -238,9 +238,18 @@ def run_platform_self_heal(db=None, *, source: str = "auto", force: bool = False
             # cutoff em UTC-naive (a coluna updated_at é UTC-naive); evita o desvio
             # de fuso de comparar com now() do postgres (que está em -03).
             cutoff = datetime.now() - timedelta(seconds=_GUARD_LIMBO_SECONDS)
+            # mode <> 'bas': a BAS shadow ScanJob is driven exclusively by
+            # bas_scheduler.execute_schedule_run, never by the regular
+            # unit/scheduled pipeline this guard redrives orphans into --
+            # without this exclusion, a BAS run sitting on one slow
+            # host-by-host technique for a few minutes looks exactly like an
+            # abandoned regular scan, and this guard launches the full
+            # 22-phase offensive_operator pipeline on top of it (seen live
+            # 2026-08-28: scan #109 got a real P01-P22 run racing its own
+            # BAS dispatch loop, both writing current_step/mission_progress).
             rows = db.execute(_t(
                 "SELECT id FROM scan_jobs WHERE status IN ('queued','running','retrying') "
-                "AND updated_at < :cutoff ORDER BY id"
+                "AND COALESCE(mode, '') <> 'bas' AND updated_at < :cutoff ORDER BY id"
             ), {"cutoff": cutoff}).fetchall()
             # inspeciona as tasks ativas UMA vez (caro) e reusa para todos os scans.
             active_ids, inspect_ok = active_scan_task_ids() if rows else (set(), True)

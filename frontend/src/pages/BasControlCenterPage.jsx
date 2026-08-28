@@ -11,7 +11,7 @@
 // state -- no mockup constants, no fabricated "detected" outcome, no
 // invented industry-median benchmark. See the plan's "Report back to the
 // user" section for the one deliberately-dropped mockup element.
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import client from "../api/client";
 import { authStore } from "../store/auth";
@@ -19,6 +19,8 @@ import { toastError, toastSuccess } from "../utils/toast";
 import { TV, SEVERITY_COLOR, RISK_COLOR, OUTCOME_COLOR } from "../theme/basDark";
 
 const HEARTBEAT_INTERVAL_MS = 60_000;
+const RUN_POLL_INTERVAL_MS = 2_000;
+const RUN_TERMINAL_STATUSES = new Set(["completed", "done", "finished", "failed", "stopped"]);
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
 
 function isCallbackHostStale(cfg, browserHost) {
@@ -600,6 +602,54 @@ function DeployTab({ isAdmin, agents, techniques, chains, schedules, reload }) {
   };
   const [form, setForm] = useState(emptyForm);
   const [editingId, setEditingId] = useState(null);
+  const [targetError, setTargetError] = useState("");
+
+  const [runs, setRuns] = useState({}); // schedule_id -> { scanJobId, status, currentStep, missionProgress }
+  const pollTimers = useRef({}); // schedule_id -> interval id
+
+  useEffect(() => () => { Object.values(pollTimers.current).forEach(clearInterval); }, []);
+
+  const pollRun = useCallback((scheduleId, scanJobId) => {
+    clearInterval(pollTimers.current[scheduleId]);
+    const tick = async () => {
+      try {
+        const { data } = await client.get(`/api/scans/${scanJobId}/status`);
+        setRuns((prev) => ({
+          ...prev,
+          [scheduleId]: { scanJobId, status: data.status, currentStep: data.current_step, missionProgress: data.mission_progress },
+        }));
+        if (RUN_TERMINAL_STATUSES.has(String(data.status || "").toLowerCase())) {
+          clearInterval(pollTimers.current[scheduleId]);
+          delete pollTimers.current[scheduleId];
+          await reload();
+        }
+      } catch {
+        clearInterval(pollTimers.current[scheduleId]);
+        delete pollTimers.current[scheduleId];
+      }
+    };
+    tick();
+    pollTimers.current[scheduleId] = setInterval(tick, RUN_POLL_INTERVAL_MS);
+  }, [reload]);
+
+  // Rehydrates "still running" on mount/return -- runNow()'s polling only
+  // lives in this component's in-memory state, so navigating away from the
+  // BAS screen and back (or a plain reload) during a run made the schedule
+  // row look stopped even though it was still actively dispatching
+  // (2026-08-28). last_scan_status comes from the shadow ScanJob itself,
+  // which stays "running" for the run's whole duration -- unlike the last
+  // individual BasJob's status, which flips per host/technique.
+  const rehydrated = useRef(new Set());
+  useEffect(() => {
+    for (const s of schedules) {
+      if (!s.last_scan_job_id || rehydrated.current.has(s.last_scan_job_id)) continue;
+      if (pollTimers.current[s.id]) continue;
+      if (!RUN_TERMINAL_STATUSES.has(String(s.last_scan_status || "").toLowerCase())) {
+        rehydrated.current.add(s.last_scan_job_id);
+        pollRun(s.id, s.last_scan_job_id);
+      }
+    }
+  }, [schedules, pollRun]);
 
   const [installConfig, setInstallConfig] = useState(null);
   const [newToken, setNewToken] = useState(null);
@@ -636,6 +686,7 @@ function DeployTab({ isAdmin, agents, techniques, chains, schedules, reload }) {
 
   const submit = async (e) => {
     e.preventDefault();
+    setTargetError("");
     try {
       if (editingId) { await client.patch(`/api/bas/schedules/${editingId}`, form); toastSuccess("Agendamento BAS atualizado."); }
       else { await client.post("/api/bas/schedules", form); toastSuccess("Agendamento BAS criado."); }
@@ -643,7 +694,13 @@ function DeployTab({ isAdmin, agents, techniques, chains, schedules, reload }) {
       await reload();
     } catch (error) {
       const detail = error?.response?.data?.detail;
-      toastError(typeof detail === "string" ? detail : "Falha ao salvar agendamento BAS.");
+      const message = typeof detail === "string" ? detail : "Falha ao salvar agendamento BAS.";
+      // This specific validation is about the "Alvo" field itself (a
+      // selected technique needs an explicit URL/domain and target_hint is
+      // blank) -- a toast alone disappears and isn't tied to the field that
+      // caused it, so it's shown inline next to the field's description too.
+      if (message.includes("target_hint")) setTargetError(message);
+      toastError(message);
     }
   };
   const editRow = (row) => {
@@ -662,11 +719,55 @@ function DeployTab({ isAdmin, agents, techniques, chains, schedules, reload }) {
     catch (error) { toastError(error?.response?.data?.detail || "Falha ao excluir agendamento."); }
   };
   const runNow = async (id) => {
+    setRuns((prev) => ({ ...prev, [id]: { scanJobId: null, status: "starting", currentStep: "", missionProgress: 0 } }));
     try {
       const { data } = await client.post(`/api/bas/schedules/${id}/run-now`);
-      toastSuccess(`Execução disparada · ${(data?.job_ids || []).length} job(s)`);
-      await reload();
-    } catch (error) { toastError(error?.response?.data?.detail?.message || "Falha ao executar agora."); }
+      if (data?.queued && data?.scan_job_id) {
+        toastSuccess("Execução iniciada — acompanhe o progresso na lista.");
+        pollRun(id, data.scan_job_id);
+      } else {
+        // Not queued: every technique was skipped up front (e.g. agent
+        // network unknown) -- nothing is running, so there's no run to poll.
+        setRuns((prev) => { const next = { ...prev }; delete next[id]; return next; });
+        toastError(`Nenhuma técnica executada · ${(data?.skipped || []).length} pulada(s)`);
+        await reload();
+      }
+    } catch (error) {
+      setRuns((prev) => { const next = { ...prev }; delete next[id]; return next; });
+      toastError(error?.response?.data?.detail?.message || "Falha ao executar agora.");
+    }
+  };
+
+  const stopRun = async (id) => {
+    try {
+      await client.post(`/api/bas/schedules/${id}/stop`);
+      toastSuccess("Interrompendo o teste…");
+      // The backend flip is cooperative (the dispatch loop notices on its
+      // next check, not instantly) -- keep polling instead of clearing
+      // `runs` here, so the row stays on "executando…" until the in-flight
+      // status genuinely reaches "stopped" and pollRun's own terminal check
+      // takes it from there.
+    } catch (error) {
+      toastError(error?.response?.data?.detail || "Falha ao interromper o teste.");
+    }
+  };
+
+  const continueRun = async (id) => {
+    setRuns((prev) => ({ ...prev, [id]: { scanJobId: null, status: "starting", currentStep: "", missionProgress: 0 } }));
+    try {
+      const { data } = await client.post(`/api/bas/schedules/${id}/resume`);
+      if (data?.queued && data?.scan_job_id) {
+        toastSuccess("Retomando o que faltava do teste…");
+        pollRun(id, data.scan_job_id);
+      } else {
+        setRuns((prev) => { const next = { ...prev }; delete next[id]; return next; });
+        toastError(`Nada retomado · ${(data?.skipped || []).length} pulada(s)`);
+        await reload();
+      }
+    } catch (error) {
+      setRuns((prev) => { const next = { ...prev }; delete next[id]; return next; });
+      toastError(error?.response?.data?.detail || "Falha ao continuar o teste.");
+    }
   };
 
   const generateToken = async () => {
@@ -764,8 +865,12 @@ function DeployTab({ isAdmin, agents, techniques, chains, schedules, reload }) {
               </select>
             </Field>
             <Field label="Alvo (host/IP, CIDR, URL ou domínio)">
-              <textarea className="ops-tv-select" rows={2} style={{ ...fieldStyle, resize: "vertical" }} value={form.target_hint} onChange={(e) => setForm({ ...form, target_hint: e.target.value })}
+              <textarea className="ops-tv-select" rows={2} style={{ ...fieldStyle, resize: "vertical", ...(targetError ? { borderColor: "#d64545" } : {}) }} value={form.target_hint}
+                onChange={(e) => { setForm({ ...form, target_hint: e.target.value }); if (targetError) setTargetError(""); }}
                 placeholder="Deixe em branco para usar a máscara de rede do agente. Nunca use 127.0.0.1." />
+              {targetError && (
+                <span style={{ fontWeight: 500, fontSize: 11, lineHeight: "15px", color: "#d64545" }}>{targetError}</span>
+              )}
             </Field>
             <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: 14, border: `1px solid ${TV.border}`, borderRadius: 10, background: TV.surface2 }}>
               <span style={{ fontWeight: 600, fontSize: 11, lineHeight: "14px", color: TV.muted, letterSpacing: ".6px", textTransform: "uppercase" }}>Escopo — nível de risco autorizado</span>
@@ -932,24 +1037,44 @@ function DeployTab({ isAdmin, agents, techniques, chains, schedules, reload }) {
       <Card>
         <CardTitle sub={`${schedules.length} configurado(s)`}>Agendamentos</CardTitle>
         {schedules.length === 0 && <Empty>Nenhum agendamento BAS configurado.</Empty>}
-        {schedules.map((s) => (
-          <div key={s.id} style={{ display: "grid", gridTemplateColumns: "minmax(0,1.5fr) 110px 130px 130px 190px", gap: 12, alignItems: "center", padding: 12, borderBottom: `1px solid ${TV.border}` }}>
-            <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
-              <span style={{ fontWeight: 600, fontSize: 13, lineHeight: "16px" }}>{s.name || "sem nome"}</span>
-              <span style={{ fontWeight: 400, fontSize: 10.5, lineHeight: "14px", color: TV.label }}>{(s.technique_keys || []).length} técnica(s) · {s.target_hint || "rede do agente"}</span>
+        {schedules.map((s) => {
+          const run = runs[s.id];
+          const isActive = run && !RUN_TERMINAL_STATUSES.has(String(run.status || "").toLowerCase());
+          return (
+          <div key={s.id} style={{ display: "flex", flexDirection: "column", gap: 8, padding: 12, borderBottom: `1px solid ${TV.border}` }}>
+            <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1.5fr) 110px 130px 130px 190px", gap: 12, alignItems: "center" }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
+                <span style={{ fontWeight: 600, fontSize: 13, lineHeight: "16px" }}>{s.name || "sem nome"}</span>
+                <span style={{ fontWeight: 400, fontSize: 10.5, lineHeight: "14px", color: TV.label }}>{(s.technique_keys || []).length} técnica(s) · {s.target_hint || "rede do agente"}</span>
+              </div>
+              <Pill color={RISK_TIER_META[s.max_authorized_risk_tier]?.color || TV.muted}>{s.max_authorized_risk_tier}</Pill>
+              <span style={{ fontWeight: 400, fontSize: 11.5, lineHeight: "16px", color: TV.text }}>{FREQ_LABEL[s.frequency]} · {s.run_time}</span>
+              <span style={{ fontWeight: 600, fontSize: 11, lineHeight: "16px", color: isActive ? "#4b73ff" : s.last_scan_status === "stopped" ? "#fe7b02" : s.last_job_status === "completed" ? "#1f8a59" : s.last_job_status === "failed" ? "#d64545" : TV.muted }}>
+                {isActive ? "executando…" : s.last_scan_status === "stopped" ? "interrompido" : s.last_job_status ? `último: ${s.last_job_status}` : "nunca executado"}
+              </span>
+              <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
+                <button className="btn btn-primary" style={{ padding: "6px 10px", fontSize: 12, opacity: isActive ? 0.6 : 1, cursor: isActive ? "default" : "pointer" }} disabled={isActive} onClick={() => runNow(s.id)}>
+                  {isActive ? `Executando… ${run.missionProgress ?? 0}%` : "Executar agora"}
+                </button>
+                {isActive && (
+                  <button className="btn" style={{ padding: "6px 10px", fontSize: 12, background: "transparent", border: "1px solid #d64545", color: "#d64545" }} onClick={() => stopRun(s.id)}>Parar</button>
+                )}
+                {!isActive && s.last_scan_status === "stopped" && (
+                  <button className="btn" style={{ padding: "6px 10px", fontSize: 12, background: "transparent", border: "1px solid #fe7b02", color: "#fe7b02" }} onClick={() => continueRun(s.id)}>Continuar</button>
+                )}
+                <button className="btn" style={{ padding: "6px 10px", fontSize: 12, background: "transparent", border: `1px solid ${TV.border}`, color: TV.text }} onClick={() => editRow(s)}>Editar</button>
+                <button className="btn" style={{ padding: "6px 10px", fontSize: 12, background: "transparent", border: "1px solid #d64545", color: "#d64545" }} onClick={() => deleteRow(s.id)}>Excluir</button>
+              </div>
             </div>
-            <Pill color={RISK_TIER_META[s.max_authorized_risk_tier]?.color || TV.muted}>{s.max_authorized_risk_tier}</Pill>
-            <span style={{ fontWeight: 400, fontSize: 11.5, lineHeight: "16px", color: TV.text }}>{FREQ_LABEL[s.frequency]} · {s.run_time}</span>
-            <span style={{ fontWeight: 400, fontSize: 11, lineHeight: "16px", color: s.last_job_status === "completed" ? "#1f8a59" : s.last_job_status === "failed" ? "#d64545" : TV.muted }}>
-              {s.last_job_status ? `último: ${s.last_job_status}` : "nunca executado"}
-            </span>
-            <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
-              <button className="btn btn-primary" style={{ padding: "6px 10px", fontSize: 12 }} onClick={() => runNow(s.id)}>Executar agora</button>
-              <button className="btn" style={{ padding: "6px 10px", fontSize: 12, background: "transparent", border: `1px solid ${TV.border}`, color: TV.text }} onClick={() => editRow(s)}>Editar</button>
-              <button className="btn" style={{ padding: "6px 10px", fontSize: 12, background: "transparent", border: "1px solid #d64545", color: "#d64545" }} onClick={() => deleteRow(s.id)}>Excluir</button>
-            </div>
+            {isActive && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <Bar pct={run.missionProgress ?? 0} color="#4b73ff" />
+                <span style={{ fontWeight: 400, fontSize: 10.5, lineHeight: "14px", color: TV.label }}>{run.currentStep || "iniciando…"}</span>
+              </div>
+            )}
           </div>
-        ))}
+          );
+        })}
       </Card>
     </div>
   );
@@ -1150,12 +1275,27 @@ function VulnsTab({ cc }) {
         {filtered.length === 0 && <Empty>Nenhum achado real neste filtro.</Empty>}
         {filtered.map((f) => (
           <div key={f.id} style={{ border: `1px solid ${TV.border}`, borderRadius: 10, padding: "12px 14px", display: "grid", gridTemplateColumns: "minmax(0,1.4fr) minmax(0,1fr)", gap: 14 }}>
-            <div style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 0 }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, minWidth: 0 }}>
               <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
                 <span style={{ fontWeight: 700, fontSize: 13, lineHeight: "16px" }}>{f.title}</span>
                 <span style={{ fontWeight: 600, fontSize: 10, lineHeight: "13px", color: SEVERITY_COLOR[f.severity] }}>{f.severity}</span>
               </div>
-              <span style={{ fontWeight: 400, fontSize: 11, lineHeight: "15px", color: TV.muted }}>{f.recommendation || "Sem recomendação registrada para este achado."}</span>
+              <div>
+                <span style={{ fontWeight: 600, fontSize: 10, lineHeight: "13px", color: TV.label, textTransform: "uppercase", letterSpacing: ".5px" }}>O que foi observado</span>
+                {(f.key_findings || []).length > 0 ? (
+                  <ul style={{ margin: "4px 0 0", paddingLeft: 16, display: "flex", flexDirection: "column", gap: 2 }}>
+                    {f.key_findings.map((line, idx) => (
+                      <li key={idx} style={{ fontWeight: 400, fontSize: 11, lineHeight: "15px", color: TV.text, fontFamily: "var(--font-mono,monospace)" }}>{line}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <div style={{ fontWeight: 400, fontSize: 11, lineHeight: "15px", color: TV.muted }}>Sem detalhes de evidência registrados para este achado.</div>
+                )}
+              </div>
+              <div>
+                <span style={{ fontWeight: 600, fontSize: 10, lineHeight: "13px", color: TV.label, textTransform: "uppercase", letterSpacing: ".5px" }}>Recomendação</span>
+                <div style={{ fontWeight: 400, fontSize: 11, lineHeight: "15px", color: TV.muted }}>{f.recommendation || "Sem recomendação registrada para este achado."}</div>
+              </div>
             </div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0,1fr))", gap: 8 }}>
               <MiniStat label="Verificação" value={f.proof_valid ? "Confirmado" : (f.proof_status || "pendente")} />

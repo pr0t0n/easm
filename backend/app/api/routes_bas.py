@@ -616,6 +616,8 @@ def _schedule_requires_target_hint(technique_keys: list[str]) -> bool:
 
 def _schedule_to_dict(s: BasSchedule, db: Session | None = None) -> dict[str, Any]:
     last_job = None
+    last_scan_job_id = None
+    last_scan_status = None
     if db is not None:
         last_job = (
             db.query(BasJob)
@@ -623,6 +625,21 @@ def _schedule_to_dict(s: BasSchedule, db: Session | None = None) -> dict[str, An
             .order_by(BasJob.created_at.desc())
             .first()
         )
+        # last_job.status alone is a per-(technique,host) dispatch, not the
+        # whole run -- a host-fanout technique flips it between
+        # dispatched_to_kali/completed/failed every second while the run as
+        # a whole is still very much in progress (a user navigating away
+        # mid-run and back saw the schedule row read as if it had stopped,
+        # 2026-08-28). The shadow ScanJob's OWN status is what stays
+        # "running" for the run's entire duration -- expose it so the
+        # frontend can rehydrate "still running" on page load/return
+        # instead of relying on an in-memory click-to-poll flag that a
+        # remount always loses.
+        if last_job and last_job.scan_job_id:
+            scan_job = db.query(ScanJob).filter(ScanJob.id == last_job.scan_job_id).first()
+            if scan_job:
+                last_scan_job_id = scan_job.id
+                last_scan_status = scan_job.status
     return {
         "id": s.id, "name": s.name, "agent_id": s.agent_id, "target_hint": s.target_hint,
         "technique_keys": s.technique_keys, "chain_key": s.chain_key, "stop_on_failure": s.stop_on_failure,
@@ -641,6 +658,8 @@ def _schedule_to_dict(s: BasSchedule, db: Session | None = None) -> dict[str, An
         "last_job_error": (last_job.last_error if last_job else None) or (
             (last_job.result or {}).get("dispatch_error") if last_job else None
         ),
+        "last_scan_job_id": last_scan_job_id,
+        "last_scan_status": last_scan_status,
     }
 
 
@@ -787,7 +806,14 @@ def delete_schedule(schedule_id: int, db: Session = Depends(get_db), current_use
 
 @router.post("/schedules/{schedule_id}/run-now")
 def run_schedule_now(schedule_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    from app.services.bas_scheduler import fire_schedule
+    # Only prepares the run here (resolves targets, creates the shadow
+    # ScanJob) and hands the actual dispatch loop to a celery task -- real
+    # Kali tools over the BAS tunnel run one technique at a time and can
+    # take minutes, far past what an HTTP request should block on. The
+    # frontend polls GET /api/scans/{scan_job_id}/status (queued=True below)
+    # to show live status/phase/progress instead of waiting on this response.
+    from app.services.bas_scheduler import prepare_schedule_run
+    from app.workers.tasks import bas_scheduler_run_now_task
 
     schedule = apply_company_scope(db.query(BasSchedule), current_user, BasSchedule).filter(BasSchedule.id == schedule_id).first()
     if not schedule:
@@ -801,8 +827,103 @@ def run_schedule_now(schedule_id: int, db: Session = Depends(get_db), current_us
     if rejected:
         raise HTTPException(status_code=403, detail={"message": "Uma ou mais técnicas não autorizadas", "rejected": rejected})
 
-    result = fire_schedule(db, schedule)
-    return result
+    prepared = prepare_schedule_run(db, schedule)
+    if prepared.get("error"):
+        raise HTTPException(status_code=404, detail="Agente não encontrado")
+    if not prepared.get("queued"):
+        return prepared
+
+    bas_scheduler_run_now_task.delay(
+        schedule.id, prepared["scan_job_id"], prepared["targets"],
+        prepared["target_was_defaulted"], prepared["skipped"],
+    )
+    return {"scan_job_id": prepared["scan_job_id"], "queued": True, "skipped": prepared["skipped"]}
+
+
+@router.post("/schedules/{schedule_id}/stop")
+def stop_schedule_run(schedule_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Cancels the schedule's currently in-flight run-now dispatch loop.
+
+    There's no thread to forcibly kill here (execute_schedule_run runs on a
+    celery thread-pool worker, which -- unlike a process-pool worker --
+    can't be terminated via celery.control.revoke(terminate=True); confirmed
+    live 2026-08-28 trying exactly that). Instead this is cooperative: flip
+    the shadow ScanJob to "stopped" and cancel any Kali runner job currently
+    in flight for it (so a live dispatch call returns promptly instead of
+    running out its full timeout) -- execute_schedule_run's loop checks this
+    status before every technique and before every per-host dispatch and
+    exits as soon as it sees it, marking nothing further as run.
+    """
+    from app.services.kali_executor import cancel_scan_jobs_in_kali_runner
+
+    schedule = apply_company_scope(db.query(BasSchedule), current_user, BasSchedule).filter(BasSchedule.id == schedule_id).first()
+    if not schedule:
+        raise HTTPException(status_code=404, detail="Agendamento não encontrado")
+
+    last_job = (
+        db.query(BasJob)
+        .filter(BasJob.schedule_id == schedule_id)
+        .order_by(BasJob.created_at.desc())
+        .first()
+    )
+    scan_job = (
+        db.query(ScanJob).filter(ScanJob.id == last_job.scan_job_id).first()
+        if last_job and last_job.scan_job_id else None
+    )
+    if not scan_job or str(scan_job.status or "").lower() not in {"running", "queued"}:
+        raise HTTPException(status_code=400, detail="Nenhum teste em execução para este agendamento")
+
+    cancel_scan_jobs_in_kali_runner(scan_job.id, reason="bas_test_stopped_by_user")
+    scan_job.status = "stopped"
+    scan_job.current_step = "Interrompendo…"
+    scan_job.last_error = f"Interrompido manualmente por {current_user.email}"
+    db.commit()
+
+    return {"scan_job_id": scan_job.id, "status": "stopped"}
+
+
+@router.post("/schedules/{schedule_id}/resume")
+def resume_schedule(schedule_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Continues a stopped run instead of starting a new one: reuses the
+    same shadow ScanJob (so it stays one test, not two) and re-dispatches --
+    execute_schedule_run's own idempotency check skips every (technique,
+    target) pair that already has a terminal BasJob on this scan_job_id, so
+    only what genuinely never ran actually runs now."""
+    from app.services.bas_scheduler import resume_schedule_run
+    from app.workers.tasks import bas_scheduler_run_now_task
+
+    schedule = apply_company_scope(db.query(BasSchedule), current_user, BasSchedule).filter(BasSchedule.id == schedule_id).first()
+    if not schedule:
+        raise HTTPException(status_code=404, detail="Agendamento não encontrado")
+
+    last_job = (
+        db.query(BasJob)
+        .filter(BasJob.schedule_id == schedule_id)
+        .order_by(BasJob.created_at.desc())
+        .first()
+    )
+    if not last_job or not last_job.scan_job_id:
+        raise HTTPException(status_code=400, detail="Nenhum teste interrompido para continuar")
+
+    rejected = [
+        {"technique_key": key, "reason": check_bas_authorization(schedule, key)["reason"]}
+        for key in schedule.technique_keys
+        if not check_bas_authorization(schedule, key)["allowed"]
+    ]
+    if rejected:
+        raise HTTPException(status_code=403, detail={"message": "Uma ou mais técnicas não autorizadas", "rejected": rejected})
+
+    resumed = resume_schedule_run(db, schedule, last_job.scan_job_id)
+    if resumed.get("error") == "not_stopped":
+        raise HTTPException(status_code=400, detail="Este teste não está interrompido")
+    if resumed.get("error"):
+        raise HTTPException(status_code=404, detail="Agente não encontrado")
+
+    bas_scheduler_run_now_task.delay(
+        schedule.id, resumed["scan_job_id"], resumed["targets"],
+        resumed["target_was_defaulted"], resumed["skipped"],
+    )
+    return {"scan_job_id": resumed["scan_job_id"], "queued": True, "skipped": resumed["skipped"]}
 
 
 # ── Network segment tags (business_unit/criticality/controls, real -- see ────

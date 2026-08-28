@@ -208,9 +208,15 @@ def run_watchdog(db) -> dict:
             _rehydrate_stale_work_item_pollers,
         )
 
+        # mode <> 'bas': this scan_work_items rehydration/reconciliation is
+        # regular-pentest-only machinery -- a BAS shadow ScanJob never has
+        # scan_work_items rows, so it's always a no-op here, but excluding it
+        # up front avoids wasted work and keeps this pass's scope honest.
         running_scan_ids = [
             int(row[0])
-            for row in db.execute(text("SELECT id FROM scan_jobs WHERE status='running'")).fetchall()
+            for row in db.execute(text(
+                "SELECT id FROM scan_jobs WHERE status='running' AND COALESCE(mode, '') <> 'bas'"
+            )).fetchall()
         ]
         dispatched_rehydrated = 0
         execution_tracks_reconciled = 0
@@ -460,9 +466,14 @@ def run_watchdog(db) -> dict:
         # cutoff em UTC-naive (coluna updated_at é UTC-naive). Comparar com now()
         # do postgres (-03) desviava ~3h e só pegava scans muito antigos.
         _cutoff = datetime.now() - timedelta(seconds=_LIMBO_SECONDS)
+        # mode <> 'bas': recover_scan_if_orphaned() below redrives a scan
+        # into the regular unit pipeline (P01-P22) -- a BAS shadow ScanJob
+        # is driven exclusively by bas_scheduler and never should be, or it
+        # ends up running a full unrelated pentest in parallel with its own
+        # BAS dispatch loop (seen live 2026-08-28, scan #109).
         limbo_rows = db.execute(text(
             "SELECT id FROM scan_jobs WHERE status IN ('queued','running','retrying') "
-            "AND updated_at < :cutoff ORDER BY id"
+            "AND COALESCE(mode, '') <> 'bas' AND updated_at < :cutoff ORDER BY id"
         ), {"cutoff": _cutoff}).fetchall()
         # End this read's transaction NOW, before active_scan_task_ids() (celery
         # inspect RPC) and recover_scan_if_orphaned() (more network + DB) run —
@@ -501,7 +512,11 @@ def run_watchdog(db) -> dict:
         # Relógio ÚNICO (-03): created_at agora é gravado pelo app em -03 (naive,
         # via datetime.now() com TZ=America/Sao_Paulo) e now() do PG também é -03 →
         # comparar direto é consistente, idle real. Exclui os próprios logs do
-        # watchdog (senão a recuperação reseta o sinal de vida).
+        # watchdog (senão a recuperação reseta o sinal de vida). mode<>'bas':
+        # ensure_scan_chain_running below redrives into the regular unit
+        # pipeline, which a BAS shadow ScanJob must never enter -- a long
+        # single-technique host fanout easily goes quiet on scan_logs/
+        # updated_at for minutes without being stuck at all.
         stuck = db.execute(text(
             """
             SELECT j.id,
@@ -511,6 +526,7 @@ def run_watchdog(db) -> dict:
                        j.updated_at)))::int AS idle_s
             FROM scan_jobs j
             WHERE j.status IN ('queued','running','retrying')
+              AND COALESCE(j.mode, '') <> 'bas'
             """
         )).fetchall()
         # Close this read's transaction before the loop's network calls
@@ -561,8 +577,12 @@ def run_watchdog(db) -> dict:
     deadchain_preserved = []
     try:
         from app.workers.tasks import recover_scan_if_orphaned, _chain_lock_alive, active_scan_task_ids
+        # mode <> 'bas': this pass's whole premise is "the regular unit
+        # pipeline's chain lock is gone" -- a BAS shadow ScanJob never holds
+        # one to begin with, so every BAS run would always look like a dead
+        # chain and get redriven into a real pentest it never started.
         running_ids = [int(r[0]) for r in db.execute(text(
-            "SELECT id FROM scan_jobs WHERE status='running' ORDER BY id"
+            "SELECT id FROM scan_jobs WHERE status='running' AND COALESCE(mode, '') <> 'bas' ORDER BY id"
         )).fetchall()]
         # Close this read's transaction before _chain_lock_alive (Redis) and
         # active_scan_task_ids (celery inspect) run — see section 2 note.
