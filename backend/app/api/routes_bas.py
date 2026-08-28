@@ -28,10 +28,12 @@ from app.api.deps import (
 from app.core.config import settings
 from app.core.security import create_bas_agent_token, get_password_hash, verify_password
 from app.models.models import (
+    AccessGroup,
     AppSetting,
     BasAgent,
     BasEnrollmentToken,
     BasJob,
+    BasNetworkSegmentTag,
     BasSchedule,
     Finding,
     ScanJob,
@@ -687,6 +689,139 @@ def run_schedule_now(schedule_id: int, db: Session = Depends(get_db), current_us
 
     result = fire_schedule(db, schedule)
     return result
+
+
+# ── Network segment tags (business_unit/criticality/controls, real -- see ────
+#    BasNetworkSegmentTag's docstring for why this exists instead of a fake
+#    per-host CMDB field) ────────────────────────────────────────────────────
+
+class NetworkSegmentTagCreate(BaseModel):
+    access_group_id: int | None = None
+    access_group_name: str | None = None
+    match_type: str  # "cidr" | "domain"
+    match_value: str
+    business_unit: str = ""
+    criticality: str = "medium"
+    controls: list[dict] = []
+
+
+class NetworkSegmentTagPatch(BaseModel):
+    business_unit: str | None = None
+    criticality: str | None = None
+    controls: list[dict] | None = None
+
+
+def _segment_tag_to_dict(tag: BasNetworkSegmentTag) -> dict[str, Any]:
+    return {
+        "id": tag.id, "match_type": tag.match_type, "match_value": tag.match_value,
+        "business_unit": tag.business_unit, "criticality": tag.criticality, "controls": tag.controls,
+    }
+
+
+@router.post("/network-segments")
+def create_network_segment_tag(
+    payload: NetworkSegmentTagCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
+):
+    if payload.match_type not in {"cidr", "domain"}:
+        raise HTTPException(status_code=400, detail="match_type deve ser 'cidr' ou 'domain'")
+    if payload.match_type == "cidr":
+        import ipaddress
+        try:
+            ipaddress.ip_network(payload.match_value, strict=False)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="match_value não é um CIDR válido")
+    access_group_id = resolve_company_group_id(
+        db, current_user, payload.access_group_id, payload.access_group_name, required=False,
+    )
+    tag = BasNetworkSegmentTag(
+        owner_id=current_user.id,
+        access_group_id=access_group_id,
+        match_type=payload.match_type,
+        match_value=payload.match_value.strip(),
+        business_unit=payload.business_unit,
+        criticality=payload.criticality,
+        controls=payload.controls,
+    )
+    db.add(tag)
+    db.commit()
+    db.refresh(tag)
+    return _segment_tag_to_dict(tag)
+
+
+@router.get("/network-segments")
+def list_network_segment_tags(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    tags = apply_company_scope(db.query(BasNetworkSegmentTag), current_user, BasNetworkSegmentTag) \
+        .order_by(BasNetworkSegmentTag.created_at.desc()).all()
+    return [_segment_tag_to_dict(t) for t in tags]
+
+
+@router.patch("/network-segments/{tag_id}")
+def patch_network_segment_tag(
+    tag_id: int, payload: NetworkSegmentTagPatch, db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
+):
+    tag = apply_company_scope(db.query(BasNetworkSegmentTag), current_user, BasNetworkSegmentTag) \
+        .filter(BasNetworkSegmentTag.id == tag_id).first()
+    if not tag:
+        raise HTTPException(status_code=404, detail="Segmento não encontrado")
+    for field in ("business_unit", "criticality", "controls"):
+        value = getattr(payload, field)
+        if value is not None:
+            setattr(tag, field, value)
+    db.commit()
+    db.refresh(tag)
+    return _segment_tag_to_dict(tag)
+
+
+@router.delete("/network-segments/{tag_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_network_segment_tag(tag_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
+    tag = apply_company_scope(db.query(BasNetworkSegmentTag), current_user, BasNetworkSegmentTag) \
+        .filter(BasNetworkSegmentTag.id == tag_id).first()
+    if not tag:
+        raise HTTPException(status_code=404, detail="Segmento não encontrado")
+    db.delete(tag)
+    db.commit()
+
+
+# ── Control Center (unified real-data feed for the 4-tab frontend) ──────────
+
+@router.get("/industry-sectors")
+def industry_sectors(current_user: User = Depends(get_current_user)):
+    from app.services.external_benchmarks import SECTOR_OPTIONS
+
+    return SECTOR_OPTIONS
+
+
+@router.get("/control-center")
+def control_center(
+    schedule_id: int | None = None, db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
+):
+    from app.api.deps import user_company_group_ids
+    from app.services import bas_reporting
+    from app.services.external_benchmarks import resolve_industry_benchmark
+
+    group_ids = None if current_user.is_admin else user_company_group_ids(current_user)
+    kwargs = {"group_ids": group_ids, "schedule_id": schedule_id}
+
+    # A benchmark is attributable to exactly ONE company's declared sector --
+    # an admin viewing the whole platform, or a user in several companies,
+    # gets no sector-specific number (only the global average as context),
+    # rather than guessing which company's sector to show.
+    sector_key = None
+    if group_ids and len(group_ids) == 1:
+        group = db.query(AccessGroup).filter(AccessGroup.id == group_ids[0]).first()
+        sector_key = group.industry_sector if group else None
+
+    return {
+        "resilience_score": bas_reporting.resilience_score(db, **kwargs),
+        "industry_benchmark": resolve_industry_benchmark(sector_key),
+        "score_trend": bas_reporting.score_trend(db, **kwargs),
+        "category_coverage": bas_reporting.category_coverage(db, **kwargs),
+        "kill_chain_stages": bas_reporting.kill_chain_stages(db, **kwargs),
+        "attack_heatmap": bas_reporting.attack_heatmap(db, **kwargs),
+        "protection_layers": bas_reporting.protection_layers(db, **kwargs),
+        "cmdb": bas_reporting.attack_path_inventory(db, **kwargs),
+        "findings": bas_reporting.bas_findings_view(db, **kwargs, limit=200),
+    }
 
 
 # ── Report ───────────────────────────────────────────────────────────────────

@@ -15,12 +15,13 @@ bas_exclusion.py, bas_scheduler.py).
 from __future__ import annotations
 
 from collections import Counter
+import ipaddress
 import re
 from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.models.models import BasAgent, BasJob, BasSchedule, Finding
+from app.models.models import BasAgent, BasJob, BasNetworkSegmentTag, BasSchedule, Finding
 from app.services.bas_exclusion import BAS_FINDING_TOOL
 from app.services.bas_scheduler import _split_targets
 from app.services.bas_technique_catalog import list_techniques
@@ -326,13 +327,41 @@ def bas_findings_view(
         if schedule_id is not None:
             query = query.filter(BasJob.schedule_id == schedule_id)
     rows = query.limit(limit).all()
-    return [
-        {
+
+    # BAS technique findings rarely carry a CVE (Kerberoasting, SMB signing,
+    # etc. are misconfigurations, not CVE-numbered bugs) -- EPSS/exploit-db
+    # only ever applies to the subset that does. Batch the EPSS lookup (one
+    # real FIRST.org call for every CVE at once, same service the main
+    # pentest module already uses) and never invent a score for the rest.
+    cves = sorted({f.cve for f in rows if f.cve})
+    epss_by_cve: dict[str, dict] = {}
+    if cves:
+        try:
+            from app.services.epss_service import get_epss_scores
+            epss_by_cve = get_epss_scores(cves)
+        except Exception:
+            epss_by_cve = {}
+    exploit_by_cve: dict[str, dict] = {}
+    if cves:
+        from app.services.exploitdb_check import check_exploitdb
+        for cve in cves:
+            try:
+                exploit_by_cve[cve] = check_exploitdb(cve)
+            except Exception:
+                exploit_by_cve[cve] = {"available": None, "refs": []}
+
+    results = []
+    for f in rows:
+        cve = f.cve
+        epss_row = epss_by_cve.get(str(cve or "").upper()) if cve else None
+        exploit_row = exploit_by_cve.get(cve) if cve else None
+        results.append({
             "id": f.id, "title": f.title, "created_at": f.created_at,
             "severity": f.severity,
             "technique_key": (f.details or {}).get("technique_key"),
             "category": (f.details or {}).get("category"),
             "risk_tier": (f.details or {}).get("risk_tier"),
+            "target": (f.details or {}).get("target"),
             "mitre_refs": (f.details or {}).get("mitre_refs", []),
             "recommendation": (f.details or {}).get("recommendation", ""),
             # Real content extracted from the tool's actual output (see
@@ -343,9 +372,17 @@ def bas_findings_view(
             "proof": (f.details or {}).get("proof") or {},
             "proof_status": (f.details or {}).get("proof_status") or ((f.details or {}).get("proof") or {}).get("status"),
             "proof_valid": _proof_valid_from_finding(f),
-        }
-        for f in rows
-    ]
+            "cve": cve,
+            "cvss": f.cvss,
+            # None (not 0/"n/a" string) when there's no CVE to look up at all
+            # -- the frontend renders that as "n/a", distinct from a CVE that
+            # was looked up and genuinely has no EPSS/exploit-db record.
+            "epss": epss_row.get("epss") if epss_row else None,
+            "epss_percentile": epss_row.get("percentile") if epss_row else None,
+            "exploit_available": exploit_row.get("available") if exploit_row else None,
+            "exploit_refs": exploit_row.get("refs", []) if exploit_row else [],
+        })
+    return results
 
 
 def action_priorities(
@@ -464,6 +501,48 @@ def action_priorities(
     return sorted(items, key=lambda item: (priority_rank.get(item["priority"], 9), -item["affected_count"]))[:limit]
 
 
+def _segment_tags(db: Session, *, group_ids: list[int] | None = None) -> list[BasNetworkSegmentTag]:
+    query = db.query(BasNetworkSegmentTag)
+    if group_ids is not None:
+        query = query.filter(BasNetworkSegmentTag.access_group_id.in_(group_ids))
+    return query.all()
+
+
+def _ip_matches_cidr(ip: str, cidr: str) -> bool:
+    try:
+        return ipaddress.ip_address(ip) in ipaddress.ip_network(cidr, strict=False)
+    except ValueError:
+        return False
+
+
+def _resolve_segment_tag(
+    ip: str, domain: str, tags: list[BasNetworkSegmentTag]
+) -> BasNetworkSegmentTag | None:
+    """Domain match wins over a CIDR match -- a domain is a more specific,
+    intentional declaration than "falls inside this /24"."""
+    domain_norm = str(domain or "").strip().lower()
+    if domain_norm:
+        for tag in tags:
+            if tag.match_type == "domain" and str(tag.match_value or "").strip().lower() == domain_norm:
+                return tag
+    if ip:
+        for tag in tags:
+            if tag.match_type == "cidr" and _ip_matches_cidr(ip, tag.match_value):
+                return tag
+    return None
+
+
+def _segment_tag_view(tag: BasNetworkSegmentTag | None) -> dict[str, Any]:
+    if tag is None:
+        return {"business_unit": None, "criticality": None, "controls": [], "classified": False}
+    return {
+        "business_unit": tag.business_unit or None,
+        "criticality": tag.criticality,
+        "controls": list(tag.controls or []),
+        "classified": True,
+    }
+
+
 def attack_path_inventory(
     db: Session, *, group_ids: list[int] | None = None, schedule_id: int | None = None
 ) -> dict[str, Any]:
@@ -568,6 +647,11 @@ def attack_path_inventory(
         assets.values(),
         key=lambda asset: ({"high": 0, "medium": 1, "low": 2}.get(asset["risk_level"], 9), asset["ip"]),
     )
+    segment_tags = _segment_tags(db, group_ids=group_ids)
+    for asset in sorted_assets:
+        tag = _resolve_segment_tag(asset["ip"], asset.get("domain", ""), segment_tags)
+        asset.update(_segment_tag_view(tag))
+
     applications: dict[tuple[str, str], dict[str, Any]] = {}
     vulnerability_summary: dict[str, dict[str, Any]] = {}
 
@@ -644,6 +728,94 @@ def attack_path_inventory(
         ),
         "recommended_tests": recommended_tests,
     }
+
+
+def _target_or_cidr_within(value: str, tag_cidr: str) -> bool:
+    """value is either a bare IP or a CIDR (accepts_range techniques store
+    the whole range as BasJob.target) -- match if it's inside, equal to, or
+    overlapping the tag's declared CIDR."""
+    try:
+        tag_net = ipaddress.ip_network(tag_cidr, strict=False)
+    except ValueError:
+        return False
+    value = str(value or "").strip()
+    if not value:
+        return False
+    try:
+        if "/" in value:
+            return ipaddress.ip_network(value, strict=False).overlaps(tag_net)
+        return ipaddress.ip_address(value) in tag_net
+    except ValueError:
+        return False
+
+
+def protection_layers(
+    db: Session, *, group_ids: list[int] | None = None, schedule_id: int | None = None
+) -> list[dict[str, Any]]:
+    """For every named control an operator declared on a network-segment tag
+    (BasNetworkSegmentTag.controls), the real Proven/Blocked split of every
+    REAL-agent job whose target resolves into that segment.
+
+    Segment resolution here is CIDR-only (job.target/agent.local_network_cidr
+    vs tag.match_value) -- unlike attack_path_inventory's per-asset view, a
+    job's target domain isn't known until SMB/AD enumeration parses it out of
+    the tool's own output, so a domain tag can't be matched at dispatch time.
+    A job whose target matches no tagged segment contributes to no control --
+    real absence of instrumentation, not a guess. No "detected" state: same
+    2-state Proven/Blocked honesty rule as attack_heatmap/kill_chain_stages.
+    Controls with fewer than 3 resolved jobs are marked low_confidence rather
+    than shown as a misleadingly precise 100%/0%."""
+    tags = [t for t in _segment_tags(db, group_ids=group_ids) if t.match_type == "cidr" and t.controls]
+    if not tags:
+        return []
+
+    query = (
+        db.query(BasJob, BasAgent)
+        .join(BasAgent, BasAgent.id == BasJob.agent_id)
+        .filter(BasAgent.kind == "real", BasJob.status.in_(["completed", "failed"]))
+    )
+    if group_ids is not None:
+        query = query.filter(BasJob.access_group_id.in_(group_ids))
+    if schedule_id is not None:
+        query = query.filter(BasJob.schedule_id == schedule_id)
+
+    tallies: dict[tuple[str, str], dict[str, int]] = {}
+
+    def tally_for(name: str, vendor: str) -> dict[str, int]:
+        return tallies.setdefault((name, vendor), {"proven": 0, "blocked": 0, "unproven": 0})
+
+    for job, agent in query.all():
+        target_value = job.target or agent.local_network_cidr or ""
+        matching_tags = [t for t in tags if _target_or_cidr_within(target_value, t.match_value)]
+        if not matching_tags:
+            continue
+        if job.status == "completed" and _proof_valid_from_result(job.result):
+            outcome = "proven"
+        elif job.status == "completed":
+            outcome = "unproven"
+        else:
+            outcome = "blocked"
+        for tag in matching_tags:
+            for control in tag.controls or []:
+                name = str(control.get("name") or "").strip()
+                vendor = str(control.get("vendor") or "").strip()
+                if not name:
+                    continue
+                tally_for(name, vendor)[outcome] += 1
+
+    rows = []
+    for (name, vendor), counts in tallies.items():
+        resolved = counts["proven"] + counts["blocked"]
+        sample_size = resolved + counts["unproven"]
+        rows.append({
+            "name": name,
+            "vendor": vendor,
+            "prevented_pct": round(100 * counts["blocked"] / resolved, 1) if resolved else None,
+            "missed_pct": round(100 * counts["proven"] / resolved, 1) if resolved else None,
+            "sample_size": sample_size,
+            "low_confidence": sample_size < 3,
+        })
+    return sorted(rows, key=lambda r: -r["sample_size"])
 
 
 def crown_jewels_view(
@@ -724,18 +896,52 @@ def attack_heatmap(
     been dispatched (0 = never tested -- a coverage gap, not a finding).
     Dispatch/completion counts here are raw ACTIVITY (stub + real blended),
     same scope note as exposure_summary -- for a real-agent-only coverage
-    claim use framework_coverage instead."""
-    query = db.query(BasJob.technique_key, BasJob.status)
+    claim use framework_coverage instead.
+
+    `outcome` is a real, 2-state signal (no fabricated "detected" middle
+    state -- see risk_score's docstring for why): "proven" if any REAL-agent
+    dispatch of this technique produced valid bas_proof, "blocked" if every
+    resolved REAL-agent dispatch failed, "unproven" if it completed without
+    valid proof, "not_tested" if no real-agent dispatch exists at all."""
+    query = (
+        db.query(BasJob.technique_key, BasJob.status, BasJob.result, BasAgent.kind)
+        .join(BasAgent, BasAgent.id == BasJob.agent_id)
+    )
     if group_ids is not None:
         query = query.filter(BasJob.access_group_id.in_(group_ids))
     if schedule_id is not None:
         query = query.filter(BasJob.schedule_id == schedule_id)
     counts = Counter()
     completed_counts = Counter()
-    for technique_key, status in query.all():
+    proven_counts = Counter()
+    unproven_counts = Counter()
+    blocked_counts = Counter()
+    for technique_key, job_status, result, agent_kind in query.all():
+        # times_tested/times_completed stay blended activity (stub + real) --
+        # same scope as the module-level "coverage gaps are visible" rule.
+        # The Proven/Unproven/Blocked outcome, however, is a REAL-agent-only
+        # signal (a stub always fabricates its result, so it has no outcome).
         counts[technique_key] += 1
-        if status == "completed":
+        if job_status == "completed":
             completed_counts[technique_key] += 1
+        if agent_kind != "real":
+            continue
+        if job_status == "completed":
+            if _proof_valid_from_result(result):
+                proven_counts[technique_key] += 1
+            else:
+                unproven_counts[technique_key] += 1
+        elif job_status == "failed":
+            blocked_counts[technique_key] += 1
+
+    def outcome_for(key: str) -> str:
+        if proven_counts.get(key):
+            return "proven"
+        if blocked_counts.get(key):
+            return "blocked"
+        if unproven_counts.get(key):
+            return "unproven"
+        return "not_tested"
 
     rows = []
     for t in list_techniques():
@@ -748,8 +954,157 @@ def attack_heatmap(
                 "availability": t["availability"],
                 "times_tested": counts.get(t["technique_key"], 0),
                 "times_completed": completed_counts.get(t["technique_key"], 0),
+                "times_proven": proven_counts.get(t["technique_key"], 0),
+                "times_unproven": unproven_counts.get(t["technique_key"], 0),
+                "times_blocked": blocked_counts.get(t["technique_key"], 0),
+                "outcome": outcome_for(t["technique_key"]),
             })
     return sorted(rows, key=lambda r: (-r["times_tested"], r["mitre_id"]))
+
+
+# Best-effort grouping of the real BAS catalog's `category` field into the
+# classic cyber-kill-chain phases, for the Painel's "Test depth" bar. This is
+# an editorial judgment call, not an authoritative MITRE tactic mapping (the
+# catalog was never annotated with tactic-per-technique) -- every count it
+# produces is a real dispatch, only the phase LABEL a technique is bucketed
+# under is approximate.
+KILL_CHAIN_STAGES: list[tuple[str, str, set[str]]] = [
+    ("reconnaissance", "Reconnaissance", {"network"}),
+    ("initial_access", "Initial access", {"ntlm", "exploit_validation", "web"}),
+    ("execution", "Execution", {"windows", "linux", "cicd"}),
+    ("persistence", "Persistence", {"identity"}),
+    ("privilege_escalation", "Privilege escalation", {"ad", "vmware"}),
+    ("defense_evasion", "Defense evasion", {"firewall"}),
+    ("lateral_movement", "Lateral movement", {"lateral_movement", "smb"}),
+    ("exfiltration", "Exfiltration / Impact", {"cloud"}),
+]
+
+
+def kill_chain_stages(
+    db: Session, *, group_ids: list[int] | None = None, schedule_id: int | None = None
+) -> list[dict[str, Any]]:
+    """Per kill-chain stage: how many cataloged techniques in that stage were
+    ever dispatched through a REAL agent, and the real Proven/Unproven/Blocked
+    split of those dispatches (see attack_heatmap's outcome semantics --
+    deliberately 2 resolved states, no fabricated "detected")."""
+    heatmap = attack_heatmap(db, group_ids=group_ids, schedule_id=schedule_id)
+    by_technique: dict[str, dict[str, Any]] = {}
+    for row in heatmap:
+        by_technique.setdefault(row["technique_key"], row)
+
+    techniques_by_category: dict[str, list[str]] = {}
+    for t in list_techniques():
+        techniques_by_category.setdefault(t["category"], []).append(t["technique_key"])
+
+    stages = []
+    for key, label, categories in KILL_CHAIN_STAGES:
+        keys = [k for cat in categories for k in techniques_by_category.get(cat, [])]
+        total = len(keys)
+        proven = sum(1 for k in keys if by_technique.get(k, {}).get("outcome") == "proven")
+        unproven = sum(1 for k in keys if by_technique.get(k, {}).get("outcome") == "unproven")
+        blocked = sum(1 for k in keys if by_technique.get(k, {}).get("outcome") == "blocked")
+        tested = proven + unproven + blocked
+        stages.append({
+            "stage": key, "label": label, "total": total, "tested": tested,
+            "proven_pct": round(100 * proven / total, 1) if total else 0.0,
+            "unproven_pct": round(100 * unproven / total, 1) if total else 0.0,
+            "blocked_pct": round(100 * blocked / total, 1) if total else 0.0,
+        })
+    return stages
+
+
+def category_coverage(
+    db: Session, *, group_ids: list[int] | None = None, schedule_id: int | None = None
+) -> list[dict[str, Any]]:
+    """Per real BAS catalog category: how many of its techniques have been
+    dispatched at least once through a REAL agent (tested/total), plus the
+    safe/elevated/high_risk mix of the TESTED ones -- mirrors framework_coverage's
+    "REAL agent only counts as tested" rule."""
+    tested_keys = _real_agent_technique_keys(db, group_ids=group_ids, schedule_id=schedule_id)
+    by_category: dict[str, list[dict[str, Any]]] = {}
+    for t in list_techniques():
+        by_category.setdefault(t["category"], []).append(t)
+
+    rows = []
+    for category, techniques in by_category.items():
+        tested = [t for t in techniques if t["technique_key"] in tested_keys]
+        rows.append({
+            "category": category,
+            "tested": len(tested),
+            "total": len(techniques),
+            "safe": sum(1 for t in tested if t["risk_tier"] == "safe"),
+            "elevated": sum(1 for t in tested if t["risk_tier"] == "elevated"),
+            "high_risk": sum(1 for t in tested if t["risk_tier"] == "high_risk"),
+        })
+    return sorted(rows, key=lambda r: (-r["tested"], r["category"]))
+
+
+def resilience_score(
+    db: Session, *, group_ids: list[int] | None = None, schedule_id: int | None = None, window_days: int = 7
+) -> dict[str, Any]:
+    """risk_score() over the last `window_days`, plus the same computation for
+    the immediately-preceding window of equal length -- a real delta with no
+    external benchmark. There is no "industry median": no benchmark data
+    source exists for this platform, so the frontend must not show one."""
+    from datetime import datetime, timedelta
+
+    now = datetime.now()
+    current_start = now - timedelta(days=window_days)
+    previous_start = now - timedelta(days=2 * window_days)
+
+    def score_between(start, end):
+        query = db.query(BasJob).join(BasAgent, BasAgent.id == BasJob.agent_id).filter(
+            BasAgent.kind == "real", BasJob.created_at >= start, BasJob.created_at < end,
+        )
+        if group_ids is not None:
+            query = query.filter(BasJob.access_group_id.in_(group_ids))
+        if schedule_id is not None:
+            query = query.filter(BasJob.schedule_id == schedule_id)
+        rows = query.all()
+        completed = sum(1 for row in rows if row.status == "completed" and _proof_valid_from_result(row.result))
+        failed = sum(1 for row in rows if row.status == "failed")
+        unproven = sum(1 for row in rows if row.status == "completed" and not _proof_valid_from_result(row.result))
+        resolved = completed + failed + unproven
+        return round(100 * completed / resolved) if resolved else None
+
+    current = score_between(current_start, now)
+    previous = score_between(previous_start, current_start)
+    delta = (current - previous) if current is not None and previous is not None else None
+    return {"score": current, "previous_score": previous, "delta": delta, "window_days": window_days}
+
+
+def score_trend(
+    db: Session, *, group_ids: list[int] | None = None, schedule_id: int | None = None, weeks: int = 12
+) -> list[dict[str, Any]]:
+    """risk_score() recomputed per week-bucket from real BasJob.created_at
+    timestamps -- no snapshot table, no synthetic interpolation. A week with
+    no resolved real-agent jobs reports score=None (rendered as a gap in the
+    trend line), never a fabricated value."""
+    from datetime import datetime, timedelta
+
+    now = datetime.now()
+    points = []
+    for i in range(weeks, 0, -1):
+        end = now - timedelta(days=7 * (i - 1))
+        start = end - timedelta(days=7)
+        query = db.query(BasJob).join(BasAgent, BasAgent.id == BasJob.agent_id).filter(
+            BasAgent.kind == "real", BasJob.created_at >= start, BasJob.created_at < end,
+        )
+        if group_ids is not None:
+            query = query.filter(BasJob.access_group_id.in_(group_ids))
+        if schedule_id is not None:
+            query = query.filter(BasJob.schedule_id == schedule_id)
+        rows = query.all()
+        completed = sum(1 for row in rows if row.status == "completed" and _proof_valid_from_result(row.result))
+        failed = sum(1 for row in rows if row.status == "failed")
+        unproven = sum(1 for row in rows if row.status == "completed" and not _proof_valid_from_result(row.result))
+        resolved = completed + failed + unproven
+        points.append({
+            "week_start": start.date().isoformat(),
+            "score": round(100 * completed / resolved) if resolved else None,
+            "resolved": resolved,
+        })
+    return points
 
 
 def chain_attack_path(

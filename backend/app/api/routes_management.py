@@ -37,6 +37,15 @@ from app.graph.mission import MISSION_ITEMS
 
 router = APIRouter(prefix="/api", tags=["management"])
 
+def _warm_skill_rag_for_scan() -> dict:
+    try:
+        from app.services.skill_rag_indexer import warm_skill_rag
+
+        return warm_skill_rag(force=False, backfill=True, backfill_limit=250)
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
 def _parse_targets(targets_text: str) -> list[str]:
     return [item.strip() for item in targets_text.split(";") if item.strip()]
 
@@ -316,6 +325,7 @@ def _create_scan_from_schedule(
         authorization_id=authorization_gate.get("authorization_id"),
         current_step="1. Amass Subdomain Recon",
         state_data={
+            "rag_warmup": _warm_skill_rag_for_scan(),
             "scan_level": scan_level,
             "scan_profile": profile,
             "authorization_gate": authorization_gate,
@@ -2107,6 +2117,17 @@ def delete_operation_line(line_id: int, db: Session = Depends(get_db), current_u
     return {"ok": True}
 
 
+def _validate_industry_sector(value) -> str | None:
+    if not value:
+        return None
+    from app.services.external_benchmarks import WAVESTONE_CYBER_BENCHMARK_2026
+
+    key = str(value).strip()
+    if key not in WAVESTONE_CYBER_BENCHMARK_2026:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"industry_sector desconhecido: {key}")
+    return key
+
+
 @router.get("/access-groups")
 def list_access_groups(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     query = db.query(AccessGroup)
@@ -2114,7 +2135,7 @@ def list_access_groups(db: Session = Depends(get_db), current_user: User = Depen
         allowed_ids = [g.id for g in current_user.groups]
         query = query.filter(AccessGroup.id.in_(allowed_ids))
     rows = query.order_by(AccessGroup.name.asc()).all()
-    return [{"id": g.id, "name": g.name, "description": g.description} for g in rows]
+    return [{"id": g.id, "name": g.name, "description": g.description, "industry_sector": g.industry_sector} for g in rows]
 
 
 @router.post("/access-groups")
@@ -2125,7 +2146,11 @@ def create_access_group(payload: dict, db: Session = Depends(get_db), current_us
     exists = db.query(AccessGroup).filter(AccessGroup.name == name).first()
     if exists:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Grupo ja existe")
-    row = AccessGroup(owner_id=current_user.id, name=name, description=(payload.get("description") or "").strip())
+    industry_sector = _validate_industry_sector(payload.get("industry_sector"))
+    row = AccessGroup(
+        owner_id=current_user.id, name=name, description=(payload.get("description") or "").strip(),
+        industry_sector=industry_sector,
+    )
     db.add(row)
     db.commit()
     db.refresh(row)
@@ -2147,6 +2172,8 @@ def update_access_group(group_id: int, payload: dict, db: Session = Depends(get_
         row.name = name
     if "description" in payload:
         row.description = (payload.get("description") or "").strip()
+    if "industry_sector" in payload:
+        row.industry_sector = _validate_industry_sector(payload.get("industry_sector"))
     db.commit()
     return {"ok": True}
 
@@ -2376,6 +2403,18 @@ def knowledge_health(
     from app.services.rag_repository import knowledge_health as _knowledge_health
 
     return _knowledge_health(db=db)
+
+
+@router.post("/knowledge/warmup")
+def knowledge_warmup(
+    force: bool = Query(False),
+    backfill: bool = Query(True),
+    backfill_limit: int = Query(500, ge=1, le=5000),
+    current_user: User = Depends(require_admin),
+):
+    from app.services.skill_rag_indexer import warm_skill_rag
+
+    return warm_skill_rag(force=force, backfill=backfill, backfill_limit=backfill_limit)
 
 
 @router.get("/kali-runner/catalog")

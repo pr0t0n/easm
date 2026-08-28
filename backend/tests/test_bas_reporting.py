@@ -91,7 +91,7 @@ def test_exposure_summary_counts_real_tunnel_roundtrips_as_completed_jobs_only()
 def test_bas_findings_view_marks_every_row_simulated():
     db = MagicMock()
     finding = SimpleNamespace(
-        id=1, title="BAS: test (simulado)", created_at="now", severity="info",
+        id=1, title="BAS: test (simulado)", created_at="now", severity="info", cve=None, cvss=None,
         details={"technique_key": "smb_enum_cme", "category": "smb", "risk_tier": "safe"},
     )
     db.query.return_value = _query_chain([finding])
@@ -101,6 +101,11 @@ def test_bas_findings_view_marks_every_row_simulated():
     assert rows[0]["simulated"] is True
     assert rows[0]["technique_key"] == "smb_enum_cme"
     assert rows[0]["proof_valid"] is False
+    # No CVE on this finding -- EPSS/exploit-availability must stay a real
+    # "n/a" (None), never a fabricated score.
+    assert rows[0]["cve"] is None
+    assert rows[0]["epss"] is None
+    assert rows[0]["exploit_available"] is None
 
 
 def test_crown_jewels_view_reuses_the_real_keyword_identifier():
@@ -162,14 +167,15 @@ def test_attack_heatmap_includes_every_cataloged_mitre_ref_even_untested():
     rows = bas_reporting.attack_heatmap(db)
 
     assert any(r["times_tested"] == 0 for r in rows)  # coverage gaps are visible, not hidden
+    assert all(r["outcome"] == "not_tested" for r in rows)
     assert all("mitre_id" in r for r in rows)
 
 
 def test_attack_heatmap_counts_completed_separately_from_total_dispatches():
     db = MagicMock()
     db.query.return_value = _query_chain([
-        ("smb_enum_cme", "completed"),
-        ("smb_enum_cme", "failed"),
+        ("smb_enum_cme", "completed", {"bas_proof": _proof(True)}, "real"),
+        ("smb_enum_cme", "failed", {}, "real"),
     ])
 
     rows = bas_reporting.attack_heatmap(db)
@@ -177,6 +183,22 @@ def test_attack_heatmap_counts_completed_separately_from_total_dispatches():
 
     assert cme_rows[0]["times_tested"] == 2
     assert cme_rows[0]["times_completed"] == 1
+    assert cme_rows[0]["outcome"] == "proven"
+
+
+def test_attack_heatmap_outcome_excludes_stub_dispatches():
+    """A stub agent always fabricates its result -- it must never make a
+    technique look 'proven'."""
+    db = MagicMock()
+    db.query.return_value = _query_chain([
+        ("smb_enum_cme", "completed", {"bas_proof": _proof(True)}, "stub"),
+    ])
+
+    rows = bas_reporting.attack_heatmap(db)
+    cme_rows = [r for r in rows if r["technique_key"] == "smb_enum_cme"]
+
+    assert cme_rows[0]["times_tested"] == 1
+    assert cme_rows[0]["outcome"] == "not_tested"
 
 
 def test_risk_score_is_none_when_no_jobs_have_resolved():
@@ -354,7 +376,13 @@ def test_attack_path_inventory_builds_cmdb_apps_vulnerabilities_and_steps():
     agent = SimpleNamespace(id=19, kind="real")
     schedule = SimpleNamespace(id=10, name="teste")
     db = MagicMock()
-    db.query.return_value = _query_chain([(job, agent, schedule)])
+
+    def query_side_effect(*args):
+        if args and args[0] is bas_reporting.BasNetworkSegmentTag:
+            return _query_chain([])  # no operator-declared segment tags in this test
+        return _query_chain([(job, agent, schedule)])
+
+    db.query.side_effect = query_side_effect
 
     result = bas_reporting.attack_path_inventory(db)
 

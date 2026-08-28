@@ -57,10 +57,6 @@ const NAV_GROUPS = [
         to: "/bas",
         label: "BAS",
         icon: "bas",
-        sub: [
-          { to: "/bas/testes", label: "Testes / Agendamento" },
-          { to: "/bas/operacional", label: "Centro Operacional BAS", adminOnly: true },
-        ],
       },
     ],
   },

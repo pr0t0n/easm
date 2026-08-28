@@ -23,6 +23,12 @@ class AccessGroup(Base):
     owner_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     name: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     description: Mapped[str] = mapped_column(String(500), default="")
+    # Operator-declared once, real (not inferred) -- lets bas_reporting attach
+    # a real external benchmark (Wavestone Cyber Benchmark 2026, see
+    # app/services/external_benchmarks.py) to this company's resilience
+    # score instead of a fabricated "industry median". One of
+    # WAVESTONE_CYBER_BENCHMARK_2026's keys, or None if unclassified.
+    industry_sector: Mapped[str | None] = mapped_column(String(40), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
 
@@ -1475,3 +1481,30 @@ def _guard_bas_job_insert(mapper, connection, target: "BasJob") -> None:
 
 
 sa.event.listen(BasJob, "before_insert", _guard_bas_job_insert)
+
+
+class BasNetworkSegmentTag(Base):
+    """Operator-declared context for a network segment (a CIDR block or an AD
+    domain) -- business_unit/criticality/controls have no technical signal
+    anywhere in this platform (no CMDB, no per-host security-product
+    inventory), so rather than inventing per-host values, the operator tags
+    the segment ONCE and every host that resolves into it (see
+    bas_reporting.attack_path_inventory's segment resolution: exact domain
+    match wins over a CIDR match, since domain is more specific than a shared
+    subnet) inherits the same real, declared classification."""
+    __tablename__ = "bas_network_segment_tags"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    owner_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    access_group_id: Mapped[int | None] = mapped_column(ForeignKey("access_groups.id"), nullable=True, index=True)
+    match_type: Mapped[str] = mapped_column(String(20), index=True)  # "cidr" | "domain"
+    match_value: Mapped[str] = mapped_column(String(255), index=True)
+    business_unit: Mapped[str] = mapped_column(String(255), default="")
+    criticality: Mapped[str] = mapped_column(String(20), default="medium")  # low|medium|high|critical
+    # [{"name": "EDR / XDR", "vendor": "CrowdStrike Falcon"}, ...] -- which
+    # named security controls the operator says protect this segment. Used
+    # by bas_reporting.protection_layers to attribute real Proven/Blocked
+    # outcomes to a named product instead of a synthetic phase/tool label.
+    controls: Mapped[list] = mapped_column(JSONB, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)

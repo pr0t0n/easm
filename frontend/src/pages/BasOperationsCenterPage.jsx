@@ -1,11 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import client from "../api/client";
 import { toastError, toastSuccess } from "../utils/toast";
-
-const TV = {
-  bg: "#1f242c", surface: "#262c36", surface2: "#2d343f",
-  border: "#2f3743", text: "#e8eaed", muted: "#8a93a3", label: "#6b7384",
-};
+import { TV } from "../theme/basDark";
 
 function TvPanel({ title, right, children, span, style }) {
   return (

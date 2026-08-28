@@ -17,9 +17,10 @@ const chip = (on) => ({
 export default function UserManagementPage() {
   const [users, setUsers] = useState([]);
   const [groups, setGroups] = useState([]);
+  const [sectors, setSectors] = useState([]);
   const [newUser, setNewUser] = useState({ email: "", password: "", is_admin: false, group_ids: [] });
   const [passwordForm, setPasswordForm] = useState({ userId: "", newPassword: "" });
-  const [groupForm, setGroupForm] = useState({ name: "", description: "" });
+  const [groupForm, setGroupForm] = useState({ name: "", description: "", industry_sector: "" });
   const [drafts, setDrafts] = useState({});
   const [groupDrafts, setGroupDrafts] = useState({});
   const [feedback, setFeedback] = useState("");
@@ -28,9 +29,12 @@ export default function UserManagementPage() {
   const [busyGroupId, setBusyGroupId] = useState(null);
 
   const loadData = async () => {
-    const [usersRes, groupsRes] = await Promise.all([client.get("/api/users"), client.get("/api/access-groups")]);
+    const [usersRes, groupsRes, sectorsRes] = await Promise.all([
+      client.get("/api/users"), client.get("/api/access-groups"), client.get("/api/bas/industry-sectors"),
+    ]);
     setUsers(usersRes.data);
     setGroups(groupsRes.data);
+    setSectors(sectorsRes.data || []);
     setGroupDrafts(
       Object.fromEntries(
         (groupsRes.data || []).map((group) => [
@@ -38,6 +42,7 @@ export default function UserManagementPage() {
           {
             name: group.name || "",
             description: group.description || "",
+            industry_sector: group.industry_sector || "",
           },
         ]),
       ),
@@ -87,7 +92,7 @@ export default function UserManagementPage() {
     setFeedback("");
     try {
       await client.post("/api/access-groups", groupForm);
-      setGroupForm({ name: "", description: "" });
+      setGroupForm({ name: "", description: "", industry_sector: "" });
       setFeedback("Grupo criado com sucesso.");
       await loadData();
     } catch (err) {
@@ -235,6 +240,10 @@ export default function UserManagementPage() {
           <div style={{ display: "grid", gap: 10 }}>
             <input style={inputStyle} placeholder="Nome do grupo" value={groupForm.name} onChange={(e) => setGroupForm({ ...groupForm, name: e.target.value })} />
             <input style={inputStyle} placeholder="Descrição" value={groupForm.description} onChange={(e) => setGroupForm({ ...groupForm, description: e.target.value })} />
+            <select style={inputStyle} value={groupForm.industry_sector} onChange={(e) => setGroupForm({ ...groupForm, industry_sector: e.target.value })}>
+              <option value="">Setor — não classificado (sem benchmark externo)</option>
+              {sectors.map((s) => <option key={s.key} value={s.key}>{s.label}</option>)}
+            </select>
             <button className="btn btn-primary" onClick={createGroup}>Criar grupo</button>
           </div>
           <div className="divider-h" />
@@ -254,6 +263,14 @@ export default function UserManagementPage() {
                   value={groupDrafts[g.id]?.description || ""}
                   onChange={(e) => updateGroupDraft(g.id, "description", e.target.value)}
                 />
+                <select
+                  style={inputStyle}
+                  value={groupDrafts[g.id]?.industry_sector || ""}
+                  onChange={(e) => updateGroupDraft(g.id, "industry_sector", e.target.value)}
+                >
+                  <option value="">Setor — não classificado (sem benchmark externo)</option>
+                  {sectors.map((s) => <option key={s.key} value={s.key}>{s.label}</option>)}
+                </select>
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                   <button className="btn btn-primary" style={{ padding: "6px 12px", fontSize: 12 }} onClick={() => saveGroup(g.id)} disabled={busyGroupId === g.id}>
                     {busyGroupId === g.id ? "Salvando…" : "Salvar grupo"}
