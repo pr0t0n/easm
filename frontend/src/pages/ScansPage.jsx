@@ -3,6 +3,7 @@ import client, { getWsBaseUrl } from "../api/client";
 import CompanyScopeSelect from "../components/CompanyScopeSelect";
 import CredentialCaptureModal from "../components/CredentialCaptureModal";
 import LogTerminal from "../components/LogTerminal";
+import { completedWithGapsSummary } from "../lib/reportQuality";
 import { buildScannerAuthConfig } from "../lib/scannerAuth";
 
 // ─── Fases (prototype style) ────────────────────────────────────────────────
@@ -197,8 +198,10 @@ function ActiveScanCard({ scan, onStop, onPause, onResume, onContinue, onDelete,
   const isPaused   = scan.status === "paused";
   const isRunning  = scan.status === "running" || scan.status === "queued" || scan.status === "retrying";
   const isStopped  = scan.status === "stopped" || scan.status === "failed";
+  const gapSummary = completedWithGapsSummary(scan);
 
   const borderColor = isBlocked ? "var(--sev-critical-solid)"
+                    : gapSummary.visible ? "var(--sev-medium-solid)"
                     : isPaused  ? "var(--sev-medium-solid)"
                     : "var(--brand-500)";
 
@@ -230,6 +233,8 @@ function ActiveScanCard({ scan, onStop, onPause, onResume, onContinue, onDelete,
           <span style={{ fontSize: 12, fontWeight: 600 }}>
             {isBlocked
               ? <span style={{ color: "var(--sev-critical-text)" }}>{blockedReasonLabel(scan)}</span>
+              : gapSummary.visible
+                ? <span style={{ color: "var(--sev-medium-text)" }}>{gapSummary.detail}</span>
               : isPaused
                 ? <span style={{ color: "var(--sev-medium-text)" }}>{faseLabel} — pausado</span>
                 : <span>{faseLabel}</span>
@@ -243,13 +248,20 @@ function ActiveScanCard({ scan, onStop, onPause, onResume, onContinue, onDelete,
         <div style={{ height: 7, background: "var(--canvas-muted)", borderRadius: 99, overflow: "hidden" }}>
           <div style={{
             width: `${pct}%`, height: "100%", borderRadius: 99, transition: "width 500ms ease",
-            background: isBlocked ? "var(--sev-critical-solid)" : isPaused ? "var(--sev-medium-solid)" : "var(--brand-500)",
+            background: isBlocked ? "var(--sev-critical-solid)" : gapSummary.visible || isPaused ? "var(--sev-medium-solid)" : "var(--brand-500)",
           }} />
         </div>
         <div className="sk-mono" style={{ fontSize: 9.5, color: "var(--ink-muted)", marginTop: 3 }}>
           iniciado {fmtDateSP(scan.started_at)}
         </div>
       </div>
+
+      {gapSummary.visible && (
+        <div style={{ border: "1px solid var(--sev-medium-border)", borderRadius: 8, padding: "8px 10px", marginBottom: 12, background: "var(--sev-medium-bg)", color: "var(--sev-medium-text)", fontSize: 11.5, lineHeight: 1.35 }}>
+          <strong>{gapSummary.label}</strong>
+          <span style={{ display: "block", marginTop: 2 }}>{gapSummary.detail}</span>
+        </div>
+      )}
 
       {/* KPIs */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 6, marginBottom: 12 }}>
@@ -604,7 +616,7 @@ function NovoScanComposer({ groups, onClose, onCreate, onSchedule, statusMsg }) 
   );
 }
 
-function QualityPanel({ quality }) {
+function QualityPanel({ quality, scan }) {
   if (!quality) {
     return (
       <div style={{ border: "1px solid var(--line)", borderRadius: 8, padding: "12px 14px", marginBottom: 14, background: "var(--surface-soft)" }}>
@@ -636,6 +648,7 @@ function QualityPanel({ quality }) {
   const gate = quality.quality_gate || {};
   const runtime = quality.runtime_visibility || {};
   const external = quality.external_preconditions || {};
+  const gapSummary = completedWithGapsSummary(scan, quality);
   const gateRuntime = runtime.quality_gate || {};
   const p21 = runtime.p21_validation || {};
   const agentRuntime = runtime.agent_runtime || {};
@@ -680,6 +693,17 @@ function QualityPanel({ quality }) {
       <div style={{ height: 7, borderRadius: 99, background: "var(--canvas-muted)", overflow: "hidden", marginBottom: 10 }}>
         <div style={{ width: `${score}%`, height: "100%", background: gradeColor, borderRadius: 99 }} />
       </div>
+
+      {gapSummary.visible && (
+        <div style={{
+          border: "1px solid var(--sev-medium-border)", borderRadius: 8, padding: "8px 10px",
+          marginBottom: 10, background: "var(--sev-medium-bg)", color: "var(--sev-medium-text)",
+          fontSize: 11.5, lineHeight: 1.4,
+        }}>
+          <strong>{gapSummary.label}</strong>
+          <span style={{ display: "block", marginTop: 2 }}>{gapSummary.detail}</span>
+        </div>
+      )}
 
       {gateStatus && (
         <div style={{
@@ -918,6 +942,7 @@ function DetailPanel({ scan, logs, onClose, autoOpenCapture = false, onAutoOpenC
 
   const pct = Math.max(0, Math.min(100, Number(progress || 0)));
   const isLive = ["queued","running","retrying","waiting_for_auth"].includes(scan.status);
+  const drawerGapSummary = completedWithGapsSummary(scan, quality);
 
   const STATUS_BAR = {
     executed:                     "var(--sev-low-solid)",
@@ -982,7 +1007,7 @@ function DetailPanel({ scan, logs, onClose, autoOpenCapture = false, onAutoOpenC
           {/* barra de progresso */}
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <div style={{ flex: 1, height: 7, borderRadius: 99, background: "var(--canvas-muted)", overflow: "hidden" }}>
-              <div style={{ width: `${pct}%`, height: "100%", background: isLive ? "var(--brand-500)" : "var(--sev-low-solid)", borderRadius: 99, transition: "width .5s" }} />
+              <div style={{ width: `${pct}%`, height: "100%", background: drawerGapSummary.visible ? "var(--sev-medium-solid)" : isLive ? "var(--brand-500)" : "var(--sev-low-solid)", borderRadius: 99, transition: "width .5s" }} />
             </div>
             <span className="sk-mono" style={{ fontSize: 13, fontWeight: 700, flexShrink: 0 }}>{pct}%</span>
           </div>
@@ -990,7 +1015,7 @@ function DetailPanel({ scan, logs, onClose, autoOpenCapture = false, onAutoOpenC
 
         {/* fases */}
         <div style={{ flex: 1, overflowY: "auto", padding: "14px 20px" }}>
-          <QualityPanel quality={quality} />
+          <QualityPanel quality={quality} scan={scan} />
 
           {rows.length === 0 ? (
             <div style={{ textAlign: "center", color: "var(--ink-muted)", fontSize: 12, padding: "32px 0" }}>Aguardando dados das fases…</div>
