@@ -50,7 +50,41 @@ _CATEGORY_FRAMEWORK_RELEVANCE: dict[str, set[str]] = {
     "cloud_identity": {"nist", "iso27001", "pci", "cis_v8"},
     "saas": {"nist", "iso27001", "pci", "cis_v8"},
 }
-_FRAMEWORK_LABELS = {"nist": "NIST CSF", "iso27001": "ISO 27001", "pci": "PCI DSS 4.0", "cis_v8": "CIS Controls"}
+_FRAMEWORK_LABELS = {"mitre_attack": "MITRE ATT&CK", "nist": "NIST CSF", "iso27001": "ISO 27001", "pci": "PCI DSS 4.0", "cis_v8": "CIS Controls"}
+_FRAMEWORK_COVERAGE_LABELS = {key: value for key, value in _FRAMEWORK_LABELS.items() if key != "mitre_attack"}
+_CONTROL_MATRIX_STATUSES = ("tested", "prevented", "detected", "missed", "not_applicable")
+_CONTROL_DEFS: dict[str, list[dict[str, Any]]] = {
+    "nist": [
+        {"id": "ID.AM", "name": "Asset management", "categories": {"network", "cloud", "cloud_identity", "saas"}},
+        {"id": "PR.AC", "name": "Identity and access control", "categories": {"ad", "identity", "cloud_identity", "saas"}},
+        {"id": "PR.IP", "name": "Protective technology and hardening", "categories": {"windows", "linux", "vmware", "firewall", "cicd"}},
+        {"id": "DE.CM", "name": "Security continuous monitoring", "categories": {"ntlm", "smb", "lateral_movement", "exploit_validation", "cloud_identity"}},
+        {"id": "RS.AN", "name": "Response analysis", "categories": {"web", "exploit_validation", "cloud", "saas"}},
+    ],
+    "cis_v8": [
+        {"id": "CIS-1", "name": "Inventory and control of enterprise assets", "categories": {"network", "cloud", "saas"}},
+        {"id": "CIS-4", "name": "Secure configuration", "categories": {"windows", "linux", "vmware", "firewall"}},
+        {"id": "CIS-5", "name": "Account management", "categories": {"ad", "identity", "cloud_identity"}},
+        {"id": "CIS-8", "name": "Audit log management", "categories": {"ntlm", "lateral_movement", "exploit_validation", "cloud_identity", "saas"}},
+        {"id": "CIS-12", "name": "Network infrastructure management", "categories": {"network", "firewall", "smb"}},
+        {"id": "CIS-16", "name": "Application software security", "categories": {"web", "cicd", "exploit_validation"}},
+    ],
+    "iso27001": [
+        {"id": "A.5.15", "name": "Access control", "categories": {"ad", "identity", "cloud_identity", "saas"}},
+        {"id": "A.8.8", "name": "Management of technical vulnerabilities", "categories": {"web", "windows", "linux", "vmware", "exploit_validation", "cloud"}},
+        {"id": "A.8.16", "name": "Monitoring activities", "categories": {"ntlm", "smb", "lateral_movement", "cloud_identity", "saas"}},
+        {"id": "A.8.20", "name": "Network security", "categories": {"network", "firewall", "smb", "ntlm"}},
+        {"id": "A.8.28", "name": "Secure coding", "categories": {"web", "cicd"}},
+    ],
+    "pci": [
+        {"id": "PCI-1", "name": "Network security controls", "categories": {"network", "firewall", "smb"}},
+        {"id": "PCI-2", "name": "Secure configurations", "categories": {"windows", "linux", "vmware", "cloud"}},
+        {"id": "PCI-6", "name": "Secure systems and software", "categories": {"web", "cicd", "exploit_validation"}},
+        {"id": "PCI-8", "name": "Identify users and authenticate access", "categories": {"ad", "identity", "cloud_identity", "saas"}},
+        {"id": "PCI-10", "name": "Log and monitor all access", "categories": {"ntlm", "lateral_movement", "cloud_identity", "saas"}},
+        {"id": "PCI-11", "name": "Test security of systems and networks", "categories": {"network", "web", "exploit_validation", "cloud"}},
+    ],
+}
 _SMB_LINE_RE = re.compile(
     r"^SMB\s+(?P<ip>\d+\.\d+\.\d+\.\d+)\s+445\s+(?P<host>\S+)\s+\[\*\]\s+(?P<os>.*?)\s+\(name:.*?\)\s+\(domain:(?P<domain>.*?)\)\s+\(signing:(?P<signing>True|False)\)\s+\(SMBv1:(?P<smbv1>True|False)\)"
 )
@@ -217,7 +251,7 @@ def framework_coverage(
     tested_keys = _real_agent_technique_keys(db, group_ids=group_ids, schedule_id=schedule_id)
 
     result: dict[str, Any] = {}
-    for fw, label in _FRAMEWORK_LABELS.items():
+    for fw, label in _FRAMEWORK_COVERAGE_LABELS.items():
         relevant = [t for t in list_techniques() if fw in _CATEGORY_FRAMEWORK_RELEVANCE.get(t["category"], set())]
         tested = [t for t in relevant if t["technique_key"] in tested_keys]
         total = len(relevant)
@@ -228,6 +262,229 @@ def framework_coverage(
             "coverage_pct": round(100 * len(tested) / total, 1) if total else 0,
         }
     return result
+
+
+def _defensive_status_from_result(result: dict[str, Any] | None) -> str:
+    if not isinstance(result, dict):
+        return ""
+    candidates = [
+        result.get("defensive_status"),
+        result.get("control_status"),
+        result.get("bas_control_status"),
+        (result.get("defensive_observation") or {}).get("status") if isinstance(result.get("defensive_observation"), dict) else None,
+        (result.get("control_observation") or {}).get("status") if isinstance(result.get("control_observation"), dict) else None,
+    ]
+    for value in candidates:
+        status = str(value or "").strip().lower()
+        if status in _CONTROL_MATRIX_STATUSES:
+            return status
+    detection_keys = ("telemetry_detected", "siem_alert", "edr_alert", "ids_alert", "alerted", "detected_by_control")
+    if any(bool(result.get(key)) for key in detection_keys):
+        return "detected"
+    prevention_keys = ("blocked_by_control", "prevented_by_control", "control_blocked")
+    if any(bool(result.get(key)) for key in prevention_keys):
+        return "prevented"
+    return ""
+
+
+def _matrix_job_status(job: Any) -> str:
+    result = getattr(job, "result", None)
+    explicit = _defensive_status_from_result(result)
+    if explicit and explicit != "not_applicable":
+        return explicit
+    status = str(getattr(job, "status", "") or "").lower()
+    if status == "failed":
+        return "prevented"
+    if status == "completed" and _proof_valid_from_result(result):
+        return "missed"
+    if status == "completed":
+        return "tested"
+    return "tested"
+
+
+def _strongest_matrix_status(statuses: list[str]) -> str:
+    rank = {"missed": 5, "detected": 4, "prevented": 3, "tested": 2, "not_applicable": 1}
+    return max(statuses or ["not_applicable"], key=lambda status: rank.get(status, 0))
+
+
+def _matrix_control_key(framework: str, control_id: str, name: str = "") -> str:
+    return f"{framework}:{control_id or name}".strip().lower()
+
+
+def _control_matrix_defs(tags: list[BasNetworkSegmentTag], jobs_by_custom_control: dict[str, set[str]]) -> list[dict[str, Any]]:
+    techniques = list_techniques()
+    controls = []
+    by_mitre: dict[str, set[str]] = {}
+    for technique in techniques:
+        for mitre_id in technique.get("mitre_refs") or []:
+            by_mitre.setdefault(mitre_id, set()).add(technique["technique_key"])
+    for mitre_id, technique_keys in sorted(by_mitre.items()):
+        controls.append({
+            "framework": "mitre_attack",
+            "framework_label": _FRAMEWORK_LABELS["mitre_attack"],
+            "control_id": mitre_id,
+            "control_name": mitre_id,
+            "technique_keys": technique_keys,
+            "categories": set(),
+            "custom": False,
+        })
+    for framework, rows in _CONTROL_DEFS.items():
+        for row in rows:
+            controls.append({
+                "framework": framework,
+                "framework_label": _FRAMEWORK_LABELS[framework],
+                "control_id": row["id"],
+                "control_name": row["name"],
+                "technique_keys": set(row.get("technique_keys") or []),
+                "categories": set(row.get("categories") or []),
+                "custom": False,
+            })
+    seen_custom = set()
+    for tag in tags:
+        for control in tag.controls or []:
+            name = str(control.get("name") or "").strip()
+            if not name:
+                continue
+            vendor = str(control.get("vendor") or "custom").strip() or "custom"
+            control_id = str(control.get("id") or name).strip()
+            key = _matrix_control_key("custom", f"{vendor}:{control_id}", name)
+            if key in seen_custom:
+                continue
+            seen_custom.add(key)
+            controls.append({
+                "framework": "custom",
+                "framework_label": "Controles internos",
+                "control_id": control_id,
+                "control_name": name,
+                "vendor": vendor,
+                "technique_keys": set(control.get("technique_keys") or []) | set(jobs_by_custom_control.get(key, set())),
+                "categories": set(control.get("categories") or []),
+                "custom": True,
+                "custom_key": key,
+            })
+    return controls
+
+
+def _control_applies_to_technique(control: dict[str, Any], technique: dict[str, Any]) -> bool:
+    if control["technique_keys"]:
+        return technique["technique_key"] in control["technique_keys"]
+    if control["categories"]:
+        return technique["category"] in control["categories"]
+    return False
+
+
+def control_matrix(
+    db: Session, *, group_ids: list[int] | None = None, schedule_id: int | None = None
+) -> dict[str, Any]:
+    tags = _segment_tags(db, group_ids=group_ids)
+    query = db.query(BasJob, BasAgent).join(BasAgent, BasAgent.id == BasJob.agent_id).filter(BasAgent.kind == "real")
+    if group_ids is not None:
+        query = query.filter(BasJob.access_group_id.in_(group_ids))
+    if schedule_id is not None:
+        query = query.filter(BasJob.schedule_id == schedule_id)
+    jobs = query.all()
+
+    statuses_by_technique: dict[str, list[str]] = {}
+    counts_by_technique: dict[str, int] = {}
+    statuses_by_custom_control: dict[tuple[str, str], list[str]] = {}
+    jobs_by_custom_control: dict[str, set[str]] = {}
+    cidr_tags = [tag for tag in tags if tag.match_type == "cidr" and tag.controls]
+    for job, agent in jobs:
+        technique_key = str(getattr(job, "technique_key", "") or "")
+        if not technique_key:
+            continue
+        status = _matrix_job_status(job)
+        statuses_by_technique.setdefault(technique_key, []).append(status)
+        counts_by_technique[technique_key] = counts_by_technique.get(technique_key, 0) + 1
+        target_value = getattr(job, "target", None) or getattr(agent, "local_network_cidr", None) or ""
+        matching_tags = [tag for tag in cidr_tags if _target_or_cidr_within(target_value, tag.match_value)]
+        for tag in matching_tags:
+            for control in tag.controls or []:
+                name = str(control.get("name") or "").strip()
+                if not name:
+                    continue
+                vendor = str(control.get("vendor") or "custom").strip() or "custom"
+                control_id = str(control.get("id") or name).strip()
+                key = _matrix_control_key("custom", f"{vendor}:{control_id}", name)
+                statuses_by_custom_control.setdefault((key, technique_key), []).append(status)
+                jobs_by_custom_control.setdefault(key, set()).add(technique_key)
+
+    techniques = list_techniques()
+    controls = _control_matrix_defs(tags, jobs_by_custom_control)
+    cells = []
+    framework_rows: dict[str, dict[str, Any]] = {}
+    for control in controls:
+        framework = framework_rows.setdefault(control["framework"], {
+            "framework": control["framework"],
+            "label": control["framework_label"],
+            "controls": {},
+            "status_counts": {status: 0 for status in _CONTROL_MATRIX_STATUSES},
+            "applicable": 0,
+            "tested": 0,
+            "coverage_pct": 0.0,
+        })
+        control_key = control.get("custom_key") or _matrix_control_key(control["framework"], control["control_id"], control["control_name"])
+        framework["controls"].setdefault(control_key, {
+            "id": control["control_id"],
+            "name": control["control_name"],
+            "vendor": control.get("vendor", ""),
+            "custom": control["custom"],
+            "cells": 0,
+            "status_counts": {status: 0 for status in _CONTROL_MATRIX_STATUSES},
+        })
+        for technique in techniques:
+            if not _control_applies_to_technique(control, technique):
+                continue
+            technique_key = technique["technique_key"]
+            if control["framework"] == "custom":
+                statuses = statuses_by_custom_control.get((control_key, technique_key), [])
+            else:
+                statuses = statuses_by_technique.get(technique_key, [])
+            status = _strongest_matrix_status(statuses) if statuses else "not_applicable"
+            cell = {
+                "framework": control["framework"],
+                "framework_label": control["framework_label"],
+                "control_id": control["control_id"],
+                "control_name": control["control_name"],
+                "vendor": control.get("vendor", ""),
+                "technique_key": technique_key,
+                "technique_name": technique["display_name"],
+                "category": technique["category"],
+                "mitre_refs": technique.get("mitre_refs") or [],
+                "status": status,
+                "tested": bool(statuses),
+                "times_tested": counts_by_technique.get(technique_key, 0),
+                "reason": "" if statuses else "not_tested",
+            }
+            cells.append(cell)
+            framework["applicable"] += 1
+            framework["status_counts"][status] += 1
+            if status != "not_applicable":
+                framework["tested"] += 1
+            control_row = framework["controls"][control_key]
+            control_row["cells"] += 1
+            control_row["status_counts"][status] += 1
+
+    frameworks = []
+    for framework in framework_rows.values():
+        framework["controls"] = sorted(framework["controls"].values(), key=lambda item: (item["id"], item["name"]))
+        framework["coverage_pct"] = round(100 * framework["tested"] / framework["applicable"], 1) if framework["applicable"] else 0.0
+        frameworks.append(framework)
+    return {
+        "statuses": list(_CONTROL_MATRIX_STATUSES),
+        "frameworks": sorted(frameworks, key=lambda item: item["label"]),
+        "cells": sorted(cells, key=lambda item: (item["framework_label"], item["control_id"], item["technique_key"])),
+        "summary": {
+            "frameworks": len(frameworks),
+            "controls": sum(len(framework["controls"]) for framework in frameworks),
+            "cells": len(cells),
+            "tested": sum(1 for cell in cells if cell["status"] != "not_applicable"),
+            "prevented": sum(1 for cell in cells if cell["status"] == "prevented"),
+            "detected": sum(1 for cell in cells if cell["status"] == "detected"),
+            "missed": sum(1 for cell in cells if cell["status"] == "missed"),
+            "not_applicable": sum(1 for cell in cells if cell["status"] == "not_applicable"),
+        },
+    }
 
 
 def exposure_summary(

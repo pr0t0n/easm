@@ -32,6 +32,8 @@ function KpiTile({ label, value, accent, hint }) {
 
 const STATUS_COLOR = { online: "#7fe0b0", offline: "#8a93a3", pending: "#d4a500", revoked: "#e96363" };
 const RISK_COLOR = { high: "#e96363", medium: "#d4a500", low: "#7fe0b0", critical: "#e96363" };
+const CONTROL_STATUS_LABEL = { tested: "testado", prevented: "prevenido", detected: "detectado", missed: "perdido", not_applicable: "sem teste" };
+const CONTROL_STATUS_COLOR = { tested: TV.muted, prevented: "#7fe0b0", detected: "#72b7ff", missed: "#e96363", not_applicable: "#8a93a3" };
 
 function formatElapsed(sinceIso, nowMs) {
   if (!sinceIso) return "—";
@@ -87,6 +89,10 @@ export default function BasOperationsCenterPage() {
   const jobs = center?.recent_jobs || [];
   const techniqueStats = center?.technique_stats || {};
   const frameworkCoverage = center?.framework_coverage || {};
+  const controlMatrix = center?.control_matrix || {};
+  const controlMatrixSummary = controlMatrix.summary || {};
+  const controlMatrixFrameworks = controlMatrix.frameworks || [];
+  const controlMatrixCells = controlMatrix.cells || [];
   const exposure = center?.exposure || {};
   const findings = center?.findings || [];
   const actionPriorities = center?.action_priorities || [];
@@ -536,6 +542,65 @@ export default function BasOperationsCenterPage() {
                 )}
               </div>
             ))}
+          </div>
+        </TvPanel>
+
+        <TvPanel title="Control Matrix" right={`${controlMatrixSummary.controls || 0} controle(s) · ${controlMatrixSummary.cells || 0} célula(s)`} span={3}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 12 }}>
+            <div style={{ display: "grid", gap: 8 }}>
+              {controlMatrixFrameworks.length === 0 && <div style={{ fontSize: 11, color: TV.muted }}>Sem matriz de controles ainda.</div>}
+              {controlMatrixFrameworks.map((fw) => (
+                <div key={fw.framework} style={{ background: TV.surface2, border: `1px solid ${TV.border}`, borderRadius: 8, padding: "8px 10px" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginBottom: 6 }}>
+                    <span style={{ fontSize: 11, fontWeight: 700, color: TV.text }}>{fw.label}</span>
+                    <span style={{ fontSize: 10, color: TV.muted }}>{fw.tested}/{fw.applicable}</span>
+                  </div>
+                  <div style={{ height: 6, borderRadius: 3, background: "rgba(255,255,255,0.06)", overflow: "hidden", marginBottom: 7 }}>
+                    <div style={{ width: `${fw.coverage_pct || 0}%`, height: "100%", background: fw.coverage_pct >= 60 ? "#7fe0b0" : fw.coverage_pct > 0 ? "#d4a500" : TV.border }} />
+                  </div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+                    {Object.entries(fw.status_counts || {}).filter(([, count]) => count > 0).map(([status, count]) => (
+                      <span key={status} style={{ fontSize: 9.5, color: CONTROL_STATUS_COLOR[status] || TV.muted, border: `1px solid ${TV.border}`, borderRadius: 4, padding: "1px 5px" }}>
+                        {CONTROL_STATUS_LABEL[status] || status} {count}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 760 }}>
+                <thead>
+                  <tr>
+                    {["Framework", "Controle", "Técnica", "Estado", "Execuções"].map((head) => (
+                      <th key={head} style={{ textAlign: "left", fontSize: 9.5, color: TV.label, fontWeight: 700, textTransform: "uppercase", padding: "0 8px 6px", borderBottom: `1px solid ${TV.border}` }}>{head}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {controlMatrixCells.slice(0, 80).map((cell) => (
+                    <tr key={`${cell.framework}-${cell.control_id}-${cell.technique_key}`}>
+                      <td style={{ fontSize: 10.5, color: TV.text, padding: "7px 8px", borderBottom: `1px solid ${TV.border}` }}>{cell.framework_label}</td>
+                      <td style={{ fontSize: 10.5, color: TV.text, padding: "7px 8px", borderBottom: `1px solid ${TV.border}` }}>
+                        <div style={{ fontWeight: 700 }}>{cell.control_id}</div>
+                        <div style={{ color: TV.muted }}>{cell.control_name}</div>
+                      </td>
+                      <td style={{ fontSize: 10.5, color: TV.text, padding: "7px 8px", borderBottom: `1px solid ${TV.border}` }}>
+                        <div>{cell.technique_name}</div>
+                        <div style={{ color: TV.muted, fontFamily: "var(--font-mono)" }}>{cell.technique_key}</div>
+                      </td>
+                      <td style={{ padding: "7px 8px", borderBottom: `1px solid ${TV.border}` }}>
+                        <span style={{ fontSize: 9.5, color: CONTROL_STATUS_COLOR[cell.status] || TV.muted, border: `1px solid ${TV.border}`, borderRadius: 4, padding: "2px 6px", fontWeight: 700 }}>
+                          {CONTROL_STATUS_LABEL[cell.status] || cell.status}
+                        </span>
+                      </td>
+                      <td style={{ fontSize: 10.5, color: TV.muted, padding: "7px 8px", borderBottom: `1px solid ${TV.border}` }}>{cell.times_tested || 0}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {controlMatrixCells.length > 80 && <div style={{ fontSize: 10, color: TV.muted, marginTop: 8 }}>Mostrando 80 de {controlMatrixCells.length} células.</div>}
+            </div>
           </div>
         </TvPanel>
 

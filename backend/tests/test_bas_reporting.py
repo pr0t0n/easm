@@ -58,6 +58,61 @@ def test_framework_coverage_joins_against_basagent_kind_real():
     assert bas_reporting.BasAgent in join_args
 
 
+def test_control_matrix_links_framework_controls_to_defensive_outcomes():
+    db = MagicMock()
+    jobs = [
+        (SimpleNamespace(technique_key="smb_enum_cme", status="completed", result={"bas_proof": _proof(True)}, target="10.0.0.5"), SimpleNamespace(id=1, kind="real", local_network_cidr="10.0.0.0/24")),
+        (SimpleNamespace(technique_key="ad_kerberoast", status="failed", result={}, target="10.0.0.10"), SimpleNamespace(id=1, kind="real", local_network_cidr="10.0.0.0/24")),
+        (SimpleNamespace(technique_key="port_service_scan", status="completed", result={"defensive_status": "detected"}, target="10.0.0.20"), SimpleNamespace(id=1, kind="real", local_network_cidr="10.0.0.0/24")),
+        (SimpleNamespace(technique_key="owasp_web_app_scan", status="completed", result={"bas_proof": _proof(False)}, target="https://app.local"), SimpleNamespace(id=1, kind="real", local_network_cidr="10.0.0.0/24")),
+    ]
+
+    def query_side_effect(*args):
+        if args and args[0] is bas_reporting.BasNetworkSegmentTag:
+            return _query_chain([])
+        return _query_chain(jobs)
+
+    db.query.side_effect = query_side_effect
+
+    result = bas_reporting.control_matrix(db)
+    cells = {(cell["framework"], cell["control_id"], cell["technique_key"]): cell for cell in result["cells"]}
+
+    assert result["summary"]["missed"] >= 1
+    assert result["summary"]["prevented"] >= 1
+    assert result["summary"]["detected"] >= 1
+    assert cells[("mitre_attack", "T1135", "smb_enum_cme")]["status"] == "missed"
+    assert cells[("nist", "DE.CM", "smb_enum_cme")]["status"] == "missed"
+    assert cells[("pci", "PCI-1", "port_service_scan")]["status"] == "detected"
+    assert cells[("pci", "PCI-6", "owasp_web_app_scan")]["status"] == "tested"
+
+
+def test_control_matrix_includes_custom_segment_controls():
+    db = MagicMock()
+    tag = SimpleNamespace(
+        match_type="cidr",
+        match_value="10.0.0.0/24",
+        controls=[{"name": "EDR telemetry", "vendor": "internal-soc"}],
+    )
+    jobs = [
+        (SimpleNamespace(technique_key="smb_enum_cme", status="completed", result={"defensive_status": "detected"}, target="10.0.0.5"), SimpleNamespace(id=1, kind="real", local_network_cidr="10.0.0.0/24")),
+    ]
+
+    def query_side_effect(*args):
+        if args and args[0] is bas_reporting.BasNetworkSegmentTag:
+            return _query_chain([tag])
+        return _query_chain(jobs)
+
+    db.query.side_effect = query_side_effect
+
+    result = bas_reporting.control_matrix(db)
+    custom_cells = [cell for cell in result["cells"] if cell["framework"] == "custom"]
+
+    assert custom_cells
+    assert custom_cells[0]["control_name"] == "EDR telemetry"
+    assert custom_cells[0]["vendor"] == "internal-soc"
+    assert custom_cells[0]["status"] == "detected"
+
+
 def test_risk_score_joins_against_basagent_kind_real():
     db = MagicMock()
     query = _query_chain([])

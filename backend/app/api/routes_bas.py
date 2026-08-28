@@ -374,6 +374,19 @@ def fleet_campaigns(db: Session = Depends(get_db), current_user: User = Depends(
     return sorted(rows, key=lambda item: (-item["enabled"], item["key"]))
 
 
+@router.get("/control-matrix")
+def bas_control_matrix(
+    schedule_id: int | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    from app.api.deps import user_company_group_ids
+    from app.services import bas_reporting
+
+    group_ids = None if current_user.is_admin else user_company_group_ids(current_user)
+    return bas_reporting.control_matrix(db, group_ids=group_ids, schedule_id=schedule_id)
+
+
 def _purge_bas_scan_jobs(db: Session, scan_job_ids: list[int]) -> int:
     """Deletes the BAS shadow ScanJob rows for `scan_job_ids` plus every
     dependent row they've accumulated. A BAS shadow scan dispatches through
@@ -1061,6 +1074,7 @@ def operations_center(db: Session = Depends(get_db), current_user: User = Depend
             for j in recent_jobs
         ],
         "framework_coverage": bas_reporting.framework_coverage(db, group_ids=group_ids),
+        "control_matrix": bas_reporting.control_matrix(db, group_ids=group_ids),
         "exposure": bas_reporting.exposure_summary(db, group_ids=group_ids),
         "findings": bas_reporting.bas_findings_view(db, group_ids=group_ids),
         "action_priorities": bas_reporting.action_priorities(db, group_ids=group_ids),
