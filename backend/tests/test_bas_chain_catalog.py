@@ -30,3 +30,19 @@ def test_get_chain_returns_the_right_sequence():
     assert chain["technique_keys"] == [
         "network_share_discovery", "ad_scouting_ldap", "ad_bloodhound_collect", "ad_kerberoast",
     ]
+
+
+def test_internal_pentest_chain_covers_agent_based_pentest_flow():
+    chain = get_chain("internal_pentest_from_agent")
+    assert chain is not None
+    assert chain["technique_keys"] == [
+        "port_service_scan",
+        "network_share_discovery",
+        "smb_enum_cme",
+        "safe_credential_checks",
+        "ad_scouting_ldap",
+        "ad_bloodhound_collect",
+        "lateral_movement_simulation_safe",
+        "controlled_exploit_validation",
+        "source_code_secrets_scan",
+    ]

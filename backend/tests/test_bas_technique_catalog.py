@@ -23,7 +23,8 @@ _TUNNELABLE_KEYS = {
     "vmware_vcenter_default_creds", "firewall_segmentation_test",
     "network_share_discovery", "ad_scouting_ldap", "cloud_directory_scouting", "port_service_scan",
     "chat_webhook_discovery", "netlogon_zerologon_check", "owasp_web_app_scan",
-    "pipeline_secrets_harvesting", "source_code_secrets_scan",
+    "pipeline_secrets_harvesting", "source_code_secrets_scan", "safe_credential_checks",
+    "lateral_movement_simulation_safe", "controlled_exploit_validation",
 }
 
 

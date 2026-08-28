@@ -135,9 +135,6 @@ def test_finding_from_job_result_marks_stub_agent_dispatch_as_simulated():
 
 
 def test_finding_from_job_result_marks_real_agent_dispatch_as_not_simulated():
-    """A real (mTLS-certified) agent's dispatch is a genuine result -- it
-    must count like any other Finding, and never carry the "(simulado)"
-    title suffix."""
     db = MagicMock()
     agent = SimpleNamespace(id=9, kind="real")
     technique = get_technique("network_share_discovery")
@@ -145,8 +142,10 @@ def test_finding_from_job_result_marks_real_agent_dispatch_as_not_simulated():
     finding = _finding_from_job_result(db, _job(), _schedule(), technique, agent)
 
     assert finding.details["simulated"] is False
-    assert finding.details["counts_towards_score"] is True
-    assert finding.details["counts_towards_attack_path"] is True
+    assert finding.details["counts_towards_score"] is False
+    assert finding.details["counts_towards_attack_path"] is False
+    assert finding.details["proof"]["status"] == "insufficient_evidence"
+    assert finding.verification_status == "hypothesis"
     assert "(simulado)" not in finding.title
     assert finding.details["bas_agent_id"] == 9
     assert finding.details["bas_agent_kind"] == "real"
@@ -418,7 +417,11 @@ def test_finding_from_job_result_escalates_severity_for_a_real_dispatch_with_rea
     db = MagicMock()
     agent = SimpleNamespace(id=13, kind="real")
     technique = get_technique("owasp_web_app_scan")
-    job = _job(result={"stdout": "+ [007352] /: The X-Content-Type-Options header is not set.\n", "status": "executed"})
+    job = _job(result={
+        "command": "nikto -h 10.10.10.5",
+        "stdout": "+ [007352] /: The X-Content-Type-Options header is not set.\n",
+        "status": "executed",
+    })
 
     finding = _finding_from_job_result(db, job, _schedule(), technique, agent)
 
@@ -426,3 +429,17 @@ def test_finding_from_job_result_escalates_severity_for_a_real_dispatch_with_rea
     assert finding.details["key_findings"] == ["+ [007352] /: The X-Content-Type-Options header is not set."]
     assert finding.details["recommendation"] == technique["recommendation"]
     assert finding.details["mitre_refs"] == technique["mitre_refs"]
+    assert finding.details["proof"]["valid"] is True
+    assert finding.details["counts_towards_score"] is True
+    assert finding.verification_status == "confirmed"
+    assert finding.confidence_score == 90
+    assert job.result["bas_proof"]["valid"] is True
+
+
+def test_extract_key_findings_supports_internal_pentest_techniques():
+    stdout = "Nmap scan report for 10.10.10.5\n445/tcp open microsoft-ds\n"
+    assert _extract_key_findings("lateral_movement_simulation_safe", "lateral_movement", {"stdout": stdout}) == [
+        "10.10.10.5: 445/tcp open microsoft-ds"
+    ]
+    assert _derive_severity("safe_credential_checks", ["SMB 10.10.10.5 445 HOST (signing:False)"]) == "medium"
+    assert _derive_severity("controlled_exploit_validation", ["+ [1] missing security header"]) == "medium"

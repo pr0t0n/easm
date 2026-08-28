@@ -24,6 +24,10 @@ def _query_chain(rows):
     return q
 
 
+def _proof(valid=True, status="validated"):
+    return {"valid": valid, "status": status}
+
+
 def test_framework_coverage_counts_only_relevant_techniques_as_tested():
     db = MagicMock()
     db.query.return_value = _query_chain([("smb_enum_cme",)])  # only this technique was ever dispatched
@@ -96,6 +100,7 @@ def test_bas_findings_view_marks_every_row_simulated():
 
     assert rows[0]["simulated"] is True
     assert rows[0]["technique_key"] == "smb_enum_cme"
+    assert rows[0]["proof_valid"] is False
 
 
 def test_crown_jewels_view_reuses_the_real_keyword_identifier():
@@ -198,7 +203,26 @@ def test_risk_score_excludes_queued_and_skipped_from_the_ratio():
     assert result["score"] == 75
     assert result["worked"] == 3
     assert result["blocked"] == 1
+    assert result["unproven"] == 0
     assert result["resolved_total"] == 4
+
+
+def test_risk_score_counts_completed_without_proof_as_unproven():
+    db = MagicMock()
+    db.query.return_value = _query_chain([
+        SimpleNamespace(status="completed", result={"bas_proof": _proof(True)}),
+        SimpleNamespace(status="completed", result={"bas_proof": _proof(False, "insufficient_evidence")}),
+        SimpleNamespace(status="failed", result={}),
+        SimpleNamespace(status="running", result={}),
+    ])
+
+    result = bas_reporting.risk_score(db)
+
+    assert result["score"] == 33
+    assert result["worked"] == 1
+    assert result["unproven"] == 1
+    assert result["blocked"] == 1
+    assert result["resolved_total"] == 3
 
 
 def test_risk_score_all_blocked_is_zero():
@@ -220,13 +244,14 @@ def test_executive_report_narrative_reflects_zero_resolved_jobs():
              "distinct_targets_tested": 0, "categories_tested": [], "total_dispatches": 0,
              "real_tunnel_roundtrips": 0, "failed_dispatches": 0,
          }), \
-         patch.object(bas_reporting, "risk_score", return_value={"score": None, "worked": 0, "blocked": 0, "resolved_total": 0}), \
+         patch.object(bas_reporting, "risk_score", return_value={"score": None, "worked": 0, "blocked": 0, "unproven": 0, "resolved_total": 0}), \
          patch.object(bas_reporting, "crown_jewels_view", return_value=[]), \
          patch.object(bas_reporting, "attack_heatmap", return_value=[
              {"technique_key": "smb_enum_cme", "times_tested": 0}, {"technique_key": "ad_kerberoast", "times_tested": 0},
          ]), \
          patch.object(bas_reporting, "bas_findings_view", return_value=[]), \
          patch.object(bas_reporting, "action_priorities", return_value=[]), \
+         patch.object(bas_reporting, "port_scan_observability", return_value={"scans": [], "summary": {}}), \
          patch.object(bas_reporting, "chain_attack_path", return_value=[]):
         result = bas_reporting.executive_report(db)
 
@@ -244,22 +269,23 @@ def test_executive_report_narrative_reflects_real_resolved_jobs():
              "distinct_targets_tested": 1, "categories_tested": ["smb"], "total_dispatches": 2,
              "real_tunnel_roundtrips": 1, "failed_dispatches": 1,
          }), \
-         patch.object(bas_reporting, "risk_score", return_value={"score": 50, "worked": 1, "blocked": 1, "resolved_total": 2}), \
+         patch.object(bas_reporting, "risk_score", return_value={"score": 50, "worked": 1, "blocked": 1, "unproven": 0, "resolved_total": 2}), \
          patch.object(bas_reporting, "crown_jewels_view", return_value=[{"target": "admin-portal.corp.local", "jobs_run": 1}]), \
          patch.object(bas_reporting, "attack_heatmap", return_value=[
              {"technique_key": "smb_enum_cme", "times_tested": 2}, {"technique_key": "ad_kerberoast", "times_tested": 0},
          ]), \
          patch.object(bas_reporting, "bas_findings_view", return_value=[
-             {"id": 1, "title": "BAS: smb_enum_cme", "severity": "info", "simulated": False},
+             {"id": 1, "title": "BAS: smb_enum_cme", "severity": "info", "simulated": False, "proof_valid": True},
          ]), \
          patch.object(bas_reporting, "action_priorities", return_value=[]), \
+         patch.object(bas_reporting, "port_scan_observability", return_value={"scans": [], "summary": {}}), \
          patch.object(bas_reporting, "chain_attack_path", return_value=[]):
         result = bas_reporting.executive_report(db)
 
     assert result["risk_score"]["resolved_total"] == 2
     assert "50" in result["narrative"]
     assert result["tested_techniques"] == 1
-    assert "Nenhum achado real indicou risco concreto" in result["narrative"]
+    assert "Nenhum achado com prova BAS indicou risco concreto" in result["narrative"]
 
 
 def test_executive_report_narrative_calls_out_real_vulnerable_findings():
@@ -269,14 +295,15 @@ def test_executive_report_narrative_calls_out_real_vulnerable_findings():
              "distinct_targets_tested": 1, "categories_tested": ["web"], "total_dispatches": 1,
              "real_tunnel_roundtrips": 1, "failed_dispatches": 0,
          }), \
-         patch.object(bas_reporting, "risk_score", return_value={"score": 100, "worked": 1, "blocked": 0, "resolved_total": 1}), \
+         patch.object(bas_reporting, "risk_score", return_value={"score": 100, "worked": 1, "blocked": 0, "unproven": 0, "resolved_total": 1}), \
          patch.object(bas_reporting, "crown_jewels_view", return_value=[]), \
          patch.object(bas_reporting, "attack_heatmap", return_value=[]), \
          patch.object(bas_reporting, "bas_findings_view", return_value=[
-             {"id": 1, "title": "BAS: OWASP Web Application Scan", "severity": "medium", "simulated": False},
-             {"id": 2, "title": "BAS: stub finding", "severity": "critical", "simulated": True},  # must NOT count
+             {"id": 1, "title": "BAS: OWASP Web Application Scan", "severity": "medium", "simulated": False, "proof_valid": True},
+             {"id": 2, "title": "BAS: stub finding", "severity": "critical", "simulated": True, "proof_valid": False},
          ]), \
          patch.object(bas_reporting, "action_priorities", return_value=[{"priority": "P1"}]), \
+         patch.object(bas_reporting, "port_scan_observability", return_value={"scans": [], "summary": {}}), \
          patch.object(bas_reporting, "chain_attack_path", return_value=[{"chain_key": "web_to_secrets_chain"}]):
         result = bas_reporting.executive_report(db)
 
@@ -285,6 +312,8 @@ def test_executive_report_narrative_calls_out_real_vulnerable_findings():
     assert "1 achado(s) real(is) indicam risco concreto" in result["narrative"]
     assert result["action_priorities"] == [{"priority": "P1"}]
     assert result["chain_attack_paths"] == [{"chain_key": "web_to_secrets_chain"}]
+    assert result["technical_pentest_report"]["scope"]["validated_findings"] == 1
+    assert result["technical_pentest_report"]["evidence_model"] == "proof_based_bas_finding"
 
 
 def test_action_priorities_extracts_smbv1_and_unsigned_smb_from_real_job_stdout():
@@ -296,7 +325,7 @@ def test_action_priorities_extracts_smbv1_and_unsigned_smb_from_real_job_stdout(
         "SMB                      10.125.138.34   445    BBTMF-9RK90L3    [*] Windows 11 / Server 2025 Build 26100 x64 (name:BBTMF-9RK90L3) (domain:BBTMF-9RK90L3) (signing:True) (SMBv1:False)",
     ])
     job = SimpleNamespace(
-        id=74, technique_key="smb_enum_cme", result={"stdout": stdout}, created_at=datetime(2026, 8, 26, 21, 21),
+        id=74, technique_key="smb_enum_cme", result={"stdout": stdout, "bas_proof": _proof(True)}, created_at=datetime(2026, 8, 26, 21, 21),
     )
     agent = SimpleNamespace(id=19, kind="real", label=None, hostname="kali")
     schedule = SimpleNamespace(id=10, name="teste")
@@ -320,7 +349,7 @@ def test_attack_path_inventory_builds_cmdb_apps_vulnerabilities_and_steps():
         "SMB                      10.125.135.102  445    NBK-DANIEL       [*] Windows 10 Home Single Language 26200 x64 (name:NBK-DANIEL) (domain:NBK-DANIEL) (signing:False) (SMBv1:True)",
     ])
     job = SimpleNamespace(
-        id=75, technique_key="smb_enum_cme", status="completed", result={"stdout": stdout}, created_at=datetime(2026, 8, 26, 22, 2),
+        id=75, technique_key="smb_enum_cme", status="completed", result={"stdout": stdout, "bas_proof": _proof(True)}, created_at=datetime(2026, 8, 26, 22, 2),
     )
     agent = SimpleNamespace(id=19, kind="real")
     schedule = SimpleNamespace(id=10, name="teste")
@@ -356,9 +385,11 @@ def test_chain_attack_path_groups_steps_by_the_shadow_scan_job_in_order():
     )
     jobs = [
         SimpleNamespace(scan_job_id=42, technique_key="port_service_scan", status="completed",
-                         risk_tier="safe", finding_id=101, created_at=datetime(2026, 8, 19, 18, 48, 49)),
+                         risk_tier="safe", finding_id=101, result={"bas_proof": _proof(True)},
+                         created_at=datetime(2026, 8, 19, 18, 48, 49)),
         SimpleNamespace(scan_job_id=42, technique_key="owasp_web_app_scan", status="completed",
-                         risk_tier="safe", finding_id=102, created_at=datetime(2026, 8, 19, 18, 48, 50)),
+                         risk_tier="safe", finding_id=102, result={"bas_proof": _proof(True)},
+                         created_at=datetime(2026, 8, 19, 18, 48, 50)),
     ]
     rows = [(jobs[0], schedule, agent), (jobs[1], schedule, agent)]
 
@@ -378,3 +409,4 @@ def test_chain_attack_path_groups_steps_by_the_shadow_scan_job_in_order():
     assert path["simulated"] is False
     assert [s["technique_key"] for s in path["steps"]] == ["port_service_scan", "owasp_web_app_scan"]
     assert path["steps"][1]["mitre_refs"]  # populated from the real technique catalog
+    assert all(step["proof_valid"] is True for step in path["steps"])

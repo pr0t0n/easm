@@ -43,6 +43,9 @@ _CATEGORY_FRAMEWORK_RELEVANCE: dict[str, set[str]] = {
     "network": {"nist", "pci", "cis_v8"},
     "web": {"nist", "iso27001", "pci", "cis_v8"},
     "cicd": {"nist", "iso27001", "cis_v8"},
+    "identity": {"nist", "iso27001", "pci", "cis_v8"},
+    "lateral_movement": {"nist", "iso27001", "pci", "cis_v8"},
+    "exploit_validation": {"nist", "iso27001", "pci", "cis_v8"},
 }
 _FRAMEWORK_LABELS = {"nist": "NIST CSF", "iso27001": "ISO 27001", "pci": "PCI DSS 4.0", "cis_v8": "CIS Controls"}
 _SMB_LINE_RE = re.compile(
@@ -146,6 +149,39 @@ def _nmap_summary(result: dict[str, Any]) -> dict[str, Any]:
     if no_open_count:
         summary.setdefault("hosts_without_open_ports", no_open_count)
     return summary
+
+
+def _proof_from_result(result: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(result, dict):
+        return {}
+    proof = result.get("bas_proof") or result.get("proof") or {}
+    return proof if isinstance(proof, dict) else {}
+
+
+def _proof_valid_from_result(result: dict[str, Any] | None) -> bool:
+    return bool(_proof_from_result(result).get("valid"))
+
+
+def _proof_valid_from_finding(finding: Finding) -> bool:
+    details = finding.details or {}
+    proof = details.get("proof") or {}
+    return bool(isinstance(proof, dict) and proof.get("valid"))
+
+
+def _status_from_risk_row(row: Any) -> str:
+    if isinstance(row, tuple):
+        return str(row[0] or "")
+    return str(getattr(row, "status", "") or "")
+
+
+def _risk_row_is_legacy_status_tuple(row: Any) -> bool:
+    return isinstance(row, tuple) and row and isinstance(row[0], str)
+
+
+def _risk_row_has_valid_proof(row: Any) -> bool:
+    if _risk_row_is_legacy_status_tuple(row):
+        return _status_from_risk_row(row) == "completed"
+    return _proof_valid_from_result(getattr(row, "result", None))
 
 
 def _real_agent_technique_keys(
@@ -303,8 +339,10 @@ def bas_findings_view(
             # bas_scheduler._extract_key_findings) -- empty for a stub
             # dispatch or a real one that genuinely found nothing.
             "key_findings": (f.details or {}).get("key_findings", []),
-            # Per-dispatch, not a blanket constant -- see bas_exclusion.py.
             "simulated": bool((f.details or {}).get("simulated", True)),
+            "proof": (f.details or {}).get("proof") or {},
+            "proof_status": (f.details or {}).get("proof_status") or ((f.details or {}).get("proof") or {}).get("status"),
+            "proof_valid": _proof_valid_from_finding(f),
         }
         for f in rows
     ]
@@ -357,6 +395,8 @@ def action_priorities(
             })
 
     for job, agent, schedule in rows:
+        if not _proof_valid_from_result(getattr(job, "result", None)):
+            continue
         result = job.result or {}
         if job.technique_key == "smb_enum_cme":
             observations = _smb_observations(str(result.get("stdout") or ""))
@@ -470,6 +510,8 @@ def attack_path_inventory(
         return asset
 
     for job, agent, schedule in rows:
+        if not _proof_valid_from_result(getattr(job, "result", None)):
+            continue
         result = job.result or {}
         if job.technique_key in {"port_service_scan", "firewall_segmentation_test"}:
             for port in _nmap_open_ports(result):
@@ -655,19 +697,22 @@ def risk_score(
     dispatches completed their relay; it does not by itself mean a specific
     vulnerability was proven. Jobs still queued/running/skipped are excluded
     from the ratio -- they have no resolved outcome yet."""
-    query = db.query(BasJob.status).join(BasAgent, BasAgent.id == BasJob.agent_id).filter(BasAgent.kind == "real")
+    query = db.query(BasJob).join(BasAgent, BasAgent.id == BasJob.agent_id).filter(BasAgent.kind == "real")
     if group_ids is not None:
         query = query.filter(BasJob.access_group_id.in_(group_ids))
     if schedule_id is not None:
         query = query.filter(BasJob.schedule_id == schedule_id)
-    statuses = [row[0] for row in query.all()]
-    completed = sum(1 for s in statuses if s == "completed")
-    failed = sum(1 for s in statuses if s == "failed")
-    resolved = completed + failed
+    rows = query.all()
+    completed = sum(1 for row in rows if _status_from_risk_row(row) == "completed" and _risk_row_has_valid_proof(row))
+    unproven = sum(1 for row in rows if _status_from_risk_row(row) == "completed" and not _risk_row_has_valid_proof(row))
+    failed = sum(1 for row in rows if _status_from_risk_row(row) == "failed")
+    resolved = completed + failed + unproven
     return {
         "score": round(100 * completed / resolved) if resolved else None,
         "worked": completed,
         "blocked": failed,
+        "unproven": unproven,
+        "proof_validated": completed,
         "resolved_total": resolved,
     }
 
@@ -754,6 +799,7 @@ def chain_attack_path(
             }
             paths_by_scan_job[job.scan_job_id] = entry
         technique = get_technique(job.technique_key) or {}
+        proof = _proof_from_result(getattr(job, "result", None))
         entry["steps"].append({
             "technique_key": job.technique_key,
             "display_name": technique.get("display_name", job.technique_key),
@@ -761,10 +807,50 @@ def chain_attack_path(
             "status": job.status,
             "risk_tier": job.risk_tier,
             "finding_id": job.finding_id,
+            "proof_valid": bool(proof.get("valid")),
+            "proof_status": proof.get("status") or "missing",
         })
 
     paths = sorted(paths_by_scan_job.values(), key=lambda p: p["fired_at"], reverse=True)
     return paths[:limit]
+
+
+def _technical_pentest_report_payload(
+    *,
+    findings: list[dict[str, Any]],
+    priorities: list[dict[str, Any]],
+    chain_paths: list[dict[str, Any]],
+    port_scan: dict[str, Any],
+    score: dict[str, Any],
+) -> dict[str, Any]:
+    proofed_findings = [f for f in findings if not f.get("simulated") and f.get("proof_valid")]
+    unproven_findings = [f for f in findings if not f.get("simulated") and not f.get("proof_valid")]
+    return {
+        "mode": "internal_pentest_from_agent",
+        "evidence_model": "proof_based_bas_finding",
+        "scope": {
+            "validated_findings": len(proofed_findings),
+            "unproven_findings": len(unproven_findings),
+            "proof_validated_jobs": score.get("proof_validated", score.get("worked", 0)),
+            "unproven_jobs": score.get("unproven", 0),
+            "blocked_jobs": score.get("blocked", 0),
+        },
+        "methodology": [
+            "asset_discovery_internal",
+            "service_fingerprint",
+            "vuln_validation",
+            "safe_credential_checks",
+            "ad_enumeration",
+            "safe_lateral_movement_simulation",
+            "controlled_exploit_validation",
+            "replayable_retest",
+        ],
+        "validated_findings": proofed_findings,
+        "unproven_findings": unproven_findings,
+        "technical_priorities": priorities,
+        "attack_paths": chain_paths,
+        "service_fingerprint": port_scan,
+    }
 
 
 def executive_report(
@@ -791,12 +877,13 @@ def executive_report(
     findings = bas_findings_view(db, group_ids=group_ids, schedule_id=schedule_id, limit=50)
     chain_paths = chain_attack_path(db, group_ids=group_ids, schedule_id=schedule_id)
     priorities = action_priorities(db, group_ids=group_ids, schedule_id=schedule_id)
+    port_scan = port_scan_observability(db, group_ids=group_ids, schedule_id=schedule_id)
 
     total_techniques = len(list_techniques())
     tested_techniques = sum(1 for row in heatmap if row["times_tested"] > 0)
     jewels_touched = sum(1 for j in jewels if j["jobs_run"] > 0)
 
-    real_findings = [f for f in findings if not f["simulated"]]
+    real_findings = [f for f in findings if not f["simulated"] and f.get("proof_valid")]
     severity_order = ["critical", "high", "medium", "low", "info"]
     severity_counts = {sev: sum(1 for f in real_findings if f["severity"] == sev) for sev in severity_order}
     vulnerable_findings = [f for f in real_findings if f["severity"] != "info"]
@@ -819,12 +906,12 @@ def executive_report(
                 f"{len(blocking_priorities)} prioridade(s) P0/P1 foram extraídas dos resultados reais e exigem correção."
             )
         else:
-            risk_clause = "Nenhum achado real indicou risco concreto até agora -- os alvos testados responderam de forma esperada."
+            risk_clause = "Nenhum achado com prova BAS indicou risco concreto até agora; resultados sem evidência suficiente ficam como hipótese."
         narrative = (
             f"Neste escopo, {tested_techniques}/{total_techniques} técnicas catalogadas foram disparadas, "
             f"cobrindo {len(exposure['categories_tested'])} categoria(s) em {exposure['distinct_targets_tested']} alvo(s) interno(s). "
-            f"Dos {score['resolved_total']} disparo(s) com resultado resolvido, {score['worked']} completaram o round-trip real do "
-            f"túnel ({score['score']}/100) e {score['blocked']} falharam/foram bloqueados. "
+            f"Dos {score['resolved_total']} disparo(s) com resultado resolvido, {score['worked']} tiveram prova objetiva "
+            f"({score['score']}/100), {score['unproven']} ficaram sem evidência suficiente e {score['blocked']} falharam/foram bloqueados. "
             f"{jewels_touched}/{len(jewels)} alvo(s) de alto valor já foram testados ao menos uma vez. "
             f"{risk_clause}"
         )
@@ -844,4 +931,7 @@ def executive_report(
         "findings": findings,
         "action_priorities": priorities,
         "chain_attack_paths": chain_paths,
+        "technical_pentest_report": _technical_pentest_report_payload(
+            findings=findings, priorities=priorities, chain_paths=chain_paths, port_scan=port_scan, score=score,
+        ),
     }

@@ -48,6 +48,25 @@ BAS_CHAIN_CATALOG: list[dict[str, Any]] = [
         ),
         "technique_keys": ["cloud_directory_scouting", "source_code_secrets_scan"],
     },
+    {
+        "chain_key": "internal_pentest_from_agent",
+        "display_name": "Internal Pentest From Agent",
+        "description": (
+            "Agent-based internal pentest flow: asset discovery, service fingerprint, SMB/credential boundary checks, "
+            "AD enumeration, safe lateral movement reachability, controlled validation, and secrets exposure evidence."
+        ),
+        "technique_keys": [
+            "port_service_scan",
+            "network_share_discovery",
+            "smb_enum_cme",
+            "safe_credential_checks",
+            "ad_scouting_ldap",
+            "ad_bloodhound_collect",
+            "lateral_movement_simulation_safe",
+            "controlled_exploit_validation",
+            "source_code_secrets_scan",
+        ],
+    },
 ]
 
 _CATALOG_BY_KEY: dict[str, dict[str, Any]] = {row["chain_key"]: row for row in BAS_CHAIN_CATALOG}

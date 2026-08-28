@@ -53,7 +53,7 @@ export default function BasReportPage() {
   const severityCounts = data?.severity_counts || {};
   const tone = riskScoreTone(score.score);
 
-  const vulnerableFindings = findings.filter((f) => !f.simulated && f.severity !== "info");
+  const vulnerableFindings = findings.filter((f) => !f.simulated && f.proof_valid && f.severity !== "info");
   const maxSevCount = Math.max(1, ...SEV_ORDER.map((s) => severityCounts[s] || 0));
 
   const heatmapByCategory = {};
@@ -89,7 +89,7 @@ export default function BasReportPage() {
             <h1>Cobertura, risco e caminhos de ataque reais observados</h1>
             <p className="report-meta sk-mono">
               {data?.total_techniques || 0} técnica(s) catalogada(s) · {data?.tested_techniques || 0} já disparada(s) ·
-              {" "}{vulnerableFindings.length} achado(s) real(is) com risco
+              {" "}{vulnerableFindings.length} achado(s) validado(s) com risco
             </p>
           </div>
           <div className="report-rating">
@@ -104,13 +104,12 @@ export default function BasReportPage() {
             <div className="report-kpis">
               <div><span>Risk score</span><strong className="sk-mono">{score.score == null ? "—" : `${score.score}/100`}</strong></div>
               <div><span>Disparos resolvidos</span><strong className="sk-mono">{score.resolved_total || 0}</strong></div>
-              <div><span>Round-trips reais</span><strong className="sk-mono">{exposure.real_tunnel_roundtrips || 0}</strong></div>
+              <div><span>Provas validadas</span><strong className="sk-mono">{score.proof_validated || score.worked || 0}</strong></div>
               <div><span>Alvos internos testados</span><strong className="sk-mono">{exposure.distinct_targets_tested || 0}</strong></div>
             </div>
           </div>
           <p className="report-sub" style={{ marginTop: 10 }}>
-            Só é simulado o que rodou via um agente stub (bas_agent_stub) — um agente real relaya tráfego e resultado
-            de verdade, e conta como qualquer outro achado da plataforma.
+            Um achado BAS só entra como validado quando tem comando, alvo, evidência parseada e dados de replay/reteste.
           </p>
         </section>
 
@@ -219,7 +218,7 @@ export default function BasReportPage() {
                       <span className="sk-mono muted" style={{ marginLeft: 8, fontSize: 11 }}>alvo: {path.target_hint}</span>
                     </div>
                     <span style={{ fontSize: 10.5, fontWeight: 700, color: path.simulated ? "#d4a500" : "#229160" }}>
-                      {path.simulated ? "SIMULADO" : "REAL"}
+                      {path.simulated ? "SIMULADO" : path.steps?.every((step) => step.proof_valid) ? "VALIDADO" : "SEM PROVA"}
                     </span>
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
@@ -289,15 +288,15 @@ export default function BasReportPage() {
 
         <section className="report-section">
           <div className="sk-eyebrow">09 · Achados, vulnerabilidades e recomendações</div>
-          <span className="report-sub">clique num achado real para ver o que foi observado de fato e como corrigir</span>
+          <span className="report-sub">clique num achado validado para ver o que foi observado de fato e como corrigir</span>
           <div className="attack-table-wrap">
             <table className="attack-table report-plan">
-              <thead><tr><th>Achado</th><th>Técnica</th><th>Severidade</th><th>MITRE</th><th>Real/Simulado</th><th>Data</th></tr></thead>
+              <thead><tr><th>Achado</th><th>Técnica</th><th>Severidade</th><th>MITRE</th><th>Prova</th><th>Data</th></tr></thead>
               <tbody>
                 {findings.length === 0 && <tr><td colSpan={6}>Nenhum achado BAS registrado ainda.</td></tr>}
                 {findings.map((f) => {
                   const expanded = expandedFindingId === f.id;
-                  const canExpand = !f.simulated && (f.key_findings?.length > 0 || f.recommendation);
+                  const canExpand = !f.simulated && f.proof_valid && (f.key_findings?.length > 0 || f.recommendation);
                   return (
                     <Fragment key={f.id}>
                       <tr
@@ -308,7 +307,7 @@ export default function BasReportPage() {
                         <td className="sk-mono">{f.technique_key}</td>
                         <td><span style={{ fontSize: 11, fontWeight: 700, color: SEV_COLOR[f.severity] || "inherit" }}>{SEV_LABEL[f.severity] || f.severity}</span></td>
                         <td className="sk-mono" style={{ fontSize: 11 }}>{(f.mitre_refs || []).join(", ") || "—"}</td>
-                        <td>{f.simulated ? "Simulado" : "Real"}</td>
+                        <td>{f.simulated ? "Simulado" : f.proof_valid ? "Validado" : "Sem prova"}</td>
                         <td className="sk-mono">{f.created_at}</td>
                       </tr>
                       {expanded && (

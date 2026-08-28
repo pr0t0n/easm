@@ -767,6 +767,11 @@ def operations_center(db: Session = Depends(get_db), current_user: User = Depend
 
     agent_kind_by_id = {a.id: a.kind for a in agents}
 
+    def proof_for_job(job: BasJob) -> dict[str, Any]:
+        result = job.result or {}
+        proof = result.get("bas_proof") or {}
+        return proof if isinstance(proof, dict) else {}
+
     return {
         "agents": [
             {"id": a.id, "label": a.label or a.hostname, "os": a.os, "status": a.status,
@@ -792,6 +797,8 @@ def operations_center(db: Session = Depends(get_db), current_user: User = Depend
                 "target": j.target, "status": j.status, "agent_id": j.agent_id,
                 "dispatched_at": j.dispatched_at,
                 "simulated": agent_kind_by_id.get(j.agent_id, "stub") != "real",
+                "proof_valid": bool(proof_for_job(j).get("valid")),
+                "proof_status": proof_for_job(j).get("status") or "pending",
             }
             for j in active_jobs
         ],
@@ -809,6 +816,8 @@ def operations_center(db: Session = Depends(get_db), current_user: User = Depend
                 # Per-job, sourced from the actual dispatching agent's kind --
                 # only a stub-agent job is simulated (see bas_exclusion.py).
                 "simulated": agent_kind_by_id.get(j.agent_id, "stub") != "real",
+                "proof_valid": bool(proof_for_job(j).get("valid")),
+                "proof_status": proof_for_job(j).get("status") or "missing",
             }
             for j in recent_jobs
         ],

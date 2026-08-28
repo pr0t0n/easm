@@ -390,8 +390,10 @@ export default function BasOperationsCenterPage() {
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                     {j.simulated ? (
                       <span style={{ fontSize: 9.5, fontWeight: 700, color: "#d4a500", border: "1px solid rgba(212,165,0,0.4)", borderRadius: 4, padding: "1px 5px" }}>SIMULADO</span>
+                    ) : j.proof_valid ? (
+                      <span style={{ fontSize: 9.5, fontWeight: 700, color: "#7fe0b0", border: "1px solid rgba(127,224,176,0.4)", borderRadius: 4, padding: "1px 5px" }}>VALIDADO</span>
                     ) : (
-                      <span style={{ fontSize: 9.5, fontWeight: 700, color: "#7fe0b0", border: "1px solid rgba(127,224,176,0.4)", borderRadius: 4, padding: "1px 5px" }}>REAL</span>
+                      <span style={{ fontSize: 9.5, fontWeight: 700, color: TV.muted, border: `1px solid ${TV.border}`, borderRadius: 4, padding: "1px 5px" }}>REAL · {j.proof_status || "PENDENTE"}</span>
                     )}
                     <span style={{ fontSize: 10, color: TV.muted }}>{j.status}</span>
                     <span style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "#d4a500" }}>{formatElapsed(j.dispatched_at, now)}</span>
@@ -465,8 +467,10 @@ export default function BasOperationsCenterPage() {
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                     {j.simulated ? (
                       <span style={{ fontSize: 9.5, fontWeight: 700, color: "#d4a500", border: "1px solid rgba(212,165,0,0.4)", borderRadius: 4, padding: "1px 5px" }}>SIMULADO</span>
+                    ) : j.proof_valid ? (
+                      <span style={{ fontSize: 9.5, fontWeight: 700, color: "#7fe0b0", border: "1px solid rgba(127,224,176,0.4)", borderRadius: 4, padding: "1px 5px" }}>VALIDADO</span>
                     ) : (
-                      <span style={{ fontSize: 9.5, fontWeight: 700, color: "#7fe0b0", border: "1px solid rgba(127,224,176,0.4)", borderRadius: 4, padding: "1px 5px" }}>REAL</span>
+                      <span style={{ fontSize: 9.5, fontWeight: 700, color: TV.muted, border: `1px solid ${TV.border}`, borderRadius: 4, padding: "1px 5px" }}>SEM PROVA</span>
                     )}
                     <span style={{ fontSize: 10, color: j.status === "completed" ? "#7fe0b0" : j.status === "failed" ? "#e96363" : TV.muted }}>{j.status}</span>
                   </div>
@@ -521,7 +525,7 @@ export default function BasOperationsCenterPage() {
           </div>
         </TvPanel>
 
-        <TvPanel title="Vulnerabilidades (BAS)" right={`${findings.length} · real ou simulado por agente`} span={2}>
+        <TvPanel title="Vulnerabilidades (BAS)" right={`${findings.length} · validado, sem prova ou simulado`} span={2}>
           <div style={{ display: "grid", gap: 6, maxHeight: 220, overflowY: "auto" }}>
             {findings.length === 0 && <div style={{ fontSize: 11, color: TV.muted }}>Nenhuma finding do BAS ainda.</div>}
             {findings.map((f) => (
@@ -529,8 +533,10 @@ export default function BasOperationsCenterPage() {
                 <div style={{ fontSize: 11, color: TV.text }}>{f.title}</div>
                 {f.simulated ? (
                   <span style={{ fontSize: 9.5, fontWeight: 700, color: "#d4a500", border: "1px solid rgba(212,165,0,0.4)", borderRadius: 4, padding: "1px 5px" }}>SIMULADO</span>
+                ) : f.proof_valid ? (
+                  <span style={{ fontSize: 9.5, fontWeight: 700, color: "#7fe0b0", border: "1px solid rgba(127,224,176,0.4)", borderRadius: 4, padding: "1px 5px" }}>VALIDADO</span>
                 ) : (
-                  <span style={{ fontSize: 9.5, fontWeight: 700, color: "#7fe0b0", border: "1px solid rgba(127,224,176,0.4)", borderRadius: 4, padding: "1px 5px" }}>REAL</span>
+                  <span style={{ fontSize: 9.5, fontWeight: 700, color: TV.muted, border: `1px solid ${TV.border}`, borderRadius: 4, padding: "1px 5px" }}>SEM PROVA</span>
                 )}
               </div>
             ))}
@@ -565,7 +571,7 @@ export default function BasOperationsCenterPage() {
                 <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
                   <span style={{ fontSize: 11.5, fontWeight: 700, color: TV.text }}>{path.chain_display_name}</span>
                   <span style={{ fontSize: 9.5, fontWeight: 700, color: path.simulated ? "#d4a500" : "#7fe0b0" }}>
-                    {path.simulated ? "SIMULADO" : "REAL"}
+                    {path.simulated ? "SIMULADO" : path.steps?.every((step) => step.proof_valid) ? "VALIDADO" : "SEM PROVA"}
                   </span>
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" }}>

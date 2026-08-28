@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from app.models.models import BasAgent, BasJob, BasSchedule, Finding, ScanJob
 from app.services.bas_dispatcher import dispatch_bas_technique
 from app.services.bas_guardrail_policy import check_bas_authorization
+from app.services.bas_proof import build_bas_proof
 from app.services.bas_technique_catalog import get_technique
 
 logger = logging.getLogger(__name__)
@@ -124,11 +125,11 @@ def _extract_key_findings(technique_key: str, category: str, result: dict[str, A
     if not lines:
         return []
 
-    if technique_key == "owasp_web_app_scan":
+    if technique_key in ("owasp_web_app_scan", "controlled_exploit_validation"):
         return [ln for ln in lines if ln.startswith("+ [")][:15]
-    if technique_key == "smb_enum_cme":
+    if technique_key in ("smb_enum_cme", "safe_credential_checks"):
         return [ln for ln in lines if ln.startswith("SMB") and ("(signing:False)" in ln or "(SMBv1:True)" in ln)][:50]
-    if technique_key in ("port_service_scan", "firewall_segmentation_test"):
+    if technique_key in ("port_service_scan", "firewall_segmentation_test", "lateral_movement_simulation_safe"):
         # These two accept_range techniques run nmap against a whole CIDR in
         # one invocation -- its stdout only prints "Nmap scan report for
         # <host>" once per host, then a bare PORT/STATE/SERVICE table with no
@@ -176,10 +177,14 @@ def _derive_severity(technique_key: str, key_findings: list[str]) -> str:
         return "high"  # a real exposed credential/token
     if technique_key == "owasp_web_app_scan":
         return "medium"  # real misconfiguration-class findings (headers, CORS, etc.)
-    if technique_key in ("port_service_scan", "firewall_segmentation_test", "network_share_discovery"):
+    if technique_key in ("port_service_scan", "firewall_segmentation_test", "network_share_discovery", "lateral_movement_simulation_safe"):
         if all(str(ln).startswith("Nmap concluiu sem portas abertas") for ln in key_findings):
             return "info"
         return "low"  # real reachability/exposure, not itself a vulnerability
+    if technique_key == "safe_credential_checks":
+        return "medium"
+    if technique_key == "controlled_exploit_validation":
+        return "medium"
     return "info"
 
 
@@ -200,18 +205,25 @@ def _finding_from_job_result(
     # vulnerability was observed regardless of what its canned text says.
     key_findings = [] if is_stub else _extract_key_findings(technique["technique_key"], technique["category"], result)
     severity = "info" if is_stub else _derive_severity(technique["technique_key"], key_findings)
+    proof = build_bas_proof(
+        technique=technique, job=job, agent=agent, result=result, key_findings=key_findings, severity=severity,
+    )
+    counts = bool(proof.get("valid"))
+    job_result = dict(result)
+    job_result["bas_proof"] = proof
+    job.result = job_result
     finding = Finding(
         scan_job_id=job.scan_job_id,
         title=f"BAS: {technique['display_name']}" + (" (simulado)" if is_stub else ""),
         severity=severity,
         tool="bas-agent",
-        verification_status="hypothesis",
-        confidence_score=min(20, 20),
+        verification_status="confirmed" if counts else "hypothesis",
+        confidence_score=90 if counts else 20,
         details={
             "source_module": "bas",
             "simulated": is_stub,
-            "counts_towards_score": not is_stub,
-            "counts_towards_attack_path": not is_stub,
+            "counts_towards_score": counts,
+            "counts_towards_attack_path": counts,
             "bas_job_id": job.id,
             "bas_schedule_id": schedule.id,
             "target": job.target,
@@ -227,6 +239,8 @@ def _finding_from_job_result(
             "phase": "phase_1_stub" if is_stub else "real_agent",
             "command": result.get("command"),
             "status": result.get("status"),
+            "proof": proof,
+            "proof_status": proof.get("status"),
         },
     )
     db.add(finding)
