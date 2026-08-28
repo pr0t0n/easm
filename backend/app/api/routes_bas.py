@@ -1103,6 +1103,7 @@ def operations_center(db: Session = Depends(get_db), current_user: User = Depend
     from app.services.bas_technique_catalog import list_techniques
 
     agents = apply_company_scope(db.query(BasAgent), current_user, BasAgent).all()
+    schedules = apply_company_scope(db.query(BasSchedule), current_user, BasSchedule).all()
     fleet = fleet_summary(agents)
     # Full history (uncapped) feeds technique_stats -- capping this would
     # under-count older techniques. "Jobs recentes" below is a separate,
