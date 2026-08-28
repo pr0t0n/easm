@@ -1025,8 +1025,8 @@ def attack_path_inventory(
         if row not in asset["observations"]:
             asset["observations"].append(row)
 
-    def attach_finding(asset: dict[str, Any], finding: Finding | None, ref: dict[str, Any]) -> None:
-        if finding is None:
+    def attach_finding(asset: dict[str, Any], finding: Finding | None, ref: dict[str, Any], proof_valid: bool) -> None:
+        if finding is None or not proof_valid:
             return
         details = finding.details or {}
         vuln_id = f"bas_finding_{finding.id}"
@@ -1051,12 +1051,11 @@ def attack_path_inventory(
                 asset["risk_level"] = finding.severity
 
     for job, agent, schedule in rows:
-        if not _proof_valid_from_result(getattr(job, "result", None)):
-            continue
         result = job.result or {}
+        proof_valid = _proof_valid_from_result(result)
         log_text = "\n".join(logs_by_scan.get(getattr(job, "scan_job_id", None), []))
         finding = findings_by_id.get(getattr(job, "finding_id", None))
-        if job.technique_key in {"port_service_scan", "firewall_segmentation_test"}:
+        if proof_valid and job.technique_key in {"port_service_scan", "firewall_segmentation_test"}:
             for port in _nmap_open_ports(result):
                 asset = ensure_asset(port["host"], job, agent, schedule)
                 service = {
@@ -1070,7 +1069,7 @@ def attack_path_inventory(
                 if not any(s["port"] == service["port"] and s["protocol"] == service["protocol"] for s in asset["services"]):
                     asset["services"].append(service)
                 attach_observation(asset, {"source": "nmap_result", "evidence": service["evidence"]})
-        if job.technique_key == "smb_enum_cme":
+        if proof_valid and job.technique_key == "smb_enum_cme":
             for observation in _smb_observations(str(result.get("stdout") or "")):
                 asset = ensure_asset(observation["ip"], job, agent, schedule)
                 asset["hostname"] = observation["host"]
@@ -1113,7 +1112,7 @@ def attack_path_inventory(
             if ref.get("domain") and not asset["domain"]:
                 asset["domain"] = ref["domain"]
             attach_observation(asset, ref)
-            attach_finding(asset, finding, ref)
+            attach_finding(asset, finding, ref, proof_valid)
 
     sorted_assets = sorted(
         assets.values(),

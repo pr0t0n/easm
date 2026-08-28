@@ -524,6 +524,40 @@ def test_attack_path_inventory_builds_assets_from_scan_logs_and_links_finding():
     assert asset["observations"][0]["source"] == "log_text"
 
 
+def test_attack_path_inventory_includes_attempted_host_without_valid_finding():
+    from datetime import datetime
+
+    job = SimpleNamespace(
+        id=92,
+        scan_job_id=124,
+        finding_id=None,
+        technique_key="smb_enum_enum4linux",
+        status="completed",
+        target="192.168.16.220",
+        result={"status": "executed", "stderr": "connection refused"},
+        created_at=datetime(2026, 8, 28, 13, 9),
+    )
+    agent = SimpleNamespace(id=19, kind="real")
+    schedule = SimpleNamespace(id=10, name="teste")
+    log = SimpleNamespace(scan_job_id=124, message="Target 192.168.16.220 connection refused", created_at=datetime(2026, 8, 28, 13, 10))
+    db = MagicMock()
+
+    def query_side_effect(*args):
+        if args and args[0] is bas_reporting.BasNetworkSegmentTag:
+            return _query_chain([])
+        if args and args[0] is bas_reporting.ScanLog:
+            return _query_chain([log])
+        return _query_chain([(job, agent, schedule)])
+
+    db.query.side_effect = query_side_effect
+
+    result = bas_reporting.attack_path_inventory(db)
+
+    assert [asset["ip"] for asset in result["cmdb_assets"]] == ["192.168.16.220"]
+    assert result["cmdb_assets"][0]["vulnerabilities"] == []
+    assert result["cmdb_assets"][0]["observations"]
+
+
 def test_chain_attack_path_groups_steps_by_the_shadow_scan_job_in_order():
     from datetime import datetime
 
