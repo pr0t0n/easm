@@ -4735,6 +4735,8 @@ def run_offensive_operator_scan(
         from app.services.scan_execution_metrics import reconcile_tool_run_ledger
         from app.services.scan_quality import (
             QUALITY_GATE_HARD_BLOCK_MAX_RETRIES,
+            quality_gate_blocker_fingerprint,
+            quality_gate_hard_block_is_futile,
             run_scan_quality_gate,
         )
 
@@ -4790,13 +4792,15 @@ def run_offensive_operator_scan(
         _score = _quality_gate.get("quality", {}).get("score")
         _gap_count = _quality_gate.get("gap_count")
         hard_retry_count = int(state.get("quality_gate_hard_retry_count") or 0)
-        if hard_retry_count < QUALITY_GATE_HARD_BLOCK_MAX_RETRIES:
+        _futile = quality_gate_hard_block_is_futile(state, _quality_gate)
+        if hard_retry_count < QUALITY_GATE_HARD_BLOCK_MAX_RETRIES and not _futile:
             from datetime import datetime as _dt
             from datetime import timedelta as _timedelta
 
             hard_retry_count += 1
             backoff = min(3600, 300 * (2 ** (hard_retry_count - 1)))  # 5min, 10min, 20min, capped 1h
             state["quality_gate_hard_retry_count"] = hard_retry_count
+            state["quality_gate_hard_block_fingerprint"] = list(quality_gate_blocker_fingerprint(_quality_gate))
             # Tells recover_scan_if_orphaned's watchdog this
             # status="running"-with-no-active-task window is intentional (a
             # scheduled backoff wait), not abandonment -- without this, the
@@ -4831,22 +4835,39 @@ def run_offensive_operator_scan(
                 pass
             return campaign
 
+        # No generator exists that can act on these blockers (they never
+        # populated `actions`), and either the retry budget is spent or
+        # another retry is provably futile (identical blockers, no action
+        # scheduled last round). Nothing will ever look at this scan again if
+        # it is left "blocked" -- auto-complete with gaps recorded instead,
+        # the same outcome POST /scans/{id}/finalize gives an operator who
+        # notices it stuck, but without requiring anyone to notice.
+        state["quality_gate_active"] = False
+        state["quality_gate_blocked"] = False
+        state["completion_source"] = "quality_gate_exhausted"
+        state.pop("quality_gate_hard_block_fingerprint", None)
         job.state_data = state
-        job.status = "blocked"
-        job.mission_progress = 99
-        job.current_step = "P21 Quality Gate · bloqueado por gaps de qualidade (retries automáticos esgotados)"
+        job.status = "completed_with_gaps"
+        job.mission_progress = 100
+        job.current_step = "P21 Quality Gate · concluído com gaps (sem remediação automática disponível)"
         job.last_error = None
+        job.next_retry_at = None
         db.add(ScanLog(
             scan_job_id=job.id,
             source="quality-gate",
             level="ERROR",
             message=(
-                "QUALITY GATE bloqueou conclusão definitivamente — "
-                f"{QUALITY_GATE_HARD_BLOCK_MAX_RETRIES} retries automáticos esgotados sem 100% de "
-                f"cobertura/evidência/validação score={_score} gap_count={_gap_count} "
-                f"blockers={_blockers}. Requer intervenção manual (remediar gaps e retomar)."
+                "QUALITY GATE sem remediação automática disponível — "
+                f"{'retry adicional seria fútil (blockers inalterados)' if _futile else f'{QUALITY_GATE_HARD_BLOCK_MAX_RETRIES} retries automáticos esgotados'} "
+                f"score={_score} gap_count={_gap_count} blockers={_blockers}. "
+                "Concluído automaticamente como completed_with_gaps; achados preservados."
             )[:2000],
         ))
+        try:
+            from app.services.operational_sli import persist_scan_sli_alerts
+            persist_scan_sli_alerts(db, job, dict(_quality_gate.get("quality") or {}))
+        except Exception:
+            pass
         db.commit()
         return campaign
 

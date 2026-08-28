@@ -54,12 +54,17 @@ def test_high_gap_blocks_even_when_numeric_score_is_high():
     assert len(decision["blockers"]) == 1
 
 
-def test_medium_gap_also_blocks_strict_zero_gap_completion():
+def test_medium_gap_alone_does_not_block_completion():
+    """QUALITY_GATE_REQUIRE_ZERO_GAPS was True: any residual gap of any
+    severity blocked completion outright, even when nothing could ever
+    remediate it (e.g. a heuristic surface note) -- this is what left scans
+    like #89 permanently stuck in status=blocked. Only "high" gaps ("blockers")
+    now gate completion; lower-severity gaps stay visible in the report."""
     decision = quality_gate_decision({
         "score": 95,
         "gaps": [{"severity": "medium", "title": "surface evidence incomplete"}],
     }, [])
-    assert decision["passed"] is False
-    assert decision["completion_allowed"] is False
-    assert decision["completion_status"] == "blocked"
-    assert decision["strict_zero_gaps"] is True
+    assert decision["passed"] is True
+    assert decision["completion_allowed"] is True
+    assert decision["completion_status"] == "completed"
+    assert decision["strict_zero_gaps"] is False

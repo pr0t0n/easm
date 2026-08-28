@@ -100,12 +100,16 @@ def test_aggressive_depth_requirements_expose_shallow_stored_xss_flow():
 
     by_id = {row["id"]: row for row in requirements["requirements"]}
     assert by_id["p12_reflected_xss_parameterized_surface"]["status"] == "met"
-    assert by_id["p12_stored_xss_mutating_body_surface"]["status"] == "missing"
-    assert by_id["p12_stored_xss_request_response_render_flow"]["status"] == "blocked_precondition"
+    # No mutating/state-changing surface was discovered anywhere on this
+    # target -- there is nothing to run a stored-XSS flow against, so both
+    # requirements are not_applicable (and non-blocking) rather than a
+    # "missing"/"blocked_precondition" gap that can never be remediated.
+    assert by_id["p12_stored_xss_mutating_body_surface"]["status"] == "not_applicable"
+    assert by_id["p12_stored_xss_request_response_render_flow"]["status"] == "not_applicable"
     assert "state_changing_body_surface" in by_id["p12_stored_xss_request_response_render_flow"]["missing"]
     assert "stored_xss_request_response_render_validation" in by_id["p12_stored_xss_request_response_render_flow"]["missing"]
-    assert requirements["unmet"] == 2
-    assert "p12_stored_xss_request_response_render_flow" in requirements["blocking_requirement_ids"]
+    assert requirements["unmet"] == 0
+    assert "p12_stored_xss_request_response_render_flow" not in requirements["blocking_requirement_ids"]
 
 
 def test_aggressive_depth_requirements_accept_complete_stored_xss_flow():

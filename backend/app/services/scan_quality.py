@@ -54,7 +54,11 @@ EXTERNAL_PRECONDITION_REASONS = {
     "captured_jwt_required",
 }
 QUALITY_GATE_SCORE_THRESHOLD = 70.0
-QUALITY_GATE_REQUIRE_ZERO_GAPS = True
+# Any residual low/medium gap (e.g. surface_coverage informational notes)
+# used to block completion outright alongside real "high" blockers. Only
+# "high" gaps represent something the gate should ever refuse to complete
+# over; lower-severity gaps stay visible in the report without gating.
+QUALITY_GATE_REQUIRE_ZERO_GAPS = False
 QUALITY_GATE_MAX_ROUNDS = 4
 QUALITY_GATE_MAX_POC_PER_ROUND = 50
 QUALITY_GATE_MAX_REQUEUES_PER_ROUND = 25
@@ -63,8 +67,36 @@ QUALITY_GATE_MAX_FALLBACKS_PER_ROUND = 20
 # scheduled nothing further -- a scan could sit there indefinitely with zero
 # follow-up activity (confirmed live: 40+ hours, no retry log entries after
 # the initial block). Bounded automatic re-dispatch attempts before settling
-# into a genuinely final, human-intervention-required state.
+# into a genuinely final, automatically-completed-with-gaps state.
 QUALITY_GATE_HARD_BLOCK_MAX_RETRIES = 3
+
+
+def quality_gate_blocker_fingerprint(quality_gate: dict[str, Any]) -> tuple[tuple[str, str], ...]:
+    return tuple(sorted(
+        (str(blocker.get("area") or ""), str(blocker.get("title") or ""))
+        for blocker in list(quality_gate.get("blockers") or [])
+    ))
+
+
+def quality_gate_hard_block_is_futile(state: dict[str, Any], quality_gate: dict[str, Any]) -> bool:
+    """True when another backoff wait cannot possibly change the outcome.
+
+    The bounded retry loop exists to give async work already in flight
+    (hypothesis drain, P21 revalidation, a requeued phase, ...) a chance to
+    finish and clear the gate. But when this round scheduled no new
+    remediation action (requires_remediation=False) AND the blocking gaps are
+    identical to the last hard-block round, nothing was set in motion that
+    could change the next evaluation -- confirmed live on scan #89, whose
+    quality_gate.history shows 4 rounds with byte-identical score/blockers
+    and an empty actions list every time. Waiting out the remaining backoff
+    (up to ~30 more minutes) only delays a foregone conclusion.
+    """
+    if quality_gate.get("requires_remediation"):
+        return False
+    previous = state.get("quality_gate_hard_block_fingerprint")
+    if previous is None:
+        return False
+    return list(previous) == list(quality_gate_blocker_fingerprint(quality_gate))
 
 QUALITY_TOOL_FALLBACKS: dict[str, list[str]] = {
     "httpx": ["curl-headers", "whatweb"],
@@ -694,12 +726,15 @@ def _build_aggressive_depth_requirements(
     ) -> None:
         if phase_id not in expected:
             return
-        missing = []
         if not surface_ok:
-            missing.append(surface_missing)
-        if not execution_ok:
-            missing.append(execution_missing)
-        add_requirement(name, "met" if not missing else "missing", missing, severity, evidence)
+            # No such input surface was discovered on this target at all --
+            # there is nothing for this phase's validator to execute against.
+            # Distinct from execution_ok=False (surface exists, validator
+            # never ran against it): that case stays a real "missing" gap,
+            # this one is not_applicable and does not block completion.
+            add_requirement(name, "not_applicable", [surface_missing], severity, evidence)
+            return
+        add_requirement(name, "met" if execution_ok else "missing", [] if execution_ok else [execution_missing], severity, evidence)
 
     js_surface = has_any_state({"javascript_bundles", "js_bundles", "spa_routes", "discovered_js_routes", "api_routes", "client_routes"}) or "main.js" in all_text or _discovered_endpoints_indicate_js_api_surface(state)
     api_surface = has_any_state({"api_specs", "openapi_urls", "swagger_urls", "graphql_endpoints", "discovered_api_endpoints"})
@@ -770,7 +805,10 @@ def _build_aggressive_depth_requirements(
         )
         add_requirement(
             "p12_stored_xss_mutating_body_surface",
-            "met" if has_mutating_surface else "missing",
+            # No mutating/state-changing surface was discovered at all --
+            # not_applicable (nothing to inject a stored payload into),
+            # distinct from a surface that exists but was never exercised.
+            "met" if has_mutating_surface else "not_applicable",
             [] if has_mutating_surface else ["state_changing_body_surface"],
             "high",
             {
@@ -789,7 +827,16 @@ def _build_aggressive_depth_requirements(
             stored_missing.append("stored_xss_body_request_execution")
         if not render_validation_complete:
             stored_missing.append("stored_xss_request_response_render_validation")
-        stored_status = "met" if not stored_missing else ("blocked_precondition" if "authenticated_session" in stored_missing or "state_changing_body_surface" in stored_missing else "missing")
+        if not stored_missing:
+            stored_status = "met"
+        elif "state_changing_body_surface" in stored_missing:
+            # No mutating surface exists regardless of auth state -- nothing
+            # to run this flow against, so it cannot block completion.
+            stored_status = "not_applicable"
+        elif "authenticated_session" in stored_missing:
+            stored_status = "blocked_precondition"
+        else:
+            stored_status = "missing"
         add_requirement(
             "p12_stored_xss_request_response_render_flow",
             stored_status,
