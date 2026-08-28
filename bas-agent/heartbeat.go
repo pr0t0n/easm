@@ -15,7 +15,18 @@ type heartbeatRequest struct {
 	// Recalculated every heartbeat (not just at enroll) so the platform
 	// self-corrects if the agent's network changes (DHCP renewal, moved to
 	// a different segment, etc.) without needing a re-enroll.
-	LocalNetworkCIDR string `json:"local_network_cidr"`
+	LocalNetworkCIDR string           `json:"local_network_cidr"`
+	Capabilities     CapabilityReport `json:"capabilities"`
+	LocalPolicy      map[string]any   `json:"local_policy"`
+	RelayStatus      map[string]any   `json:"relay_status"`
+	AutoUpdate       map[string]any   `json:"auto_update"`
+	ConfigRevision   int              `json:"config_revision"`
+}
+
+type heartbeatResponse struct {
+	Status       string         `json:"status"`
+	ServerTime   string         `json:"server_time"`
+	RemoteConfig map[string]any `json:"remote_config"`
 }
 
 // buildMTLSClient configures an http.Client that presents the agent's
@@ -57,7 +68,14 @@ func heartbeatLoop(cfg *Config) {
 			continue
 		}
 		url := fmt.Sprintf("https://%s:%d/api/bas/agents/heartbeat", current.Host, current.MTLSPort)
-		body, _ := json.Marshal(heartbeatRequest{LocalNetworkCIDR: localNetworkCIDR()})
+		body, _ := json.Marshal(heartbeatRequest{
+			LocalNetworkCIDR: localNetworkCIDR(),
+			Capabilities:     collectCapabilities(current),
+			LocalPolicy:      current.LocalPolicy,
+			RelayStatus:      map[string]any{"relay_port": current.RelayPort, "failover": current.RelayFailover},
+			AutoUpdate:       current.AutoUpdate,
+			ConfigRevision:   current.ConfigRevision,
+		})
 		req, _ := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
 		req.Header.Set("Authorization", "Bearer "+current.AgentJWT)
 		req.Header.Set("Content-Type", "application/json")
@@ -65,11 +83,17 @@ func heartbeatLoop(cfg *Config) {
 		if err != nil {
 			log.Printf("bas-agent: heartbeat failed: %v", err)
 		} else {
+			var parsed heartbeatResponse
+			_ = json.NewDecoder(resp.Body).Decode(&parsed)
 			resp.Body.Close()
 			if resp.StatusCode != http.StatusOK {
 				log.Printf("bas-agent: heartbeat non-200: %s", resp.Status)
+			} else if applyRemoteConfig(current, parsed.RemoteConfig) {
+				if err := saveConfig(current); err != nil {
+					log.Printf("bas-agent: remote config save failed: %v", err)
+				}
 			}
 		}
-		time.Sleep(30 * time.Second)
+		time.Sleep(time.Duration(heartbeatIntervalSeconds(current)) * time.Second)
 	}
 }

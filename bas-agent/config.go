@@ -25,13 +25,18 @@ type Config struct {
 	// customer network with no inbound path) and stays connected, so
 	// kali_runner can reach it without needing this agent's host to be the
 	// same machine as the dev stack. See relay.go.
-	RelayPort     int    `json:"relay_port"`
-	AgentID       int    `json:"agent_id"`
-	AgentJWT      string `json:"agent_jwt"`
-	ClientCertPEM string `json:"client_cert_pem"`
-	ClientKeyPEM  string `json:"client_key_pem"`
-	CACertPEM     string `json:"ca_cert_pem"`
-	SocksPort     int    `json:"socks_port"`
+	RelayPort                int            `json:"relay_port"`
+	AgentID                  int            `json:"agent_id"`
+	AgentJWT                 string         `json:"agent_jwt"`
+	ClientCertPEM            string         `json:"client_cert_pem"`
+	ClientKeyPEM             string         `json:"client_key_pem"`
+	CACertPEM                string         `json:"ca_cert_pem"`
+	SocksPort                int            `json:"socks_port"`
+	ConfigRevision           int            `json:"config_revision"`
+	HeartbeatIntervalSeconds int            `json:"heartbeat_interval_seconds"`
+	RelayFailover            []string       `json:"relay_failover"`
+	LocalPolicy              map[string]any `json:"local_policy"`
+	AutoUpdate               map[string]any `json:"auto_update"`
 }
 
 // EnrollInput is what the interactive installer collects -- matches the
@@ -94,6 +99,66 @@ func configForRuntime(current *Config) *Config {
 	return cfg
 }
 
+func heartbeatIntervalSeconds(cfg *Config) int {
+	if cfg.HeartbeatIntervalSeconds > 0 {
+		return cfg.HeartbeatIntervalSeconds
+	}
+	return 30
+}
+
+func applyRemoteConfig(cfg *Config, remote map[string]any) bool {
+	if remote == nil {
+		return false
+	}
+	revision := intFromAny(remote["config_revision"])
+	if revision <= cfg.ConfigRevision {
+		return false
+	}
+	if value := intFromAny(remote["heartbeat_interval_seconds"]); value > 0 {
+		cfg.HeartbeatIntervalSeconds = value
+	}
+	if values, ok := stringSliceFromAny(remote["relay_failover"]); ok {
+		cfg.RelayFailover = values
+	}
+	if policy, ok := remote["policy"].(map[string]any); ok {
+		cfg.LocalPolicy = policy
+	}
+	if autoUpdate, ok := remote["auto_update"].(map[string]any); ok {
+		cfg.AutoUpdate = autoUpdate
+	}
+	cfg.ConfigRevision = revision
+	return true
+}
+
+func intFromAny(value any) int {
+	switch typed := value.(type) {
+	case int:
+		return typed
+	case float64:
+		return int(typed)
+	case string:
+		parsed, _ := strconv.Atoi(strings.TrimSpace(typed))
+		return parsed
+	default:
+		return 0
+	}
+}
+
+func stringSliceFromAny(value any) ([]string, bool) {
+	raw, ok := value.([]any)
+	if !ok {
+		return nil, false
+	}
+	values := []string{}
+	for _, item := range raw {
+		text := strings.TrimSpace(fmt.Sprint(item))
+		if text != "" {
+			values = append(values, text)
+		}
+	}
+	return values, true
+}
+
 func redacted(value string) string {
 	if value == "" {
 		return ""
@@ -116,6 +181,9 @@ func printConfig(cfg *Config) {
 	fmt.Printf("client_key_pem: %t\n", cfg.ClientKeyPEM != "")
 	fmt.Printf("ca_cert_pem: %t\n", cfg.CACertPEM != "")
 	fmt.Printf("socks_port: %d\n", cfg.SocksPort)
+	fmt.Printf("config_revision: %d\n", cfg.ConfigRevision)
+	fmt.Printf("heartbeat_interval_seconds: %d\n", heartbeatIntervalSeconds(cfg))
+	fmt.Printf("relay_failover: %s\n", strings.Join(cfg.RelayFailover, ","))
 }
 
 func parsePositiveInt(value string, field string) (int, error) {

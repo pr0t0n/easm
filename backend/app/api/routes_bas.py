@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Response, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.api.deps import (
@@ -40,6 +40,14 @@ from app.models.models import (
     User,
 )
 from app.services.bas_dispatcher import dispatch_bas_technique
+from app.services.bas_agent_fleet import (
+    agent_to_fleet_dict,
+    apply_heartbeat,
+    fleet_summary,
+    merged_metadata,
+    normalize_tags,
+    remote_config_payload,
+)
 from app.services.bas_guardrail_policy import check_bas_authorization
 from app.services.bas_technique_catalog import get_technique, list_techniques
 
@@ -147,6 +155,7 @@ class AgentEnrollRequest(BaseModel):
     # only exercises the plain-HTTP enroll/heartbeat flow as a smoke-test
     # tunnel) simply don't get mTLS-protected heartbeat access.
     csr_pem: str = ""
+    capabilities: dict[str, Any] = Field(default_factory=dict)
 
 
 @router.post("/agents/enroll")
@@ -183,6 +192,7 @@ def enroll_agent(payload: AgentEnrollRequest, db: Session = Depends(get_db)):
         enrolled_via_host=payload.reported_host,
         enrolled_via_port=payload.reported_port,
         local_network_cidr=payload.local_network_cidr.strip() or None,
+        agent_metadata={"capabilities": payload.capabilities} if payload.capabilities else {},
     )
     db.add(agent)
     token.used_count += 1
@@ -221,6 +231,11 @@ class AgentHeartbeatRequest(BaseModel):
     # a re-enroll. Optional: older agent binaries (pre-Marco 3.6) send no
     # body at all -- payload stays None, existing value is left untouched.
     local_network_cidr: str = ""
+    capabilities: dict[str, Any] = Field(default_factory=dict)
+    local_policy: dict[str, Any] = Field(default_factory=dict)
+    relay_status: dict[str, Any] = Field(default_factory=dict)
+    auto_update: dict[str, Any] = Field(default_factory=dict)
+    config_revision: int | None = None
 
 
 @router.post("/agents/heartbeat")
@@ -233,8 +248,21 @@ def agent_heartbeat(
     agent.status = "online"
     if payload is not None and payload.local_network_cidr.strip():
         agent.local_network_cidr = payload.local_network_cidr.strip()
+    apply_heartbeat(agent, payload)
     db.commit()
-    return {"status": "ok", "server_time": datetime.now()}
+    return {"status": "ok", "server_time": datetime.now(), "remote_config": remote_config_payload(agent)}
+
+
+@router.get("/agents/config")
+def agent_remote_config(
+    db: Session = Depends(get_db),
+    agent: BasAgent = Depends(get_current_bas_agent),
+):
+    agent.last_heartbeat_at = datetime.now()
+    agent.status = "online"
+    apply_heartbeat(agent, None)
+    db.commit()
+    return {"status": "ok", "server_time": datetime.now(), "remote_config": remote_config_payload(agent)}
 
 
 # ── Agents (user-facing) ────────────────────────────────────────────────────
@@ -248,6 +276,7 @@ def list_agents(db: Session = Depends(get_db), current_user: User = Depends(get_
             "os_version": a.os_version, "status": a.status, "kind": a.kind,
             "last_heartbeat_at": a.last_heartbeat_at, "last_seen_ip": a.last_seen_ip,
             "local_network_cidr": a.local_network_cidr,
+            "fleet": agent_to_fleet_dict(a),
             "created_at": a.created_at,
         }
         for a in agents
@@ -257,6 +286,12 @@ def list_agents(db: Session = Depends(get_db), current_user: User = Depends(get_
 class AgentPatch(BaseModel):
     label: str | None = None
     status: str | None = None
+    tags: list[str] | None = None
+    agent_group: str | None = None
+    site: str | None = None
+    business_unit: str | None = None
+    local_policy: dict[str, Any] | None = None
+    remote_config: dict[str, Any] | None = None
 
 
 @router.patch("/agents/{agent_id}")
@@ -268,9 +303,75 @@ def patch_agent(agent_id: int, payload: AgentPatch, db: Session = Depends(get_db
         agent.label = payload.label
     if payload.status is not None:
         agent.status = payload.status
+    meta = merged_metadata(agent)
+    if payload.tags is not None:
+        meta["tags"] = normalize_tags(payload.tags)
+    for field in ("agent_group", "site", "business_unit"):
+        value = getattr(payload, field)
+        if value is not None:
+            meta[field] = str(value or "").strip()[:120]
+    if payload.local_policy is not None:
+        meta["local_policy"] = payload.local_policy
+    if payload.remote_config is not None:
+        current = dict(meta.get("remote_config") or {})
+        current.update(payload.remote_config)
+        current["config_revision"] = int(current.get("config_revision") or 0) + 1
+        meta["remote_config"] = current
+    agent.agent_metadata = meta
     db.commit()
     db.refresh(agent)
-    return {"id": agent.id, "label": agent.label, "status": agent.status}
+    return agent_to_fleet_dict(agent)
+
+
+@router.get("/fleet")
+def agent_fleet(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    agents = apply_company_scope(db.query(BasAgent), current_user, BasAgent).order_by(BasAgent.created_at.desc()).all()
+    return fleet_summary(agents)
+
+
+@router.get("/fleet/campaigns")
+def fleet_campaigns(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    schedules = apply_company_scope(db.query(BasSchedule), current_user, BasSchedule).all()
+    agents = apply_company_scope(db.query(BasAgent), current_user, BasAgent).all()
+    by_agent = {agent.id: agent_to_fleet_dict(agent) for agent in agents}
+    campaigns: dict[str, dict[str, Any]] = {}
+    for schedule in schedules:
+        agent = by_agent.get(schedule.agent_id) or {}
+        key = schedule.chain_key or ",".join(schedule.technique_keys or []) or "manual"
+        campaign = campaigns.setdefault(key, {
+            "key": key,
+            "chain_key": schedule.chain_key,
+            "schedules": 0,
+            "enabled": 0,
+            "agents": [],
+            "sites": set(),
+            "groups": set(),
+            "technique_keys": set(),
+        })
+        campaign["schedules"] += 1
+        if schedule.enabled:
+            campaign["enabled"] += 1
+        if schedule.agent_id not in campaign["agents"]:
+            campaign["agents"].append(schedule.agent_id)
+        if agent.get("site"):
+            campaign["sites"].add(agent["site"])
+        if agent.get("agent_group"):
+            campaign["groups"].add(agent["agent_group"])
+        for technique_key in schedule.technique_keys or []:
+            campaign["technique_keys"].add(technique_key)
+    rows = []
+    for item in campaigns.values():
+        rows.append({
+            "key": item["key"],
+            "chain_key": item["chain_key"],
+            "schedules": item["schedules"],
+            "enabled": item["enabled"],
+            "agents": item["agents"],
+            "sites": sorted(item["sites"]),
+            "groups": sorted(item["groups"]),
+            "technique_keys": sorted(item["technique_keys"]),
+        })
+    return sorted(rows, key=lambda item: (-item["enabled"], item["key"]))
 
 
 def _purge_bas_scan_jobs(db: Session, scan_job_ids: list[int]) -> int:
@@ -866,6 +967,7 @@ def operations_center(db: Session = Depends(get_db), current_user: User = Depend
     from app.services.bas_technique_catalog import list_techniques
 
     agents = apply_company_scope(db.query(BasAgent), current_user, BasAgent).all()
+    fleet = fleet_summary(agents)
     # Full history (uncapped) feeds technique_stats -- capping this would
     # under-count older techniques. "Jobs recentes" below is a separate,
     # explicitly-capped query so the two don't fight over one limit.
@@ -910,9 +1012,11 @@ def operations_center(db: Session = Depends(get_db), current_user: User = Depend
     return {
         "agents": [
             {"id": a.id, "label": a.label or a.hostname, "os": a.os, "status": a.status,
-             "kind": a.kind, "last_heartbeat_at": a.last_heartbeat_at, "local_network_cidr": a.local_network_cidr}
+             "kind": a.kind, "last_heartbeat_at": a.last_heartbeat_at, "local_network_cidr": a.local_network_cidr,
+             "fleet": agent_to_fleet_dict(a)}
             for a in agents
         ],
+        "agent_fleet": fleet,
         "schedules": [
             {
                 "id": s.id,

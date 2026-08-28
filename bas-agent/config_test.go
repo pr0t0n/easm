@@ -58,3 +58,47 @@ func TestParseConfigSetArgsRejectsInvalidPort(t *testing.T) {
 		t.Fatal("expected invalid port error")
 	}
 }
+
+func TestApplyRemoteConfigUpdatesRuntimeFields(t *testing.T) {
+	cfg := &Config{ConfigRevision: 1, HeartbeatIntervalSeconds: 30}
+
+	changed := applyRemoteConfig(cfg, map[string]any{
+		"config_revision":            float64(2),
+		"heartbeat_interval_seconds": float64(15),
+		"relay_failover":             []any{"relay-a:8446", " relay-b:8446 "},
+		"policy":                     map[string]any{"max_parallel_jobs": float64(2)},
+		"auto_update":                map[string]any{"enabled": true},
+	})
+
+	if !changed {
+		t.Fatal("expected config change")
+	}
+	if cfg.ConfigRevision != 2 || cfg.HeartbeatIntervalSeconds != 15 {
+		t.Fatalf("remote config scalar fields not applied: %#v", cfg)
+	}
+	if len(cfg.RelayFailover) != 2 || cfg.RelayFailover[1] != "relay-b:8446" {
+		t.Fatalf("relay failover not applied: %#v", cfg.RelayFailover)
+	}
+	if cfg.LocalPolicy["max_parallel_jobs"] != float64(2) {
+		t.Fatalf("policy not applied: %#v", cfg.LocalPolicy)
+	}
+	if cfg.AutoUpdate["enabled"] != true {
+		t.Fatalf("auto update not applied: %#v", cfg.AutoUpdate)
+	}
+}
+
+func TestApplyRemoteConfigIgnoresOldRevision(t *testing.T) {
+	cfg := &Config{ConfigRevision: 3, HeartbeatIntervalSeconds: 30}
+
+	changed := applyRemoteConfig(cfg, map[string]any{
+		"config_revision":            float64(2),
+		"heartbeat_interval_seconds": float64(10),
+	})
+
+	if changed {
+		t.Fatal("expected old revision to be ignored")
+	}
+	if cfg.HeartbeatIntervalSeconds != 30 {
+		t.Fatalf("old config revision changed interval: %#v", cfg)
+	}
+}

@@ -63,7 +63,9 @@ func main() {
 			Host: input.Host, Port: input.Port, MTLSPort: resp.MTLSPort, RelayPort: resp.RelayPort,
 			AgentID: resp.AgentID, AgentJWT: resp.AgentJWT,
 			ClientCertPEM: resp.ClientCertPEM, ClientKeyPEM: keyPEM, CACertPEM: resp.CACertPEM,
-			SocksPort: 1080,
+			SocksPort: 1080, ConfigRevision: 0, HeartbeatIntervalSeconds: 30,
+			LocalPolicy: map[string]any{"allow_remote_config": true, "allow_auto_update": false, "max_parallel_jobs": 1},
+			AutoUpdate:  map[string]any{"enabled": false, "channel": "stable"},
 		}
 		if err := saveConfig(cfg); err != nil {
 			log.Printf("bas-agent: warning: failed to persist local config: %v", err)
