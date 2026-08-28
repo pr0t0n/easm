@@ -17,9 +17,9 @@ import (
 // certificate issued by the platform's BAS root CA (see bas_ca.py) -- the
 // private key that pairs with it never leaves this file.
 type Config struct {
-	Host          string `json:"host"`
-	Port          int    `json:"port"`
-	MTLSPort      int    `json:"mtls_port"`
+	Host     string `json:"host"`
+	Port     int    `json:"port"`
+	MTLSPort int    `json:"mtls_port"`
 	// RelayPort: bas-relay's agent-registration port. This agent dials OUT
 	// to it (solves NAT -- works even when this agent is on a real, remote
 	// customer network with no inbound path) and stays connected, so
@@ -43,6 +43,14 @@ type EnrollInput struct {
 	Code     string
 	Host     string
 	Port     int
+}
+
+type ConfigUpdate struct {
+	Host      *string
+	Port      *int
+	MTLSPort  *int
+	RelayPort *int
+	SocksPort *int
 }
 
 func configPath() string {
@@ -76,6 +84,215 @@ func saveConfig(cfg *Config) error {
 		return err
 	}
 	return os.WriteFile(configPath(), data, 0600)
+}
+
+func configForRuntime(current *Config) *Config {
+	cfg, ok := loadConfig()
+	if !ok {
+		return current
+	}
+	return cfg
+}
+
+func redacted(value string) string {
+	if value == "" {
+		return ""
+	}
+	if len(value) <= 12 {
+		return "***"
+	}
+	return value[:6] + "..." + value[len(value)-6:]
+}
+
+func printConfig(cfg *Config) {
+	fmt.Printf("config_path: %s\n", configPath())
+	fmt.Printf("host: %s\n", cfg.Host)
+	fmt.Printf("port: %d\n", cfg.Port)
+	fmt.Printf("mtls_port: %d\n", cfg.MTLSPort)
+	fmt.Printf("relay_port: %d\n", cfg.RelayPort)
+	fmt.Printf("agent_id: %d\n", cfg.AgentID)
+	fmt.Printf("agent_jwt: %s\n", redacted(cfg.AgentJWT))
+	fmt.Printf("client_cert_pem: %t\n", cfg.ClientCertPEM != "")
+	fmt.Printf("client_key_pem: %t\n", cfg.ClientKeyPEM != "")
+	fmt.Printf("ca_cert_pem: %t\n", cfg.CACertPEM != "")
+	fmt.Printf("socks_port: %d\n", cfg.SocksPort)
+}
+
+func parsePositiveInt(value string, field string) (int, error) {
+	parsed, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil || parsed <= 0 {
+		return 0, fmt.Errorf("%s inválido", field)
+	}
+	return parsed, nil
+}
+
+func applyConfigUpdate(cfg *Config, update ConfigUpdate) {
+	if update.Host != nil {
+		cfg.Host = strings.TrimSpace(*update.Host)
+	}
+	if update.Port != nil {
+		cfg.Port = *update.Port
+	}
+	if update.MTLSPort != nil {
+		cfg.MTLSPort = *update.MTLSPort
+	}
+	if update.RelayPort != nil {
+		cfg.RelayPort = *update.RelayPort
+	}
+	if update.SocksPort != nil {
+		cfg.SocksPort = *update.SocksPort
+	}
+}
+
+func promptConfigUpdate(cfg *Config) (ConfigUpdate, error) {
+	reader := bufio.NewReader(os.Stdin)
+	ask := func(label string, current string) string {
+		fmt.Printf("%s [%s]: ", label, current)
+		text, _ := reader.ReadString('\n')
+		return strings.TrimSpace(text)
+	}
+	update := ConfigUpdate{}
+	if value := ask("IP/host da plataforma", cfg.Host); value != "" {
+		update.Host = &value
+	}
+	if value := ask("Porta HTTP da plataforma", strconv.Itoa(cfg.Port)); value != "" {
+		port, err := parsePositiveInt(value, "port")
+		if err != nil {
+			return update, err
+		}
+		update.Port = &port
+	}
+	if value := ask("Porta mTLS", strconv.Itoa(cfg.MTLSPort)); value != "" {
+		port, err := parsePositiveInt(value, "mtls_port")
+		if err != nil {
+			return update, err
+		}
+		update.MTLSPort = &port
+	}
+	if value := ask("Porta relay", strconv.Itoa(cfg.RelayPort)); value != "" {
+		port, err := parsePositiveInt(value, "relay_port")
+		if err != nil {
+			return update, err
+		}
+		update.RelayPort = &port
+	}
+	if value := ask("Porta SOCKS local", strconv.Itoa(cfg.SocksPort)); value != "" {
+		port, err := parsePositiveInt(value, "socks_port")
+		if err != nil {
+			return update, err
+		}
+		update.SocksPort = &port
+	}
+	return update, nil
+}
+
+func parseConfigSetArgs(args []string) (ConfigUpdate, error) {
+	update := ConfigUpdate{}
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		key := ""
+		value := ""
+		if strings.HasPrefix(arg, "--") {
+			key = strings.TrimPrefix(arg, "--")
+			if strings.Contains(key, "=") {
+				parts := strings.SplitN(key, "=", 2)
+				key, value = parts[0], parts[1]
+			} else {
+				i++
+				if i >= len(args) {
+					return update, fmt.Errorf("valor ausente para --%s", key)
+				}
+				value = args[i]
+			}
+		} else if strings.Contains(arg, "=") {
+			parts := strings.SplitN(arg, "=", 2)
+			key, value = parts[0], parts[1]
+		} else {
+			return update, fmt.Errorf("argumento inválido: %s", arg)
+		}
+		key = strings.ReplaceAll(strings.ToLower(strings.TrimSpace(key)), "-", "_")
+		value = strings.TrimSpace(value)
+		switch key {
+		case "host":
+			update.Host = &value
+		case "port":
+			port, err := parsePositiveInt(value, "port")
+			if err != nil {
+				return update, err
+			}
+			update.Port = &port
+		case "mtls_port", "mtls":
+			port, err := parsePositiveInt(value, "mtls_port")
+			if err != nil {
+				return update, err
+			}
+			update.MTLSPort = &port
+		case "relay_port", "relay":
+			port, err := parsePositiveInt(value, "relay_port")
+			if err != nil {
+				return update, err
+			}
+			update.RelayPort = &port
+		case "socks_port", "socks":
+			port, err := parsePositiveInt(value, "socks_port")
+			if err != nil {
+				return update, err
+			}
+			update.SocksPort = &port
+		default:
+			return update, fmt.Errorf("campo desconhecido: %s", key)
+		}
+	}
+	return update, nil
+}
+
+func runConfigCommand(args []string) {
+	action := "show"
+	if len(args) > 0 {
+		action = args[0]
+		args = args[1:]
+	}
+	if action == "path" {
+		fmt.Println(configPath())
+		return
+	}
+	cfg, ok := loadConfig()
+	if !ok {
+		fmt.Printf("bas-agent: configuração não encontrada ou incompleta em %s\n", configPath())
+		os.Exit(1)
+	}
+	switch action {
+	case "show":
+		printConfig(cfg)
+	case "edit":
+		update, err := promptConfigUpdate(cfg)
+		if err != nil {
+			fmt.Printf("bas-agent: %v\n", err)
+			os.Exit(1)
+		}
+		applyConfigUpdate(cfg, update)
+		if err := saveConfig(cfg); err != nil {
+			fmt.Printf("bas-agent: falha ao salvar config: %v\n", err)
+			os.Exit(1)
+		}
+		printConfig(cfg)
+	case "set":
+		update, err := parseConfigSetArgs(args)
+		if err != nil {
+			fmt.Printf("bas-agent: %v\n", err)
+			os.Exit(1)
+		}
+		applyConfigUpdate(cfg, update)
+		if err := saveConfig(cfg); err != nil {
+			fmt.Printf("bas-agent: falha ao salvar config: %v\n", err)
+			os.Exit(1)
+		}
+		printConfig(cfg)
+	default:
+		fmt.Println("Usage: bas-agent config [show|path|edit|set]")
+		fmt.Println("       bas-agent config set --host 192.168.1.10 --port 8001 --mtls-port 8444 --relay-port 8446")
+		os.Exit(1)
+	}
 }
 
 // askPassword masks input when stdin is a real terminal (term.ReadPassword);

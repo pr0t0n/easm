@@ -48,16 +48,18 @@ func buildMTLSClient(cfg *Config) (*http.Client, error) {
 // so a failure here before any HTTP response is itself meaningful evidence
 // of the mTLS gate actually working.
 func heartbeatLoop(cfg *Config) {
-	client, err := buildMTLSClient(cfg)
-	if err != nil {
-		log.Printf("bas-agent: mTLS client setup failed, heartbeat disabled: %v", err)
-		return
-	}
-	url := fmt.Sprintf("https://%s:%d/api/bas/agents/heartbeat", cfg.Host, cfg.MTLSPort)
 	for {
+		current := configForRuntime(cfg)
+		client, err := buildMTLSClient(current)
+		if err != nil {
+			log.Printf("bas-agent: mTLS client setup failed: %v", err)
+			time.Sleep(30 * time.Second)
+			continue
+		}
+		url := fmt.Sprintf("https://%s:%d/api/bas/agents/heartbeat", current.Host, current.MTLSPort)
 		body, _ := json.Marshal(heartbeatRequest{LocalNetworkCIDR: localNetworkCIDR()})
 		req, _ := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
-		req.Header.Set("Authorization", "Bearer "+cfg.AgentJWT)
+		req.Header.Set("Authorization", "Bearer "+current.AgentJWT)
 		req.Header.Set("Content-Type", "application/json")
 		resp, err := client.Do(req)
 		if err != nil {

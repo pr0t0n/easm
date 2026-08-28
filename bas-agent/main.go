@@ -29,11 +29,15 @@ func main() {
 			fmt.Println("ScriptKidd.o BAS Agent (Go, smoke-test build) — uninstalling service")
 			runUninstall()
 			return
+		case "config":
+			runConfigCommand(os.Args[2:])
+			return
 		case "-h", "--help", "help":
-			fmt.Println("Usage: bas-agent [install|uninstall]")
+			fmt.Println("Usage: bas-agent [install|uninstall|config]")
 			fmt.Println("  (no args)  run in the foreground -- prompts for enrollment on first run")
 			fmt.Println("  install    register this binary to run persistently (launchd/systemd; prints sc.exe steps on Windows)")
 			fmt.Println("  uninstall  stop and remove the persistent registration")
+			fmt.Println("  config     show or edit the current enrollment/config without reinstalling")
 			return
 		}
 	}

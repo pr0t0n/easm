@@ -27,7 +27,8 @@ func relayLoop(cfg *Config) {
 	}
 	backoff := time.Second
 	for {
-		if err := connectAndServeRelay(cfg); err != nil {
+		current := configForRuntime(cfg)
+		if err := connectAndServeRelay(current); err != nil {
 			log.Printf("bas-agent: relay connection lost: %v (retrying in %s)", err, backoff)
 		}
 		time.Sleep(backoff)
