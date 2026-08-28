@@ -166,11 +166,30 @@ def ensure_skill_index_ready(*, force: bool = False) -> dict[str, Any]:
         return index_skills_to_knowledge_store()
 
 
+def warm_skill_rag(*, force: bool = False, backfill: bool = True, backfill_limit: int = 500) -> dict[str, Any]:
+    from app.services import rag_repository
+
+    index_result = ensure_skill_index_ready(force=force)
+    backfill_result = (
+        rag_repository.backfill_missing_embeddings(limit=backfill_limit)
+        if backfill
+        else {"available": None, "pending": 0, "updated": 0, "errors": 0, "skipped": True}
+    )
+    health = rag_repository.knowledge_health()
+    ok = bool(health.get("ok")) and int(index_result.get("errors") or 0) == 0 and int(backfill_result.get("errors") or 0) == 0
+    return {
+        "ok": ok,
+        "index": index_result,
+        "embedding_backfill": backfill_result,
+        "health": health,
+    }
+
+
 def start_skill_index_background() -> None:
     """Start non-blocking RAG warm-up during API boot."""
     def _run() -> None:
         try:
-            result = ensure_skill_index_ready()
+            result = warm_skill_rag()
             logger.info("automatic Skill RAG initialization complete: %s", result)
         except Exception:
             logger.exception("automatic Skill RAG initialization failed")

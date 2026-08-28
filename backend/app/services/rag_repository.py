@@ -381,6 +381,70 @@ def document_count(*, db: Session | None = None) -> int:
             db.close()
 
 
+def backfill_missing_embeddings(
+    *,
+    limit: int = 500,
+    db: Session | None = None,
+) -> dict[str, Any]:
+    limit = max(1, min(int(limit or 500), 5000))
+    own_session = db is None
+    if own_session:
+        db = SessionLocal()
+    try:
+        from app.services.embedding_service import embed_texts, is_available
+
+        pending_total = int(db.execute(
+            text("SELECT COUNT(*) FROM rag_knowledge_store WHERE embedding IS NULL")
+        ).scalar() or 0)
+        if pending_total <= 0:
+            return {"available": True, "pending": 0, "updated": 0, "errors": 0}
+        if not is_available():
+            return {"available": False, "pending": pending_total, "updated": 0, "errors": 0}
+
+        rows = db.execute(
+            text(
+                """
+                SELECT chunk_id, content
+                FROM rag_knowledge_store
+                WHERE embedding IS NULL
+                ORDER BY created_at ASC, chunk_id ASC
+                LIMIT :limit
+                """
+            ),
+            {"limit": limit},
+        ).mappings().all()
+        vectors = embed_texts([str(row["content"] or "") for row in rows])
+        updated = 0
+        errors = 0
+        for row, vec in zip(rows, vectors, strict=False):
+            if not vec:
+                errors += 1
+                continue
+            db.execute(
+                text(
+                    """
+                    UPDATE rag_knowledge_store
+                    SET embedding = CAST(:embed AS vector)
+                    WHERE chunk_id = :chunk_id
+                    """
+                ),
+                {"chunk_id": row["chunk_id"], "embed": _embedding_literal(vec)},
+            )
+            updated += 1
+        db.commit()
+        if updated:
+            rebuild_embedding_index(db=db)
+        remaining = max(0, pending_total - updated)
+        return {"available": True, "pending": pending_total, "updated": updated, "remaining": remaining, "errors": errors}
+    except Exception as exc:
+        db.rollback()
+        logger.error("rag_repository.backfill_missing_embeddings failed: %s", exc)
+        return {"available": False, "pending": 0, "updated": 0, "errors": 1, "error": str(exc)}
+    finally:
+        if own_session:
+            db.close()
+
+
 def knowledge_health(*, db: Session | None = None) -> dict[str, Any]:
     """Diagnostic check for the RAG knowledge layer.
 
@@ -397,6 +461,10 @@ def knowledge_health(*, db: Session | None = None) -> dict[str, Any]:
         db = SessionLocal()
     try:
         store_total = int(db.execute(text("SELECT COUNT(*) FROM rag_knowledge_store")).scalar() or 0)
+        embedded_total = int(db.execute(
+            text("SELECT COUNT(*) FROM rag_knowledge_store WHERE embedding IS NOT NULL")
+        ).scalar() or 0)
+        missing_embeddings = max(0, store_total - embedded_total)
         store_by_source = {
             str(row[0]): int(row[1])
             for row in db.execute(
@@ -423,6 +491,11 @@ def knowledge_health(*, db: Session | None = None) -> dict[str, Any]:
                 "rag_knowledge_store esta vazio — nenhuma skill ou aprendizado alimenta as decisoes do "
                 "supervisor via RAG. Rode index_skills_to_knowledge_store()."
             )
+        if store_total > 0 and missing_embeddings > 0:
+            issues.append(
+                f"{missing_embeddings} chunk(s) em rag_knowledge_store sem embedding — rode o warm-up/backfill do RAG "
+                "antes de iniciar scans continuos para evitar fallback lexical."
+            )
         if unsynthesized_accepted:
             issues.append(
                 f"{unsynthesized_accepted} registro(s) 'accepted' em vulnerability_learnings sem "
@@ -433,7 +506,13 @@ def knowledge_health(*, db: Session | None = None) -> dict[str, Any]:
         return {
             "ok": not issues,
             "issues": issues,
-            "rag_knowledge_store": {"total": store_total, "by_source_kind": store_by_source},
+            "rag_knowledge_store": {
+                "total": store_total,
+                "with_embedding": embedded_total,
+                "missing_embedding": missing_embeddings,
+                "embedding_coverage_percent": round((embedded_total / store_total) * 100, 2) if store_total else 0.0,
+                "by_source_kind": store_by_source,
+            },
             "vulnerability_learnings": {
                 "accepted_total": accepted_total,
                 "accepted_without_synthesis": unsynthesized_accepted,

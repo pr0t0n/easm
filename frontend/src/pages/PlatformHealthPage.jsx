@@ -20,7 +20,10 @@ function Card({ label, value, color }) {
 
 export default function PlatformHealthPage() {
   const [data, setData] = useState(null);
+  const [knowledge, setKnowledge] = useState(null);
   const [error, setError] = useState("");
+  const [knowledgeError, setKnowledgeError] = useState("");
+  const [warming, setWarming] = useState(false);
   const [auto, setAuto] = useState(true);
   const [expanded, setExpanded] = useState({});
 
@@ -28,6 +31,22 @@ export default function PlatformHealthPage() {
     client.get("/api/platform/health")
       .then(({ data }) => { setData(data); setError(""); })
       .catch((e) => setError(e?.response?.data?.detail || "Falha ao consultar a saúde da plataforma."));
+    client.get("/api/knowledge/health", { _skipToast: true })
+      .then(({ data }) => { setKnowledge(data); setKnowledgeError(""); })
+      .catch((e) => setKnowledgeError(e?.response?.data?.detail || "Falha ao consultar RAG."));
+  }, []);
+
+  const warmKnowledge = useCallback(async () => {
+    setWarming(true);
+    try {
+      const { data } = await client.post("/api/knowledge/warmup", null, { params: { backfill: true, backfill_limit: 500 } });
+      setKnowledge(data?.health || null);
+      setKnowledgeError("");
+    } catch (e) {
+      setKnowledgeError(e?.response?.data?.detail || "Falha ao aquecer RAG.");
+    } finally {
+      setWarming(false);
+    }
   }, []);
 
   useEffect(() => { load(); }, [load]);
@@ -80,6 +99,33 @@ export default function PlatformHealthPage() {
           <Card label="Containers" value={data.total} />
           <Card label="No ar" value={data.up} color="var(--sev-low-text)" />
           <Card label="Fora / alerta" value={data.down} color={data.down ? "var(--sev-critical-text)" : "var(--ink-muted)"} />
+        </section>
+      )}
+
+      {(knowledge || knowledgeError) && (
+        <section style={{ marginBottom: 20, background: "var(--surface)", border: `1px solid ${knowledge?.ok ? "var(--line)" : "var(--sev-medium-border)"}`, borderLeft: `4px solid ${knowledge?.ok ? "var(--sev-low-text)" : "var(--sev-medium-solid)"}`, borderRadius: 12, padding: "12px 14px", boxShadow: "var(--shadow-card)" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+            <div>
+              <div style={{ fontWeight: 800, fontSize: 14, color: "var(--ink)" }}>RAG / Skills</div>
+              <div style={{ marginTop: 4, display: "flex", gap: 12, flexWrap: "wrap", fontSize: 11, color: "var(--ink-muted)", fontFamily: "var(--font-mono)" }}>
+                <span>chunks: {knowledge?.rag_knowledge_store?.total ?? "—"}</span>
+                <span>embeddings: {knowledge?.rag_knowledge_store?.with_embedding ?? "—"}</span>
+                <span>pendentes: {knowledge?.rag_knowledge_store?.missing_embedding ?? "—"}</span>
+                <span>cobertura: {knowledge?.rag_knowledge_store?.embedding_coverage_percent ?? 0}%</span>
+              </div>
+            </div>
+            <button onClick={warmKnowledge} disabled={warming} style={{ padding: "6px 14px", borderRadius: 8, border: "1px solid var(--line)", background: warming ? "var(--surface-soft)" : "var(--canvas)", fontSize: 12.5, cursor: warming ? "wait" : "pointer" }}>
+              {warming ? "Aquecendo…" : "Aquecer RAG"}
+            </button>
+          </div>
+          {knowledgeError && <div style={{ marginTop: 8, fontSize: 12, color: "var(--sev-critical-text)" }}>{knowledgeError}</div>}
+          {knowledge?.issues?.length > 0 && (
+            <div style={{ marginTop: 8, display: "grid", gap: 4 }}>
+              {knowledge.issues.slice(0, 4).map((issue, idx) => (
+                <div key={idx} style={{ fontSize: 11.5, color: "var(--sev-medium-text)", lineHeight: 1.4 }}>{issue}</div>
+              ))}
+            </div>
+          )}
         </section>
       )}
 

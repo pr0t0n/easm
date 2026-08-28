@@ -192,6 +192,15 @@ SCAN_FINALIZABLE_STATUSES = {"blocked", "waiting_for_auth"}
 SCAN_PAUSE_REQUEUE_ITEM_STATUSES = {"dispatched", "running", "submitted", "retry"}
 
 
+def _warm_skill_rag_for_scan() -> dict[str, Any]:
+    try:
+        from app.services.skill_rag_indexer import warm_skill_rag
+
+        return warm_skill_rag(force=False, backfill=True, backfill_limit=250)
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
 def _active_scan_task_ids(scan_id: int, db: Session | None = None) -> list[str]:
     inspector = celery.control.inspect(timeout=1.5)
     buckets = [inspector.active() or {}, inspector.reserved() or {}, inspector.scheduled() or {}]
@@ -2557,6 +2566,7 @@ def create_scan(
     source_config = payload.source_config if isinstance(payload.source_config, dict) else None
     initial_state: dict[str, Any] = {
         "llm_risk": llm_risk_state,
+        "rag_warmup": _warm_skill_rag_for_scan(),
         "scan_level": scan_level,
         "scan_profile": profile,
         "execution_plan": execution_plan,
