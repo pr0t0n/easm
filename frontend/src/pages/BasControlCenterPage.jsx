@@ -42,6 +42,7 @@ const CONTROL_MATRIX_STATUS_LABEL = { tested: "testado", prevented: "prevenido",
 const CONTROL_MATRIX_STATUS_COLOR = { tested: TV.muted, prevented: "#1f8a59", detected: "#4b73ff", missed: "#d64545", not_applicable: TV.label };
 const RISK_TIER_ORDER = { safe: 0, elevated: 1, high_risk: 2 };
 const FREQ_LABEL = { daily: "Diário", weekly: "Semanal", monthly: "Mensal", every_3_hours: "A cada 3 horas", every_6_hours: "A cada 6 horas", every_12_hours: "A cada 12 horas" };
+const CONTROL_MATRIX_PAGE_SIZE = 25;
 
 function Card({ children, style, ...rest }) {
   return (
@@ -227,6 +228,13 @@ export default function BasControlCenterPage() {
 // ── Painel ────────────────────────────────────────────────────────────────
 
 function PanelTab({ cc, agents, schedules, setTab }) {
+  const [controlMatrixPage, setControlMatrixPage] = useState(1);
+  const controlMatrixCellCount = cc?.control_matrix?.cells?.length || 0;
+
+  useEffect(() => {
+    setControlMatrixPage(1);
+  }, [controlMatrixCellCount]);
+
   if (!cc) return <Empty>Carregando…</Empty>;
   const score = cc.resilience_score;
   const color = scoreColorFor(score.score);
@@ -242,6 +250,10 @@ function PanelTab({ cc, agents, schedules, setTab }) {
   const controlMatrixSummary = controlMatrix.summary || {};
   const controlMatrixFrameworks = controlMatrix.frameworks || [];
   const controlMatrixCells = controlMatrix.cells || [];
+  const controlMatrixPageCount = Math.max(1, Math.ceil(controlMatrixCells.length / CONTROL_MATRIX_PAGE_SIZE));
+  const controlMatrixSafePage = Math.min(controlMatrixPage, controlMatrixPageCount);
+  const controlMatrixPageStart = (controlMatrixSafePage - 1) * CONTROL_MATRIX_PAGE_SIZE;
+  const controlMatrixPageCells = controlMatrixCells.slice(controlMatrixPageStart, controlMatrixPageStart + CONTROL_MATRIX_PAGE_SIZE);
   const activeRuns = cc.active_runs || [];
 
   const kpis = [
@@ -380,9 +392,23 @@ function PanelTab({ cc, agents, schedules, setTab }) {
       </Card>
 
       <Card>
-        <CardTitle sub={`${controlMatrixSummary.controls || 0} controle(s) · ${controlMatrixSummary.cells || 0} célula(s)`}>Control Matrix</CardTitle>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+          <CardTitle sub={`${controlMatrixSummary.controls || 0} controle(s) · ${controlMatrixSummary.cells || 0} célula(s)`}>Control Matrix</CardTitle>
+          <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ fontWeight: 600, fontSize: 11, lineHeight: "15px", color: TV.muted }}>
+              {controlMatrixCells.length ? `${controlMatrixPageStart + 1}-${Math.min(controlMatrixPageStart + CONTROL_MATRIX_PAGE_SIZE, controlMatrixCells.length)} de ${controlMatrixCells.length}` : "0 de 0"}
+            </span>
+            <button type="button" className="btn" disabled={controlMatrixSafePage <= 1} onClick={() => setControlMatrixPage((page) => Math.max(1, page - 1))} style={{ padding: "5px 9px", background: "transparent", border: `1px solid ${TV.border}`, color: controlMatrixSafePage <= 1 ? TV.label : TV.text, opacity: controlMatrixSafePage <= 1 ? .5 : 1 }}>
+              Anterior
+            </button>
+            <span style={{ fontWeight: 700, fontSize: 11, lineHeight: "15px", color: TV.text }}>{controlMatrixSafePage}/{controlMatrixPageCount}</span>
+            <button type="button" className="btn" disabled={controlMatrixSafePage >= controlMatrixPageCount} onClick={() => setControlMatrixPage((page) => Math.min(controlMatrixPageCount, page + 1))} style={{ padding: "5px 9px", background: "transparent", border: `1px solid ${TV.border}`, color: controlMatrixSafePage >= controlMatrixPageCount ? TV.label : TV.text, opacity: controlMatrixSafePage >= controlMatrixPageCount ? .5 : 1 }}>
+              Próxima
+            </button>
+          </div>
+        </div>
         <section style={{ display: "grid", gridTemplateColumns: "minmax(220px,.65fr) minmax(0,1.35fr)", gap: 14 }}>
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 460, overflowY: "auto", paddingRight: 4 }}>
             {controlMatrixFrameworks.length === 0 && <Empty>Nenhuma matriz de controle calculada ainda.</Empty>}
             {controlMatrixFrameworks.map((fw) => (
               <div key={fw.framework} style={{ background: TV.surface2, border: `1px solid ${TV.border}`, borderRadius: 10, padding: "10px 12px", display: "flex", flexDirection: "column", gap: 7 }}>
@@ -401,13 +427,13 @@ function PanelTab({ cc, agents, schedules, setTab }) {
               </div>
             ))}
           </div>
-          <div style={{ overflowX: "auto" }}>
-            <div style={{ display: "grid", gridTemplateColumns: "92px 160px minmax(220px,1fr) 92px 70px", gap: 10, minWidth: 720, padding: "0 10px 8px", borderBottom: `1px solid ${TV.border}` }}>
+          <div style={{ overflowX: "auto", maxHeight: 460, overflowY: "auto", border: `1px solid ${TV.border}`, borderRadius: 10 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "92px 160px minmax(220px,1fr) 92px 70px", gap: 10, minWidth: 720, padding: "8px 10px", borderBottom: `1px solid ${TV.border}`, background: TV.surface2, position: "sticky", top: 0, zIndex: 1 }}>
               {["Framework", "Controle", "Técnica", "Estado", "Runs"].map((h) => (
                 <span key={h} style={{ fontWeight: 600, fontSize: 10, lineHeight: "13px", color: TV.label, textTransform: "uppercase", letterSpacing: ".6px" }}>{h}</span>
               ))}
             </div>
-            {controlMatrixCells.slice(0, 60).map((cell) => (
+            {controlMatrixPageCells.map((cell) => (
               <div key={`${cell.framework}-${cell.control_id}-${cell.technique_key}`} style={{ display: "grid", gridTemplateColumns: "92px 160px minmax(220px,1fr) 92px 70px", gap: 10, alignItems: "center", minWidth: 720, padding: "9px 10px", borderBottom: `1px solid ${TV.border}` }}>
                 <span style={{ fontWeight: 600, fontSize: 11, lineHeight: "15px", color: TV.text }}>{cell.framework_label}</span>
                 <span style={{ fontWeight: 600, fontSize: 11, lineHeight: "15px", color: TV.text }}>{cell.control_id}</span>
@@ -419,7 +445,7 @@ function PanelTab({ cc, agents, schedules, setTab }) {
                 <span style={{ fontWeight: 600, fontSize: 11, lineHeight: "15px", color: TV.muted, textAlign: "right" }}>{cell.times_tested || 0}</span>
               </div>
             ))}
-            {controlMatrixCells.length > 60 && <div style={{ fontWeight: 400, fontSize: 11, lineHeight: "15px", color: TV.muted, paddingTop: 8 }}>Mostrando 60 de {controlMatrixCells.length} células.</div>}
+            {controlMatrixPageCells.length === 0 && <Empty>Nenhuma célula para exibir.</Empty>}
           </div>
         </section>
       </Card>
