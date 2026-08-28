@@ -25,6 +25,13 @@ def _query_chain(rows):
     return q
 
 
+def _first_query(row):
+    q = MagicMock()
+    q.filter.return_value = q
+    q.first.return_value = row
+    return q
+
+
 def _proof(valid=True):
     return {"valid": valid, "status": "validated" if valid else "refuted"}
 
@@ -70,6 +77,7 @@ def test_control_center_payload_includes_control_matrix(monkeypatch):
     monkeypatch.setattr(bas_reporting, "score_trend", lambda db, **kwargs: [])
     monkeypatch.setattr(bas_reporting, "category_coverage", lambda db, **kwargs: [])
     monkeypatch.setattr(bas_reporting, "control_matrix", lambda db, **kwargs: {"summary": {"cells": 1}, "frameworks": [], "cells": []})
+    monkeypatch.setattr(bas_reporting, "active_runs", lambda db, **kwargs: [{"scan_job_id": 9, "mission_progress": 25}])
     monkeypatch.setattr(bas_reporting, "kill_chain_stages", lambda db, **kwargs: [])
     monkeypatch.setattr(bas_reporting, "attack_heatmap", lambda db, **kwargs: [])
     monkeypatch.setattr(bas_reporting, "protection_layers", lambda db, **kwargs: [])
@@ -79,6 +87,52 @@ def test_control_center_payload_includes_control_matrix(monkeypatch):
     payload = routes_bas.control_center(db=db, current_user=current_user)
 
     assert payload["control_matrix"]["summary"]["cells"] == 1
+    assert payload["active_runs"][0]["scan_job_id"] == 9
+
+
+def test_active_runs_reports_shadow_scan_before_first_bas_job():
+    db = MagicMock()
+    scan = SimpleNamespace(
+        id=42,
+        mode="bas",
+        status="running",
+        current_step="Preparando execução",
+        mission_progress=3,
+        target_query="10.42.0.0/24",
+        access_group_id=None,
+        state_data={
+            "bas_schedule_id": 7,
+            "bas_agent_id": 3,
+            "bas_chain_key": "internal_pentest_from_agent",
+            "bas_technique_keys": ["port_service_scan", "smb_enum_cme"],
+        },
+        created_at=None,
+        updated_at=None,
+        last_error=None,
+    )
+    schedule = SimpleNamespace(id=7, name="Pentest interno", chain_key="internal_pentest_from_agent", technique_keys=["port_service_scan", "smb_enum_cme"])
+    agent = SimpleNamespace(id=3, label="Site SP", hostname="agent-sp", status="online")
+
+    def side_effect(model):
+        if model is bas_reporting.ScanJob:
+            return _query_chain([scan])
+        if model is bas_reporting.BasJob:
+            return _query_chain([])
+        if model is bas_reporting.BasSchedule:
+            return _first_query(schedule)
+        if model is bas_reporting.BasAgent:
+            return _first_query(agent)
+        return _query_chain([])
+
+    db.query.side_effect = side_effect
+
+    rows = bas_reporting.active_runs(db)
+
+    assert rows[0]["scan_job_id"] == 42
+    assert rows[0]["schedule_name"] == "Pentest interno"
+    assert rows[0]["agent_label"] == "Site SP"
+    assert rows[0]["mission_progress"] == 3
+    assert rows[0]["total_hint"] == 2
 
 
 # ── category_coverage ────────────────────────────────────────────────────────

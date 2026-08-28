@@ -21,7 +21,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.models.models import BasAgent, BasJob, BasNetworkSegmentTag, BasSchedule, Finding
+from app.models.models import BasAgent, BasJob, BasNetworkSegmentTag, BasSchedule, Finding, ScanJob
 from app.services.bas_exclusion import BAS_FINDING_TOOL
 from app.services.bas_scheduler import _split_targets
 from app.services.bas_technique_catalog import list_techniques
@@ -642,6 +642,62 @@ def bas_findings_view(
             "exploit_refs": exploit_row.get("refs", []) if exploit_row else [],
         })
     return results
+
+
+def active_runs(
+    db: Session, *, group_ids: list[int] | None = None, schedule_id: int | None = None, limit: int = 20
+) -> list[dict[str, Any]]:
+    scan_query = db.query(ScanJob).filter(
+        ScanJob.mode == "bas",
+        ScanJob.status.in_(("queued", "running")),
+    )
+    if group_ids is not None:
+        scan_query = scan_query.filter(ScanJob.access_group_id.in_(group_ids))
+    scans = scan_query.order_by(ScanJob.updated_at.desc()).limit(limit).all()
+    rows = []
+    for scan in scans:
+        scan_state = dict(getattr(scan, "state_data", None) or {})
+        jobs = db.query(BasJob).filter(BasJob.scan_job_id == scan.id).order_by(BasJob.created_at.asc()).all()
+        scan_schedule_id = scan_state.get("bas_schedule_id")
+        if schedule_id is not None and scan_schedule_id != schedule_id and not any(job.schedule_id == schedule_id for job in jobs):
+            continue
+        first_job = jobs[0] if jobs else None
+        active_job = next(
+            (job for job in reversed(jobs) if str(job.status or "").lower() in {"queued", "dispatched_to_kali", "running"}),
+            jobs[-1] if jobs else None,
+        )
+        schedule_lookup_id = getattr(first_job, "schedule_id", None) or scan_schedule_id
+        agent_lookup_id = getattr(first_job, "agent_id", None) or scan_state.get("bas_agent_id")
+        schedule = db.query(BasSchedule).filter(BasSchedule.id == schedule_lookup_id).first() if schedule_lookup_id else None
+        agent = db.query(BasAgent).filter(BasAgent.id == agent_lookup_id).first() if agent_lookup_id else None
+        terminal_count = sum(1 for job in jobs if str(job.status or "").lower() in {"completed", "failed", "skipped", "cancelled"})
+        total_hint = max(len(getattr(schedule, "technique_keys", None) or scan_state.get("bas_technique_keys") or []), len(jobs), 1)
+        progress = int(getattr(scan, "mission_progress", None) or 0)
+        rows.append({
+            "scan_job_id": scan.id,
+            "status": scan.status,
+            "current_step": scan.current_step or "Preparando execução",
+            "mission_progress": max(0, min(99, progress)),
+            "target_query": scan.target_query,
+            "schedule_id": getattr(schedule, "id", None),
+            "schedule_name": getattr(schedule, "name", "") or (f"scan BAS #{scan.id}"),
+            "chain_key": getattr(schedule, "chain_key", None),
+            "agent_id": getattr(agent, "id", None),
+            "agent_label": getattr(agent, "label", "") or getattr(agent, "hostname", "") or "",
+            "agent_status": getattr(agent, "status", None),
+            "active_job_id": getattr(active_job, "id", None),
+            "active_technique_key": getattr(active_job, "technique_key", None),
+            "active_target": getattr(active_job, "target", None),
+            "jobs_total_seen": len(jobs),
+            "jobs_resolved": terminal_count,
+            "jobs_failed": sum(1 for job in jobs if str(job.status or "").lower() == "failed"),
+            "jobs_skipped": sum(1 for job in jobs if str(job.status or "").lower() == "skipped"),
+            "total_hint": total_hint,
+            "created_at": scan.created_at,
+            "updated_at": scan.updated_at,
+            "last_error": scan.last_error,
+        })
+    return rows
 
 
 def action_priorities(

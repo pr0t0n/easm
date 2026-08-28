@@ -354,6 +354,13 @@ def prepare_schedule_run(db: Session, schedule: BasSchedule) -> dict[str, Any]:
 
     shadow = _create_shadow_scan_job(db, schedule, agent)
     shadow.current_step = "Preparando execução"
+    shadow.state_data = {
+        **dict(shadow.state_data or {}),
+        "bas_schedule_id": schedule.id,
+        "bas_agent_id": agent.id,
+        "bas_chain_key": getattr(schedule, "chain_key", None),
+        "bas_technique_keys": list(schedule.technique_keys or []),
+    }
     # Commit (not just flush) before any dispatch: resolve_authorized_scope_
     # for_dispatch opens its OWN SessionLocal() to read this ScanJob by id --
     # a separate connection can't see a row this transaction has only

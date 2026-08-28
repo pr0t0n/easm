@@ -1052,6 +1052,7 @@ def control_center(
         "score_trend": bas_reporting.score_trend(db, **kwargs),
         "category_coverage": bas_reporting.category_coverage(db, **kwargs),
         "control_matrix": bas_reporting.control_matrix(db, **kwargs),
+        "active_runs": bas_reporting.active_runs(db, **kwargs),
         "kill_chain_stages": bas_reporting.kill_chain_stages(db, **kwargs),
         "attack_heatmap": bas_reporting.attack_heatmap(db, **kwargs),
         "protection_layers": bas_reporting.protection_layers(db, **kwargs),

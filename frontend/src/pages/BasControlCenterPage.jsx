@@ -150,6 +150,7 @@ export default function BasControlCenterPage() {
   const [chains, setChains] = useState([]);
   const [schedules, setSchedules] = useState([]);
   const [segments, setSegments] = useState([]);
+  const activeRunCount = cc?.active_runs?.length || 0;
 
   const loadAll = useCallback(async (silent = false) => {
     try {
@@ -177,9 +178,9 @@ export default function BasControlCenterPage() {
 
   useEffect(() => {
     loadAll();
-    const heartbeat = setInterval(() => loadAll(true), HEARTBEAT_INTERVAL_MS);
+    const heartbeat = setInterval(() => loadAll(true), activeRunCount > 0 ? RUN_POLL_INTERVAL_MS : HEARTBEAT_INTERVAL_MS);
     return () => clearInterval(heartbeat);
-  }, [loadAll]);
+  }, [loadAll, activeRunCount]);
 
   // minHeight: 100vh (not "100%") on purpose -- .app-shell switches from
   // flex (which stretches .main-column to fill it) to display:block below
@@ -241,6 +242,7 @@ function PanelTab({ cc, agents, schedules, setTab }) {
   const controlMatrixSummary = controlMatrix.summary || {};
   const controlMatrixFrameworks = controlMatrix.frameworks || [];
   const controlMatrixCells = controlMatrix.cells || [];
+  const activeRuns = cc.active_runs || [];
 
   const kpis = [
     { label: "Achados reais abertos", value: realFindings.length, sub: `${openBySeverity.critical} críticos · ${openBySeverity.high} altos`, color: "#d64545", pct: realFindings.length ? 100 : 0 },
@@ -299,6 +301,8 @@ function PanelTab({ cc, agents, schedules, setTab }) {
       </section>
 
       <section style={{ display: "grid", gridTemplateColumns: "minmax(0,1.15fr) minmax(0,1fr)", gap: 16 }}>
+        <ActiveRunsPanel activeRuns={activeRuns} setTab={setTab} />
+
         <Card>
           <div style={{ display: "flex", alignItems: "baseline", gap: 12 }}>
             <CardTitle sub={`${agents.filter((a) => a.status === "online").length} online · ${agents.filter((a) => a.status === "pending").length} pendente(s) · ${agents.filter((a) => a.status === "offline").length} offline`}>Agentes instalados</CardTitle>
@@ -551,6 +555,74 @@ function IndustryBenchmarkLine({ benchmark }) {
     <span title={title} style={{ fontWeight: 400, fontSize: 11, lineHeight: "14px", color: TV.label, cursor: "help" }}>
       Média global (Wavestone 2026): {benchmark.global_average_pct}% · setor não classificado (configure em Usuários → Empresas)
     </span>
+  );
+}
+
+function ActiveRunsPanel({ activeRuns, setTab }) {
+  if (!activeRuns.length) {
+    return (
+      <Card style={{ gridColumn: "1 / -1", padding: "14px 18px", background: TV.surface2 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <span style={{ width: 9, height: 9, borderRadius: 999, background: TV.label }} />
+          <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+            <span style={{ fontWeight: 700, fontSize: 13, lineHeight: "17px", color: TV.text }}>Nenhum teste BAS em andamento</span>
+            <span style={{ fontWeight: 400, fontSize: 11, lineHeight: "15px", color: TV.muted }}>O painel entra em atualização rápida automaticamente quando uma execução começa.</span>
+          </div>
+          <button onClick={() => setTab("deploy")} style={{ marginLeft: "auto", border: `1px solid ${TV.border}`, background: "transparent", borderRadius: 8, cursor: "pointer", fontWeight: 600, fontSize: 12, lineHeight: "16px", color: TV.text, padding: "7px 11px" }}>
+            Ver agendamentos
+          </button>
+        </div>
+      </Card>
+    );
+  }
+  const averageProgress = Math.round(activeRuns.reduce((sum, run) => sum + Number(run.mission_progress || 0), 0) / activeRuns.length);
+  const failedJobs = activeRuns.reduce((sum, run) => sum + Number(run.jobs_failed || 0), 0);
+  const resolvedJobs = activeRuns.reduce((sum, run) => sum + Number(run.jobs_resolved || 0), 0);
+  return (
+    <Card style={{ gridColumn: "1 / -1", borderColor: "#4b73ff", background: "#111827" }}>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 12 }}>
+        <CardTitle sub={`${activeRuns.length} execução(ões) ativa(s) · polling 2s`}>Testes em andamento agora</CardTitle>
+        <span style={{ marginLeft: "auto", fontWeight: 700, fontSize: 18, lineHeight: "22px", color: "#4b73ff" }}>{averageProgress}%</span>
+      </div>
+      <Bar pct={averageProgress} color="#4b73ff" height={7} bg="#263246" />
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0,1fr))", gap: 10 }}>
+        {[
+          ["Runs ativos", activeRuns.length],
+          ["Jobs vistos", activeRuns.reduce((sum, run) => sum + Number(run.jobs_total_seen || 0), 0)],
+          ["Jobs resolvidos", resolvedJobs],
+          ["Falhas", failedJobs],
+        ].map(([label, value]) => (
+          <div key={label} style={{ background: TV.surface2, border: `1px solid ${TV.border}`, borderRadius: 8, padding: "9px 11px", display: "flex", flexDirection: "column", gap: 2 }}>
+            <span style={{ fontWeight: 600, fontSize: 10, lineHeight: "13px", color: TV.label, textTransform: "uppercase", letterSpacing: ".5px" }}>{label}</span>
+            <span style={{ fontWeight: 700, fontSize: 18, lineHeight: "22px", color: label === "Falhas" && value ? "#d64545" : TV.text }}>{value}</span>
+          </div>
+        ))}
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {activeRuns.slice(0, 5).map((run) => {
+          const progress = Math.max(0, Math.min(99, Number(run.mission_progress || 0)));
+          return (
+            <div key={run.scan_job_id} style={{ display: "grid", gridTemplateColumns: "minmax(0,1.25fr) minmax(0,1fr) 78px", gap: 12, alignItems: "center", background: TV.surface2, border: `1px solid ${TV.border}`, borderRadius: 8, padding: "10px 12px" }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 0 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+                  <span style={{ width: 8, height: 8, borderRadius: 999, background: "#4b73ff", boxShadow: "0 0 0 3px #4b73ff22", flex: "none" }} />
+                  <span style={{ fontWeight: 700, fontSize: 12, lineHeight: "16px", color: TV.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{run.schedule_name || `scan BAS #${run.scan_job_id}`}</span>
+                </div>
+                <span style={{ fontWeight: 400, fontSize: 10.5, lineHeight: "14px", color: TV.label, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                  Scan #{run.scan_job_id} · {run.agent_label || `agente #${run.agent_id || "—"}`} · {run.active_target || run.target_query || "alvo em preparo"}
+                </span>
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 5, minWidth: 0 }}>
+                <span style={{ fontWeight: 600, fontSize: 11, lineHeight: "15px", color: "#4b73ff", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{run.current_step || "Preparando execução"}</span>
+                <Bar pct={progress} color="#4b73ff" height={5} bg="#263246" />
+                <span style={{ fontWeight: 400, fontSize: 10, lineHeight: "13px", color: TV.label }}>{run.jobs_resolved || 0}/{run.total_hint || run.jobs_total_seen || 1} unidade(s) resolvida(s){run.active_technique_key ? ` · ${run.active_technique_key}` : ""}</span>
+              </div>
+              <span style={{ fontWeight: 800, fontSize: 15, lineHeight: "19px", color: "#4b73ff", textAlign: "right" }}>{progress}%</span>
+            </div>
+          );
+        })}
+      </div>
+    </Card>
   );
 }
 
