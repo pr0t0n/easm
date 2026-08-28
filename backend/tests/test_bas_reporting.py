@@ -161,6 +161,29 @@ def test_bas_findings_view_marks_every_row_simulated():
     assert rows[0]["cve"] is None
     assert rows[0]["epss"] is None
     assert rows[0]["exploit_available"] is None
+    assert rows[0]["affected_assets"] == []
+
+
+def test_bas_findings_view_extracts_affected_assets_from_evidence():
+    db = MagicMock()
+    finding = SimpleNamespace(
+        id=7, title="BAS: exposed service", created_at="now", severity="low", cve=None, cvss=None,
+        details={
+            "technique_key": "port_service_scan",
+            "category": "network",
+            "risk_tier": "safe",
+            "target": "10.99.0.0/24",
+            "key_findings": ["10.99.0.12: 8080/tcp open http-proxy"],
+            "proof": {"valid": True, "target": "10.99.0.0/24", "evidence": "10.99.0.12: 8080/tcp open http-proxy"},
+            "simulated": False,
+        },
+    )
+    db.query.return_value = _query_chain([finding])
+
+    rows = bas_reporting.bas_findings_view(db)
+
+    assert rows[0]["affected_assets"][0]["ip"] == "10.99.0.12"
+    assert rows[0]["affected_assets"][0]["source"] == "log_text"
 
 
 def test_crown_jewels_view_reuses_the_real_keyword_identifier():
@@ -456,6 +479,49 @@ def test_attack_path_inventory_builds_cmdb_apps_vulnerabilities_and_steps():
         "Possibilidade de relay SMB/NTLM",
         "Exploração de legado SMBv1",
     ]
+
+
+def test_attack_path_inventory_builds_assets_from_scan_logs_and_links_finding():
+    from datetime import datetime
+
+    job = SimpleNamespace(
+        id=91,
+        scan_job_id=123,
+        finding_id=77,
+        technique_key="controlled_exploit_validation",
+        status="completed",
+        target="10.99.0.0/24",
+        result={"bas_proof": _proof(True)},
+        created_at=datetime(2026, 8, 28, 13, 5),
+    )
+    agent = SimpleNamespace(id=19, kind="real")
+    schedule = SimpleNamespace(id=10, name="teste")
+    log = SimpleNamespace(scan_job_id=123, message="validated internal host 10.99.0.12 responded with service banner", created_at=datetime(2026, 8, 28, 13, 6))
+    finding = SimpleNamespace(
+        id=77,
+        title="BAS: Controlled exploit validation",
+        severity="medium",
+        details={"technique_key": "controlled_exploit_validation", "recommendation": "Corrigir serviço exposto."},
+    )
+    db = MagicMock()
+
+    def query_side_effect(*args):
+        if args and args[0] is bas_reporting.BasNetworkSegmentTag:
+            return _query_chain([])
+        if args and args[0] is bas_reporting.ScanLog:
+            return _query_chain([log])
+        if args and args[0] is bas_reporting.Finding:
+            return _query_chain([finding])
+        return _query_chain([(job, agent, schedule)])
+
+    db.query.side_effect = query_side_effect
+
+    result = bas_reporting.attack_path_inventory(db)
+
+    asset = result["cmdb_assets"][0]
+    assert asset["ip"] == "10.99.0.12"
+    assert asset["vulnerabilities"][0]["finding_id"] == 77
+    assert asset["observations"][0]["source"] == "log_text"
 
 
 def test_chain_attack_path_groups_steps_by_the_shadow_scan_job_in_order():

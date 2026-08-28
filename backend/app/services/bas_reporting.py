@@ -18,10 +18,11 @@ from collections import Counter
 import ipaddress
 import re
 from typing import Any
+from urllib.parse import urlparse
 
 from sqlalchemy.orm import Session
 
-from app.models.models import BasAgent, BasJob, BasNetworkSegmentTag, BasSchedule, Finding, ScanJob
+from app.models.models import BasAgent, BasJob, BasNetworkSegmentTag, BasSchedule, Finding, ScanJob, ScanLog
 from app.services.bas_exclusion import BAS_FINDING_TOOL
 from app.services.bas_scheduler import _split_targets
 from app.services.bas_technique_catalog import list_techniques
@@ -88,6 +89,7 @@ _CONTROL_DEFS: dict[str, list[dict[str, Any]]] = {
 _SMB_LINE_RE = re.compile(
     r"^SMB\s+(?P<ip>\d+\.\d+\.\d+\.\d+)\s+445\s+(?P<host>\S+)\s+\[\*\]\s+(?P<os>.*?)\s+\(name:.*?\)\s+\(domain:(?P<domain>.*?)\)\s+\(signing:(?P<signing>True|False)\)\s+\(SMBv1:(?P<smbv1>True|False)\)"
 )
+_IPV4_RE = re.compile(r"\b(?P<ip>(?:\d{1,3}\.){3}\d{1,3})\b")
 
 
 def _smb_observations(stdout: str) -> list[dict[str, Any]]:
@@ -186,6 +188,93 @@ def _nmap_summary(result: dict[str, Any]) -> dict[str, Any]:
     if no_open_count:
         summary.setdefault("hosts_without_open_ports", no_open_count)
     return summary
+
+
+def _valid_observed_ip(value: str) -> str:
+    try:
+        ip = ipaddress.ip_address(str(value or "").strip())
+    except ValueError:
+        return ""
+    if ip.is_loopback or ip.is_unspecified or ip.is_multicast:
+        return ""
+    return str(ip)
+
+
+def _host_from_target(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    if re.match(r"^\s*(?:\d{1,3}\.){3}\d{1,3}/\d{1,2}\s*$", raw):
+        return ""
+    parsed = urlparse(raw if "://" in raw else f"//{raw}")
+    host = parsed.hostname or raw.split("/", 1)[0].split(":", 1)[0]
+    if "/" in host:
+        return ""
+    return host.strip("[]")
+
+
+def _asset_refs_from_text(text: str) -> list[dict[str, Any]]:
+    refs: dict[str, dict[str, Any]] = {}
+    for observation in _smb_observations(text):
+        ip = _valid_observed_ip(observation["ip"])
+        if not ip:
+            continue
+        refs[ip] = {
+            "key": ip,
+            "ip": ip,
+            "hostname": observation["host"],
+            "os": observation["os"],
+            "domain": observation["domain"],
+            "source": "smb_stdout",
+            "evidence": observation["evidence"],
+        }
+    for match in _IPV4_RE.finditer(str(text or "")):
+        if str(text or "")[match.end():match.end() + 1] == "/":
+            continue
+        ip = _valid_observed_ip(match.group("ip"))
+        if ip and ip not in refs:
+            refs[ip] = {"key": ip, "ip": ip, "hostname": ip, "os": "", "domain": "", "source": "log_text", "evidence": match.group("ip")}
+    return list(refs.values())
+
+
+def _asset_refs_from_job(job: Any, result: dict[str, Any], extra_text: str = "") -> list[dict[str, Any]]:
+    refs: dict[str, dict[str, Any]] = {}
+    for port in _nmap_open_ports(result):
+        host = str(port["host"])
+        ip = _valid_observed_ip(host)
+        key = ip or host
+        refs[key] = {
+            "key": key,
+            "ip": ip or host,
+            "hostname": host,
+            "os": "",
+            "domain": "" if ip else host,
+            "source": "nmap_result",
+            "evidence": f"{host}: {port['port']}/{port['protocol']} open {port['service']}",
+        }
+    text = "\n".join([
+        str(result.get("stdout") or ""),
+        str(result.get("stdout_full") or ""),
+        str(result.get("stdout_preview") or ""),
+        str(result.get("stderr") or ""),
+        str(extra_text or ""),
+    ])
+    for ref in _asset_refs_from_text(text):
+        refs.setdefault(ref["key"], ref)
+    target_host = _host_from_target(getattr(job, "target", "") or result.get("target") or "")
+    if target_host:
+        ip = _valid_observed_ip(target_host)
+        key = ip or target_host
+        refs.setdefault(key, {
+            "key": key,
+            "ip": ip or target_host,
+            "hostname": target_host,
+            "os": "",
+            "domain": "" if ip else target_host,
+            "source": "job_target",
+            "evidence": target_host,
+        })
+    return list(refs.values())
 
 
 def _proof_from_result(result: dict[str, Any] | None) -> dict[str, Any]:
@@ -614,22 +703,35 @@ def bas_findings_view(
         cve = f.cve
         epss_row = epss_by_cve.get(str(cve or "").upper()) if cve else None
         exploit_row = exploit_by_cve.get(cve) if cve else None
+        details = f.details or {}
+        proof = details.get("proof") or {}
+        finding_text = "\n".join([
+            str(details.get("target") or ""),
+            str(proof.get("target") or ""),
+            str(proof.get("evidence") or ""),
+            "\n".join(str(item) for item in details.get("key_findings", []) or []),
+        ])
+        affected_assets = [
+            {"ip": ref["ip"], "hostname": ref["hostname"], "domain": ref["domain"], "source": ref["source"], "evidence": ref["evidence"]}
+            for ref in _asset_refs_from_text(finding_text)
+        ]
         results.append({
             "id": f.id, "title": f.title, "created_at": f.created_at,
             "severity": f.severity,
-            "technique_key": (f.details or {}).get("technique_key"),
-            "category": (f.details or {}).get("category"),
-            "risk_tier": (f.details or {}).get("risk_tier"),
-            "target": (f.details or {}).get("target"),
-            "mitre_refs": (f.details or {}).get("mitre_refs", []),
-            "recommendation": (f.details or {}).get("recommendation", ""),
+            "technique_key": details.get("technique_key"),
+            "category": details.get("category"),
+            "risk_tier": details.get("risk_tier"),
+            "target": details.get("target"),
+            "mitre_refs": details.get("mitre_refs", []),
+            "recommendation": details.get("recommendation", ""),
             # Real content extracted from the tool's actual output (see
             # bas_scheduler._extract_key_findings) -- empty for a stub
             # dispatch or a real one that genuinely found nothing.
-            "key_findings": (f.details or {}).get("key_findings", []),
-            "simulated": bool((f.details or {}).get("simulated", True)),
-            "proof": (f.details or {}).get("proof") or {},
-            "proof_status": (f.details or {}).get("proof_status") or ((f.details or {}).get("proof") or {}).get("status"),
+            "key_findings": details.get("key_findings", []),
+            "affected_assets": affected_assets,
+            "simulated": bool(details.get("simulated", True)),
+            "proof": proof,
+            "proof_status": details.get("proof_status") or proof.get("status"),
             "proof_valid": _proof_valid_from_finding(f),
             "cve": cve,
             "cvss": f.cvss,
@@ -874,6 +976,17 @@ def attack_path_inventory(
 
     rows = query.order_by(BasJob.created_at.desc()).limit(200).all()
     assets: dict[str, dict[str, Any]] = {}
+    scan_ids = sorted({getattr(job, "scan_job_id", None) for job, _, _ in rows if getattr(job, "scan_job_id", None)})
+    finding_ids = sorted({getattr(job, "finding_id", None) for job, _, _ in rows if getattr(job, "finding_id", None)})
+    logs_by_scan: dict[int, list[str]] = {}
+    findings_by_id: dict[int, Finding] = {}
+    if scan_ids:
+        log_rows = db.query(ScanLog).filter(ScanLog.scan_job_id.in_(scan_ids)).order_by(ScanLog.created_at.asc()).limit(1000).all()
+        for log in log_rows:
+            logs_by_scan.setdefault(log.scan_job_id, []).append(str(log.message or ""))
+    if finding_ids:
+        for finding in db.query(Finding).filter(Finding.id.in_(finding_ids), Finding.tool == BAS_FINDING_TOOL).all():
+            findings_by_id[finding.id] = finding
 
     def ensure_asset(ip: str, job: BasJob, agent: BasAgent, schedule: BasSchedule) -> dict[str, Any]:
         asset = assets.get(ip)
@@ -890,6 +1003,7 @@ def attack_path_inventory(
                 "schedule_ids": [],
                 "services": [],
                 "vulnerabilities": [],
+                "observations": [],
                 "risk_level": "low",
             }
             assets[ip] = asset
@@ -903,10 +1017,45 @@ def attack_path_inventory(
             asset["schedule_ids"].append(schedule.id)
         return asset
 
+    def attach_observation(asset: dict[str, Any], ref: dict[str, Any]) -> None:
+        evidence = str(ref.get("evidence") or "").strip()
+        if not evidence:
+            return
+        row = {"source": ref.get("source") or "bas_evidence", "evidence": evidence[:500]}
+        if row not in asset["observations"]:
+            asset["observations"].append(row)
+
+    def attach_finding(asset: dict[str, Any], finding: Finding | None, ref: dict[str, Any]) -> None:
+        if finding is None:
+            return
+        details = finding.details or {}
+        vuln_id = f"bas_finding_{finding.id}"
+        if any(v["id"] == vuln_id for v in asset["vulnerabilities"]):
+            return
+        asset["vulnerabilities"].append({
+            "id": vuln_id,
+            "severity": finding.severity,
+            "title": finding.title,
+            "recommendation": details.get("recommendation", ""),
+            "finding_id": finding.id,
+            "technique_key": details.get("technique_key"),
+            "evidence": ref.get("evidence", ""),
+        })
+        rank = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+        current = rank.get(asset["risk_level"], 3)
+        incoming = rank.get(finding.severity, 4)
+        if incoming < current:
+            if finding.severity in {"critical", "high"}:
+                asset["risk_level"] = "high"
+            elif finding.severity in {"medium", "low"}:
+                asset["risk_level"] = finding.severity
+
     for job, agent, schedule in rows:
         if not _proof_valid_from_result(getattr(job, "result", None)):
             continue
         result = job.result or {}
+        log_text = "\n".join(logs_by_scan.get(getattr(job, "scan_job_id", None), []))
+        finding = findings_by_id.get(getattr(job, "finding_id", None))
         if job.technique_key in {"port_service_scan", "firewall_segmentation_test"}:
             for port in _nmap_open_ports(result):
                 asset = ensure_asset(port["host"], job, agent, schedule)
@@ -920,43 +1069,51 @@ def attack_path_inventory(
                 }
                 if not any(s["port"] == service["port"] and s["protocol"] == service["protocol"] for s in asset["services"]):
                     asset["services"].append(service)
-            continue
-        if job.technique_key != "smb_enum_cme":
-            continue
-        for observation in _smb_observations(str(result.get("stdout") or "")):
-            asset = ensure_asset(observation["ip"], job, agent, schedule)
-            asset["hostname"] = observation["host"]
-            asset["os"] = observation["os"]
-            asset["domain"] = observation["domain"]
+                attach_observation(asset, {"source": "nmap_result", "evidence": service["evidence"]})
+        if job.technique_key == "smb_enum_cme":
+            for observation in _smb_observations(str(result.get("stdout") or "")):
+                asset = ensure_asset(observation["ip"], job, agent, schedule)
+                asset["hostname"] = observation["host"]
+                asset["os"] = observation["os"]
+                asset["domain"] = observation["domain"]
 
-            service = {
-                "name": "SMB",
-                "port": 445,
-                "protocol": "tcp",
-                "application": "Microsoft SMB",
-                "version": "SMBv1 habilitado" if observation["smbv1_enabled"] else "SMBv2/3 observado",
-                "evidence": observation["evidence"],
-            }
-            if not any(s["name"] == service["name"] and s["port"] == service["port"] for s in asset["services"]):
-                asset["services"].append(service)
+                service = {
+                    "name": "SMB",
+                    "port": 445,
+                    "protocol": "tcp",
+                    "application": "Microsoft SMB",
+                    "version": "SMBv1 habilitado" if observation["smbv1_enabled"] else "SMBv2/3 observado",
+                    "evidence": observation["evidence"],
+                }
+                if not any(s["name"] == service["name"] and s["port"] == service["port"] for s in asset["services"]):
+                    asset["services"].append(service)
+                attach_observation(asset, {"source": "smb_stdout", "evidence": observation["evidence"]})
 
-            if observation["smbv1_enabled"] and not any(v["id"] == "smbv1_enabled" for v in asset["vulnerabilities"]):
-                asset["vulnerabilities"].append({
-                    "id": "smbv1_enabled",
-                    "severity": "high",
-                    "title": "SMBv1 habilitado",
-                    "recommendation": "Desativar SMBv1 e validar compatibilidade de aplicações legadas.",
-                })
-                asset["risk_level"] = "high"
-            if not observation["signing_required"] and not any(v["id"] == "smb_signing_disabled" for v in asset["vulnerabilities"]):
-                asset["vulnerabilities"].append({
-                    "id": "smb_signing_disabled",
-                    "severity": "medium",
-                    "title": "SMB signing não obrigatório",
-                    "recommendation": "Exigir SMB signing por política nos hosts compatíveis.",
-                })
-                if asset["risk_level"] != "high":
-                    asset["risk_level"] = "medium"
+                if observation["smbv1_enabled"] and not any(v["id"] == "smbv1_enabled" for v in asset["vulnerabilities"]):
+                    asset["vulnerabilities"].append({
+                        "id": "smbv1_enabled",
+                        "severity": "high",
+                        "title": "SMBv1 habilitado",
+                        "recommendation": "Desativar SMBv1 e validar compatibilidade de aplicações legadas.",
+                    })
+                    asset["risk_level"] = "high"
+                if not observation["signing_required"] and not any(v["id"] == "smb_signing_disabled" for v in asset["vulnerabilities"]):
+                    asset["vulnerabilities"].append({
+                        "id": "smb_signing_disabled",
+                        "severity": "medium",
+                        "title": "SMB signing não obrigatório",
+                        "recommendation": "Exigir SMB signing por política nos hosts compatíveis.",
+                    })
+                    if asset["risk_level"] != "high":
+                        asset["risk_level"] = "medium"
+        for ref in _asset_refs_from_job(job, result, extra_text=log_text):
+            asset = ensure_asset(ref["ip"], job, agent, schedule)
+            if ref.get("hostname") and asset["hostname"] == asset["ip"]:
+                asset["hostname"] = ref["hostname"]
+            if ref.get("domain") and not asset["domain"]:
+                asset["domain"] = ref["domain"]
+            attach_observation(asset, ref)
+            attach_finding(asset, finding, ref)
 
     sorted_assets = sorted(
         assets.values(),
