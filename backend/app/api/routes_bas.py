@@ -13,7 +13,7 @@ import socket
 from datetime import datetime, timedelta
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -1108,18 +1108,83 @@ def _detect_container_network_ip() -> str | None:
         return None
 
 
-@router.get("/install-config")
-def install_config(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def _host_without_port(value: str) -> str:
+    host = str(value or "").strip().split(",")[0].strip()
+    if host.startswith("[") and "]" in host:
+        return host[1:host.index("]")]
+    return host.rsplit(":", 1)[0] if ":" in host and host.count(":") == 1 else host
+
+
+def _tcp_reachable(host: str, port: str, timeout: float = 0.2) -> bool:
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout):
+            return True
+    except (OSError, ValueError):
+        return False
+
+
+def _install_host_candidates(
+    *, saved_host: str, callback_port: str, request: Request | None = None, browser_host: str = ""
+) -> list[dict[str, Any]]:
+    candidates = []
+    seen = set()
+
+    def add(host: str, source: str, confidence: str, saved: bool = False):
+        clean = _host_without_port(host)
+        if not clean or clean in {"backend", "frontend"} or clean in seen:
+            return
+        seen.add(clean)
+        candidates.append({
+            "host": clean,
+            "port": callback_port,
+            "source": source,
+            "confidence": confidence,
+            "saved": saved,
+            "reachable_from_backend": _tcp_reachable(clean, callback_port),
+        })
+
+    if saved_host and saved_host != "backend":
+        add(saved_host, "saved", "configured", True)
+    add(browser_host, "browser", "candidate")
+    if request is not None:
+        add(request.headers.get("x-forwarded-host") or "", "x_forwarded_host", "candidate")
+        add(request.headers.get("host") or "", "request_host", "low")
+        if request.client:
+            add(request.client.host, "request_client", "low")
+    add(_detect_container_network_ip() or "", "container_network", "docker_only")
+    return candidates
+
+
+def _install_config_payload(
+    *, db: Session, current_user: User, browser_host: str = "", request: Request | None = None
+) -> dict[str, Any]:
     def _setting(key: str, default: str) -> str:
         row = db.query(AppSetting).filter(AppSetting.owner_id == current_user.id, AppSetting.key == key).first()
         return row.value if row and row.value else default
 
+    callback_host = _setting("bas_agent_callback_host", "backend")
+    callback_port = _setting("bas_agent_callback_port", str(settings.backend_host_port))
     return {
-        "callback_host": _setting("bas_agent_callback_host", "backend"),
-        "callback_port": _setting("bas_agent_callback_port", str(settings.backend_host_port)),
+        "callback_host": callback_host,
+        "callback_port": callback_port,
         "mtls_port": settings.bas_mtls_external_port,
+        "relay_port": settings.bas_relay_external_port,
         "container_network_ip": _detect_container_network_ip(),
+        "requires_explicit_callback_host": callback_host == "backend",
+        "host_candidates": _install_host_candidates(
+            saved_host=callback_host, callback_port=callback_port, request=request, browser_host=browser_host,
+        ),
     }
+
+
+@router.get("/install-config")
+def install_config(
+    request: Request,
+    browser_host: str = "",
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return _install_config_payload(db=db, current_user=current_user, browser_host=browser_host, request=request)
 
 
 @router.put("/install-config")

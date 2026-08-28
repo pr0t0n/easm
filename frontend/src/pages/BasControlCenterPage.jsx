@@ -607,10 +607,17 @@ function DeployTab({ isAdmin, agents, techniques, chains, schedules, reload }) {
   const [editingCallback, setEditingCallback] = useState(false);
   const [callbackHostInput, setCallbackHostInput] = useState("");
   const [callbackPortInput, setCallbackPortInput] = useState("");
+  const [installHeartbeat, setInstallHeartbeat] = useState({ probing: false, reachable: [] });
+
+  const loadInstallConfig = useCallback(async () => {
+    const { data } = await client.get("/api/bas/install-config", { params: { browser_host: window.location.hostname } });
+    setInstallConfig(data);
+    return data;
+  }, []);
 
   useEffect(() => {
-    client.get("/api/bas/install-config").then(({ data }) => setInstallConfig(data)).catch(() => {});
-  }, []);
+    loadInstallConfig().catch(() => {});
+  }, [loadInstallConfig]);
 
   const grouped = useMemo(() => {
     const byCategory = {};
@@ -680,20 +687,59 @@ function DeployTab({ isAdmin, agents, techniques, chains, schedules, reload }) {
     } catch (error) { toastError(error?.response?.data?.detail || `Agente ${os} ainda não disponível.`); }
   };
   const copy = (value) => { if (navigator.clipboard) navigator.clipboard.writeText(String(value || "")); };
-  const saveCallback = async () => {
+  const probeInstallHost = async (host, port) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2500);
     try {
-      await client.put("/api/bas/install-config", { callback_host: callbackHostInput.trim(), callback_port: callbackPortInput.trim() });
+      await fetch(`http://${host}:${port}/health`, { mode: "no-cors", cache: "no-store", signal: controller.signal });
+      return true;
+    } catch {
+      return false;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  const runInstallHeartbeat = async (config = installConfig) => {
+    if (!config) return [];
+    const port = config.callback_port || "8001";
+    const candidates = [
+      ...(config.callback_host && config.callback_host !== "backend" ? [{ host: config.callback_host, port, source: "saved" }] : []),
+      ...(config.host_candidates || []),
+    ].filter((candidate, index, list) => candidate.host && list.findIndex((item) => item.host === candidate.host) === index);
+    setInstallHeartbeat({ probing: true, reachable: [] });
+    const results = [];
+    for (const candidate of candidates) {
+      if (candidate.confidence === "docker_only") continue;
+      if (await probeInstallHost(candidate.host, candidate.port || port)) {
+        results.push({ ...candidate, port: candidate.port || port });
+      }
+    }
+    setInstallHeartbeat({ probing: false, reachable: results });
+    return results;
+  };
+  useEffect(() => {
+    if (!installConfig) return;
+    runInstallHeartbeat(installConfig);
+  }, [installConfig?.callback_host, installConfig?.callback_port]);
+  const saveCallback = async (hostOverride, portOverride) => {
+    try {
+      const host = String(hostOverride ?? callbackHostInput).trim();
+      const port = String(portOverride ?? callbackPortInput).trim();
+      await client.put("/api/bas/install-config", { callback_host: host, callback_port: port });
       setEditingCallback(false);
-      const { data } = await client.get("/api/bas/install-config");
-      setInstallConfig(data);
+      await loadInstallConfig();
       toastSuccess("IP/porta de instalação atualizados.");
     } catch (error) { toastError(error?.response?.data?.detail || "Falha ao salvar IP/porta."); }
   };
 
   const browserHost = window.location.hostname;
   const isAutoDetectedHost = installConfig?.callback_host === "backend";
-  const effectiveHost = isAutoDetectedHost ? browserHost : (installConfig?.callback_host || "");
+  const effectiveHost = isAutoDetectedHost ? "" : (installConfig?.callback_host || "");
   const overrideLooksStale = isCallbackHostStale(installConfig, browserHost);
+  const hostCandidates = installConfig?.host_candidates || [];
+  const reachableInstallHosts = installHeartbeat.reachable || [];
+  const heartbeatHost = reachableInstallHosts[0]?.host || "";
+  const installHostForCommand = effectiveHost || heartbeatHost || "<IP_DA_PLATAFORMA>";
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -814,14 +860,40 @@ function DeployTab({ isAdmin, agents, techniques, chains, schedules, reload }) {
                   {overrideLooksStale && isAdmin && (
                     <div style={{ marginBottom: 6, color: "#fe7b02" }}>
                       IP salvo diferente do usado agora ({browserHost}).{" "}
-                      <button className="btn" style={{ padding: "2px 8px" }} onClick={() => { setCallbackHostInput(browserHost); setCallbackPortInput(installConfig.callback_port || ""); saveCallback(); }}>Usar {browserHost}</button>
+                      <button className="btn" style={{ padding: "2px 8px" }} onClick={() => saveCallback(browserHost, installConfig.callback_port || "")}>Salvar {browserHost}</button>
+                    </div>
+                  )}
+                  {isAutoDetectedHost && (
+                    <div style={{ marginBottom: 6, color: "#fe7b02" }}>
+                      IP externo do backend ainda não foi salvo. A Central vai testar `/health` na porta {installConfig.callback_port} e usar o candidato que responder.
                     </div>
                   )}
                   {!editingCallback ? (
                     <>
-                      IP: <span style={{ cursor: "pointer", fontFamily: "var(--font-mono,monospace)" }} onClick={() => copy(effectiveHost)}>{effectiveHost}</span> · porta:{" "}
+                      IP salvo: <span style={{ cursor: effectiveHost ? "pointer" : "default", fontFamily: "var(--font-mono,monospace)", color: effectiveHost ? TV.text : "#fe7b02" }} onClick={() => effectiveHost && copy(effectiveHost)}>{effectiveHost || "não configurado"}</span> · porta:{" "}
                       <span style={{ cursor: "pointer", fontFamily: "var(--font-mono,monospace)" }} onClick={() => copy(installConfig.callback_port)}>{installConfig.callback_port}</span>
                       {isAdmin && <button className="btn" style={{ marginLeft: 8, padding: "2px 8px" }} onClick={() => { setCallbackHostInput(effectiveHost); setCallbackPortInput(installConfig.callback_port || ""); setEditingCallback(true); }}>Editar</button>}
+                      <button className="btn" style={{ marginLeft: 6, padding: "2px 8px" }} onClick={() => runInstallHeartbeat(installConfig, false)} disabled={installHeartbeat.probing}>
+                        {installHeartbeat.probing ? "testando..." : "Heartbeat"}
+                      </button>
+                      {reachableInstallHosts.length > 0 && (
+                        <div style={{ marginTop: 6, color: "#1f8a59" }}>
+                          heartbeat OK: {reachableInstallHosts.map((candidate) => `${candidate.host}:${candidate.port}`).join(", ")}
+                        </div>
+                      )}
+                      {hostCandidates.length > 0 && (
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 7 }}>
+                          {hostCandidates.map((candidate) => {
+                            const heartbeatOk = reachableInstallHosts.some((item) => item.host === candidate.host);
+                            const disabled = candidate.confidence === "docker_only" || (!heartbeatOk && candidate.reachable_from_backend === false);
+                            return (
+                              <button key={`${candidate.source}-${candidate.host}`} className="btn" disabled={disabled} style={{ padding: "2px 8px", background: TV.surface2, border: `1px solid ${TV.border}`, color: heartbeatOk ? "#1f8a59" : candidate.reachable_from_backend === false ? "#d64545" : candidate.confidence === "docker_only" ? TV.label : TV.text, opacity: disabled ? .55 : 1 }} onClick={() => saveCallback(candidate.host, candidate.port)}>
+                                {heartbeatOk ? "Salvar heartbeat" : candidate.reachable_from_backend === false ? "Indisponível" : candidate.confidence === "docker_only" ? "Docker" : "Salvar"} {candidate.host}:{candidate.port}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
                     </>
                   ) : (
                     <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
@@ -844,8 +916,11 @@ function DeployTab({ isAdmin, agents, techniques, chains, schedules, reload }) {
                     <span onClick={() => copy(newToken.password)} style={{ cursor: "pointer" }}>{newToken.password}</span>
                     <span onClick={() => copy(newToken.code)} style={{ cursor: "pointer" }}>{newToken.code}</span>
                   </div>
-                  <div style={{ marginTop: 6, color: TV.muted }}>
-                    ./bas-agent install --enroll-token={newToken.code} --relay={effectiveHost}:{installConfig?.callback_port || ""}
+                  <div style={{ marginTop: 6, color: TV.muted, fontFamily: "var(--font-mono,monospace)" }}>
+                    Usuário={newToken.username} · Token={newToken.code} · IP={installHostForCommand} · Porta={installConfig?.callback_port || ""}
+                  </div>
+                  <div style={{ marginTop: 4, color: TV.label, fontFamily: "var(--font-mono,monospace)" }}>
+                    primeiro: ./bas-agent-linux-arm64 · depois: ./bas-agent-linux-arm64 install
                   </div>
                 </div>
               )}
