@@ -390,6 +390,75 @@ def _authorized_finding_query(db: Session, current_user: User):
     )
 
 
+def _finding_source_module(finding: Finding, details: dict) -> str:
+    source = str(details.get("source_module") or "").strip().lower()
+    tool = str(finding.tool or "").strip().lower()
+    if source == "bas" or tool == "bas-agent":
+        return "bas"
+    if details.get("learning_source"):
+        return "learning"
+    if tool in {"github-osint", "google-dork", "pastebin", "osint", "shodan"}:
+        return "osint"
+    if tool in {"manual", "import"}:
+        return "manual"
+    return "pentest"
+
+
+def _finding_source_label(source: str) -> str:
+    return {
+        "bas": "BAS",
+        "learning": "Aprendizado",
+        "osint": "OSINT",
+        "manual": "Manual",
+        "pentest": "Pentest",
+    }.get(source, source or "Pentest")
+
+
+def _finding_kind(finding: Finding, details: dict, lifecycle_status: str) -> str:
+    if finding.is_false_positive or lifecycle_status == "false_positive":
+        return "false_positive"
+    source = _finding_source_module(finding, details)
+    severity = str(finding.severity or "info").lower()
+    verification = str(finding.verification_status or details.get("verification_status") or "").lower()
+    if source == "bas" and severity == "info":
+        return "bas_observation"
+    if severity == "info":
+        return "observation"
+    if verification == "confirmed":
+        return "validated_risk"
+    return "candidate_risk"
+
+
+def _finding_kind_label(kind: str) -> str:
+    return {
+        "validated_risk": "Risco validado",
+        "candidate_risk": "Risco candidato",
+        "bas_observation": "Observação BAS",
+        "observation": "Observação",
+        "false_positive": "Falso positivo",
+    }.get(kind, kind or "Achado")
+
+
+def _finding_observation_summary(finding: Finding, details: dict) -> str:
+    key_findings = details.get("key_findings") if isinstance(details.get("key_findings"), list) else []
+    lines = [str(item).strip() for item in key_findings if str(item).strip()]
+    if lines:
+        open_lines = [line for line in lines if "/tcp" in line and " open" in line.lower()]
+        if open_lines:
+            return f"{len(open_lines)} porta(s) aberta(s): {', '.join(open_lines[:3])}"[:1000]
+        no_open = next((line for line in lines if line.startswith("Nenhuma das portas TCP BAS foi observada aberta")), "")
+        if no_open:
+            summary = next((line for line in lines if line.startswith("Resumo nmap:")), "")
+            ports = next((line for line in lines if line.startswith("Portas TCP testadas:")), "")
+            return " | ".join(part for part in (summary, ports, no_open) if part)[:1000]
+        return " | ".join(lines[:3])[:1000]
+    for key in ("evidence", "payload", "proof", "raw_output", "request", "response", "description", "technical_description"):
+        value = str(details.get(key) or "").strip()
+        if value:
+            return value.replace("\n", " ")[:1000]
+    return str(finding.title or "").strip()[:1000]
+
+
 def _authorized_asset_query(db: Session, current_user: User):
     query = db.query(Asset)
     if current_user.is_admin:
@@ -4877,6 +4946,8 @@ def list_findings_paginated(
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0, le=50000),
     verification_status: str | None = Query(default=None),
+    finding_kind: str | None = Query(default=None),
+    source_module: str | None = Query(default=None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -4922,6 +4993,19 @@ def list_findings_paginated(
     if normalized_status in {"open", "closed", "false_positive"}:
         rows = [finding for finding in rows if lifecycle_status.get(finding.id, "open") == normalized_status]
 
+    normalized_source = str(source_module or "").strip().lower()
+    if normalized_source:
+        source_values = {item.strip().lower() for item in re.split(r"[,;\s]+", normalized_source) if item.strip()}
+        rows = [finding for finding in rows if _finding_source_module(finding, finding.details or {}) in source_values]
+
+    normalized_kind = str(finding_kind or "").strip().lower()
+    if normalized_kind:
+        kind_values = {item.strip().lower() for item in re.split(r"[,;\s]+", normalized_kind) if item.strip()}
+        rows = [
+            finding for finding in rows
+            if _finding_kind(finding, finding.details or {}, lifecycle_status.get(finding.id, "open")) in kind_values
+        ]
+
     severity_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 
     def _created_ts(finding: Finding) -> float:
@@ -4957,12 +5041,19 @@ def list_findings_paginated(
     # Severity breakdown BEFORE pagination — espelha exatamente o que o relatório faz
     from app.services.vuln_family import classify_family as _cf_count, family_label as _fl_count
     severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+    kind_counts = {"validated_risk": 0, "candidate_risk": 0, "bas_observation": 0, "observation": 0, "false_positive": 0}
+    source_counts = {"bas": 0, "pentest": 0, "learning": 0, "osint": 0, "manual": 0}
     family_counts: dict[str, dict] = {}
     for _f in rows:
         _sev = str(_f.severity or "info").lower()
         if _sev in severity_counts:
             severity_counts[_sev] += 1
         _d = _f.details or {}
+        _lifecycle = lifecycle_status.get(_f.id, "open")
+        _kind = _finding_kind(_f, _d, _lifecycle)
+        _source = _finding_source_module(_f, _d)
+        kind_counts[_kind] = kind_counts.get(_kind, 0) + 1
+        source_counts[_source] = source_counts.get(_source, 0) + 1
         _famc = _cf_count(
             title=_f.title, tool=_f.tool, owasp=str(_d.get("owasp_category") or ""),
             cve=_f.cve, learning_family=(_d.get("learning_source") or {}).get("vuln_family"),
@@ -5024,6 +5115,11 @@ def list_findings_paginated(
                 "title": _finding_display_title(finding, details),
                 "vuln_family": _fam,
                 "vuln_family_label": family_label(_fam),
+                "finding_kind": _finding_kind(finding, details, lifecycle_status.get(finding.id, "open")),
+                "finding_kind_label": _finding_kind_label(_finding_kind(finding, details, lifecycle_status.get(finding.id, "open"))),
+                "source_module": _finding_source_module(finding, details),
+                "source_label": _finding_source_label(_finding_source_module(finding, details)),
+                "observation_summary": _finding_observation_summary(finding, details),
                 "technical_description": _desc,
                 "mitre_attack": attack_for_family(_fam),
                 "verification_criteria": verification_for(_fam),
@@ -5033,7 +5129,7 @@ def list_findings_paginated(
                     "available": (details.get("exploit") or {}).get("available"),
                     "refs": (details.get("exploit") or {}).get("refs") or [],
                 },
-                "exploit_available": bool((details.get("exploit") or {}).get("available")),
+                "exploit_available": (details.get("exploit") or {}).get("available"),
                 # severidade EFETIVA: sobe um nível quando há exploit público.
                 "severity": (
                     _exploit_boost(finding.severity, True)
@@ -5074,6 +5170,8 @@ def list_findings_paginated(
         "sort": normalized_sort,
         "scan_id": scan_id,
         "severity_counts": severity_counts,
+        "kind_counts": kind_counts,
+        "source_counts": source_counts,
         "family_counts": sorted(family_counts.values(), key=lambda x: -x["count"]),
     }
 

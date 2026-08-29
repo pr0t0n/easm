@@ -8,6 +8,16 @@ import "../styles/dashboard.css";
 const SEV_LABEL = { critical: "Crítico", high: "Alto", medium: "Médio", low: "Baixo", info: "Info" };
 const SEV_ORDER = ["critical", "high", "medium", "low", "info"];
 const PAGE_SIZE = 100;
+const KIND_LABEL = {
+  validated_risk: "Risco validado",
+  candidate_risk: "Risco candidato",
+  bas_observation: "Observação BAS",
+  observation: "Observação",
+  false_positive: "Falso positivo",
+};
+const KIND_ORDER = ["validated_risk", "candidate_risk", "bas_observation", "observation", "false_positive"];
+const SOURCE_LABEL = { bas: "BAS", pentest: "Pentest", learning: "Aprendizado", osint: "OSINT", manual: "Manual" };
+const SOURCE_ORDER = ["bas", "pentest", "learning", "osint", "manual"];
 const VSTATUS_LABEL = {
   confirmed: "Confirmado", candidate: "Candidato", hypothesis: "Hipótese", refuted: "Refutado",
   inconclusive: "Inconclusivo", blocked: "Bloqueado", not_applicable: "Não aplicável",
@@ -33,6 +43,8 @@ export default function VulnerabilitiesPage() {
   const [activeTab, setActiveTab] = useState("achados");
   const [items, setItems] = useState([]);
   const [counts, setCounts] = useState({});
+  const [kindCounts, setKindCounts] = useState({});
+  const [sourceCounts, setSourceCounts] = useState({});
   const [totalRows, setTotalRows] = useState(0);
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
@@ -47,11 +59,15 @@ export default function VulnerabilitiesPage() {
   const [adjudicationError, setAdjudicationError] = useState("");
   const [scanId, setScanId] = useState("");
   const [accessGroupId, setAccessGroupId] = useState("");
+  const [kindFilter, setKindFilter] = useState("todos");
+  const [sourceFilter, setSourceFilter] = useState("todos");
 
   useEffect(() => {
     setLoading(true);
     const params = { limit: PAGE_SIZE, offset: (page - 1) * PAGE_SIZE, sort: "severity" };
     if (sevFilter !== "todas") params.severity = sevFilter;
+    if (kindFilter !== "todos") params.finding_kind = kindFilter;
+    if (sourceFilter !== "todos") params.source_module = sourceFilter;
     if (scanId) params.scan_id = scanId;
     if (accessGroupId) params.access_group_id = accessGroupId;
     client
@@ -59,20 +75,24 @@ export default function VulnerabilitiesPage() {
       .then(({ data }) => {
         setItems(Array.isArray(data?.items) ? data.items : []);
         setCounts(data?.severity_counts || {});
+        setKindCounts(data?.kind_counts || {});
+        setSourceCounts(data?.source_counts || {});
         setTotalRows(Number(data?.total || 0));
       })
       .catch(() => setError("Falha ao carregar achados."))
       .finally(() => setLoading(false));
-  }, [sevFilter, scanId, accessGroupId, page]);
+  }, [sevFilter, kindFilter, sourceFilter, scanId, accessGroupId, page]);
 
   const total = useMemo(() => SEV_ORDER.reduce((a, k) => a + Number(counts[k] || 0), 0), [counts]);
+  const actionableTotal = Number(kindCounts.validated_risk || 0) + Number(kindCounts.candidate_risk || 0);
+  const observationTotal = Number(kindCounts.bas_observation || 0) + Number(kindCounts.observation || 0);
   const pageCount = Math.max(1, Math.ceil(totalRows / PAGE_SIZE));
   const safePage = Math.min(page, pageCount);
   const canAdjudicate = useMemo(() => currentUserIsAdmin(), []);
 
   useEffect(() => {
     setPage(1);
-  }, [sevFilter, scanId, accessGroupId]);
+  }, [sevFilter, kindFilter, sourceFilter, scanId, accessGroupId]);
 
   useEffect(() => {
     if (!selected?.id) {
@@ -164,6 +184,8 @@ export default function VulnerabilitiesPage() {
               <span className={`sk-badge sk-badge--${sev}`}><span className={`sk-dot sk-dot--${sev}`} />{SEV_LABEL[sev]}</span>
               {f.verification_status && <span className="evidence-pill">{VSTATUS_LABEL[f.verification_status] || f.verification_status}</span>}
               {f.vuln_family_label && <span className="sk-badge sk-badge--neutral">{f.vuln_family_label}</span>}
+              {f.finding_kind_label && <span className="sk-badge sk-badge--neutral">{f.finding_kind_label}</span>}
+              {f.source_label && <span className="sk-badge sk-badge--neutral">{f.source_label}</span>}
             </div>
             <h1>{f.title}</h1>
             <p className="report-meta sk-mono">
@@ -176,6 +198,11 @@ export default function VulnerabilitiesPage() {
               <section className="report-section">
                 <div className="sk-eyebrow">Descrição técnica</div>
                 <p className="report-narrative">{f.cve_description || details.description || "Sem descrição técnica registrada para este achado."}</p>
+              </section>
+
+              <section className="report-section">
+                <div className="sk-eyebrow">Observado</div>
+                <p className="report-narrative">{f.observation_summary || "Sem resumo observado para este achado."}</p>
               </section>
 
               <section className="report-section">
@@ -296,6 +323,8 @@ export default function VulnerabilitiesPage() {
                 <div className="vuln-score-row"><span>Confiança</span><b className="sk-mono">{f.confidence_score != null ? `${f.confidence_score}%` : "—"}</b></div>
                 <div className="vuln-score-row"><span>Risk score</span><b className="sk-mono">{f.risk_score ?? "—"}</b></div>
                 <div className="vuln-score-row"><span>Família</span><b>{f.vuln_family_label || "—"}</b></div>
+                <div className="vuln-score-row"><span>Tipo</span><b>{f.finding_kind_label || "—"}</b></div>
+                <div className="vuln-score-row"><span>Origem</span><b>{f.source_label || f.tool || "—"}</b></div>
                 <div className="vuln-score-row"><span>Evidência</span><b>{VSTATUS_LABEL[f.verification_status] || f.verification_status || "—"}</b></div>
               </section>
               {f.recommendation && (
@@ -373,7 +402,7 @@ export default function VulnerabilitiesPage() {
           <div>
             <div className="sk-eyebrow">Finds / Achados</div>
             <h1>Achados do ambiente</h1>
-            <p className="cockpit-sub">{total} achado(s) · {totalRows} no filtro atual · clique para ver evidência e recomendação</p>
+            <p className="cockpit-sub">{total} achado(s) · {totalRows} no filtro atual · {actionableTotal} risco(s) · {observationTotal} observação(ões)</p>
           </div>
           <div className="cockpit-actions">
             <CompanyScopeSelect value={accessGroupId} onChange={(value) => { setAccessGroupId(value); setScanId(""); }} />
@@ -386,6 +415,13 @@ export default function VulnerabilitiesPage() {
           <button type="button" className="vuln-tab" onClick={() => setActiveTab("subdominios")}>Por Subdomínio</button>
         </div>
 
+        <section style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10, marginBottom: 16 }}>
+          <div className="sk-panel" style={{ padding: 14 }}><div className="sk-eyebrow">Total no filtro</div><strong className="sk-mono" style={{ fontSize: 24 }}>{totalRows}</strong></div>
+          <div className="sk-panel" style={{ padding: 14 }}><div className="sk-eyebrow">Riscos</div><strong className="sk-mono" style={{ fontSize: 24 }}>{actionableTotal}</strong></div>
+          <div className="sk-panel" style={{ padding: 14 }}><div className="sk-eyebrow">Observações</div><strong className="sk-mono" style={{ fontSize: 24 }}>{observationTotal}</strong></div>
+          <div className="sk-panel" style={{ padding: 14 }}><div className="sk-eyebrow">BAS</div><strong className="sk-mono" style={{ fontSize: 24 }}>{Number(sourceCounts.bas || 0)}</strong></div>
+        </section>
+
         <section className="surface-filter-strip">
           <button className={`surface-chip${sevFilter === "todas" ? " active" : ""}`} onClick={() => setSevFilter("todas")} type="button">Todas</button>
           {SEV_ORDER.map((s) => (
@@ -396,11 +432,29 @@ export default function VulnerabilitiesPage() {
           <span className="surface-count-note">{items.length} de {totalRows} no filtro atual</span>
         </section>
 
+        <section className="surface-filter-strip">
+          <button className={`surface-chip${kindFilter === "todos" ? " active" : ""}`} onClick={() => setKindFilter("todos")} type="button">Todos os tipos</button>
+          {KIND_ORDER.map((kind) => (
+            <button key={kind} className={`surface-chip${kindFilter === kind ? " active" : ""}`} onClick={() => setKindFilter(kind)} type="button">
+              {KIND_LABEL[kind]} {Number(kindCounts[kind] || 0)}
+            </button>
+          ))}
+        </section>
+
+        <section className="surface-filter-strip">
+          <button className={`surface-chip${sourceFilter === "todos" ? " active" : ""}`} onClick={() => setSourceFilter("todos")} type="button">Todas as origens</button>
+          {SOURCE_ORDER.map((source) => (
+            <button key={source} className={`surface-chip${sourceFilter === source ? " active" : ""}`} onClick={() => setSourceFilter(source)} type="button">
+              {SOURCE_LABEL[source]} {Number(sourceCounts[source] || 0)}
+            </button>
+          ))}
+        </section>
+
         <section className="sk-panel surface-table-panel">
           <div className="attack-table-wrap">
             <table className="attack-table">
               <thead>
-                <tr><th>Severidade</th><th>Achado</th><th>Alvo</th><th>CVE</th><th>CVSS</th><th>MITRE</th><th>Evidência</th></tr>
+                <tr><th>Severidade</th><th>Achado</th><th>Tipo</th><th>Origem</th><th>Alvo</th><th>Observado</th><th>Evidência</th></tr>
               </thead>
               <tbody>
                 {items.length === 0 && <tr><td colSpan={7}>Nenhum achado no filtro atual.</td></tr>}
@@ -409,11 +463,11 @@ export default function VulnerabilitiesPage() {
                   return (
                     <tr key={f.id} onClick={() => setSelected(f)} style={{ cursor: "pointer" }}>
                       <td><span className={`sk-badge sk-badge--${sev}`}><span className={`sk-dot sk-dot--${sev}`} />{SEV_LABEL[sev]}</span></td>
-                      <td><b>{f.title}</b><small style={{ display: "block", color: "var(--ink-muted)" }}>{f.vuln_family_label || ""}</small></td>
+                      <td><b>{f.title}</b><small style={{ display: "block", color: "var(--ink-muted)" }}>{f.vuln_family_label || f.tool || ""}</small></td>
+                      <td>{f.finding_kind_label || "Achado"}</td>
+                      <td>{f.source_label || f.tool || "—"}</td>
                       <td className="sk-mono">{f.target || f.domain || f.target_query || "—"}</td>
-                      <td className="sk-mono">{f.cve || "—"}</td>
-                      <td className="num sk-mono">{f.cvss ? Number(f.cvss).toFixed(1) : "—"}</td>
-                      <td className="sk-mono">{mitreStr(f.mitre_attack)}</td>
+                      <td className="sk-mono" style={{ maxWidth: 420 }}>{f.observation_summary || f.cve || mitreStr(f.mitre_attack)}</td>
                       <td><span className="evidence-pill">{VSTATUS_LABEL[f.verification_status] || f.verification_status || "—"}</span></td>
                     </tr>
                   );
