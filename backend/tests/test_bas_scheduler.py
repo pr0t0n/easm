@@ -213,12 +213,12 @@ def test_split_targets_falls_back_when_blank():
 
 
 def test_port_scan_max_wait_floors_at_the_fast_prereq_timeout_for_a_single_host():
-    assert _port_scan_max_wait("10.10.10.5") == 90
-    assert _port_scan_max_wait("10.10.10.0/30") == 90
+    assert _port_scan_max_wait("10.10.10.5") == 120
+    assert _port_scan_max_wait("10.10.10.0/30") == 120
 
 
 def test_port_scan_max_wait_scales_up_for_a_large_network():
-    assert _port_scan_max_wait("10.10.10.0/26") == 64 * 3
+    assert _port_scan_max_wait("10.10.10.0/26") == 64 * 8
 
 
 def test_port_scan_max_wait_caps_at_a_sane_ceiling_for_a_huge_network():
@@ -226,22 +226,22 @@ def test_port_scan_max_wait_caps_at_a_sane_ceiling_for_a_huge_network():
 
 
 def test_port_scan_max_wait_falls_back_to_the_fast_prereq_timeout_for_a_non_cidr_target():
-    assert _port_scan_max_wait("not-a-valid-target") == 90
+    assert _port_scan_max_wait("not-a-valid-target") == 120
 
 
 def test_port_scan_chunks_leaves_a_small_range_alone():
     assert _port_scan_chunks("10.10.10.5") == ["10.10.10.5"]
-    assert _port_scan_chunks("10.10.10.0/27") == ["10.10.10.0/27"]
+    assert _port_scan_chunks("10.10.10.0/28") == ["10.10.10.0/28"]
 
 
-def test_port_scan_chunks_splits_a_large_network_into_27_bit_blocks():
+def test_port_scan_chunks_splits_a_large_network_into_28_bit_blocks():
     """Explicit user decision (2026-08-28): a monolithic port scan of an
     entire large network left progress/CMDB empty for 30+ minutes with
     nothing to show -- chunking gives incremental feedback instead."""
     chunks = _port_scan_chunks("10.10.128.0/20")
-    assert len(chunks) == 128
-    assert chunks[0] == "10.10.128.0/27"
-    assert chunks[-1] == "10.10.143.224/27"
+    assert len(chunks) == 256
+    assert chunks[0] == "10.10.128.0/28"
+    assert chunks[-1] == "10.10.143.240/28"
 
 
 def test_port_scan_chunks_falls_back_to_the_whole_target_for_a_non_cidr_value():
@@ -263,10 +263,10 @@ def test_fire_schedule_defaults_to_the_agents_own_network_when_target_hint_is_bl
     ) as mock_dispatch:
         result = fire_schedule(db, schedule)
 
-    assert mock_dispatch.call_count == 8
-    assert mock_dispatch.call_args_list[0].kwargs["target_hint"] == "10.10.10.0/27"
-    assert mock_dispatch.call_args_list[-1].kwargs["target_hint"] == "10.10.10.224/27"
-    assert len(result["job_ids"]) == 8
+    assert mock_dispatch.call_count == 16
+    assert mock_dispatch.call_args_list[0].kwargs["target_hint"] == "10.10.10.0/28"
+    assert mock_dispatch.call_args_list[-1].kwargs["target_hint"] == "10.10.10.240/28"
+    assert len(result["job_ids"]) == 16
 
 
 def test_fire_schedule_expands_agent_network_for_host_based_techniques():
@@ -324,9 +324,9 @@ def test_fire_schedule_expands_host_fanout_with_no_upper_bound():
     ) as mock_dispatch:
         result = fire_schedule(db, schedule)
 
-    assert mock_dispatch.call_count == 526  # mandatory port scan (16 /27 chunks for a /23) + 510 hosts
+    assert mock_dispatch.call_count == 542  # mandatory port scan (32 /28 chunks for a /23) + 510 hosts
     assert result["skipped"] == []
-    assert len(result["job_ids"]) == 526
+    assert len(result["job_ids"]) == 542
 
 
 def test_fire_schedule_skips_everything_with_a_clear_reason_when_agent_network_is_unknown():
@@ -608,7 +608,7 @@ def test_port_scan_failure_falls_back_to_testing_every_host():
 
 
 def test_port_scan_gate_falls_back_per_host_for_a_chunk_that_failed_while_others_succeeded():
-    """A /23 network scan splits into sixteen /27 chunks. One completes (and
+    """A /23 network scan splits into thirty-two /28 chunks. One completes (and
     gates its own hosts normally); the other fails -- its hosts must still
     be tested (unknown, not confirmed closed), while the completed chunk's
     hosts without the required port stay correctly gated out."""
@@ -622,7 +622,7 @@ def test_port_scan_gate_falls_back_per_host_for_a_chunk_that_failed_while_others
 
     def dispatch_side_effect(*, technique_key, target_hint, **_kw):
         if technique_key == "port_service_scan":
-            if target_hint == "10.10.0.0/27":
+            if target_hint == "10.10.0.0/28":
                 return {"dispatched": True, "result": {"status": "executed", "open_ports": [
                     {"host": "10.10.0.5", "port": 389, "protocol": "tcp", "service": "ldap"},
                 ]}, "agent_kind": "real"}
@@ -637,9 +637,9 @@ def test_port_scan_gate_falls_back_per_host_for_a_chunk_that_failed_while_others
         if call.kwargs["technique_key"] == "ad_scouting_ldap"
     ]
     assert "10.10.0.5" in ldap_dispatches
-    assert len(ldap_dispatches) == 1 + 479
+    assert len(ldap_dispatches) == 1 + 495
     gated_out = [s for s in result["skipped"] if s["reason"].startswith("port_not_open_per_port_scan")]
-    assert len(gated_out) == 30
+    assert len(gated_out) == 14
     assert all(s["target"].startswith("10.10.0.") for s in gated_out)
 
 

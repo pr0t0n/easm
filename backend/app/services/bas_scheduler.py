@@ -409,7 +409,7 @@ def resume_schedule_run(db: Session, schedule: BasSchedule, scan_job_id: int) ->
     }
 
 
-_PORT_SCAN_CHUNK_HOSTS = 32
+_PORT_SCAN_CHUNK_HOSTS = 16
 
 
 def _all_chunk_addresses(chunk: str) -> list[str]:
@@ -428,7 +428,7 @@ def _all_chunk_addresses(chunk: str) -> list[str]:
 
 
 def _port_scan_chunks(target: str) -> list[str]:
-    """Splits a large CIDR into fixed-size /27-equivalent chunks (32
+    """Splits a large CIDR into fixed-size /28-equivalent chunks (16
     addresses each) so the mandatory port-scan pre-req reports back --
     and the shadow ScanJob's progress/CMDB -- incrementally, chunk by
     chunk, instead of the whole run sitting at 0% with nothing to show
@@ -461,8 +461,8 @@ def _port_scan_max_wait(target: str) -> int:
     try:
         network = ipaddress.ip_network(str(target or "").strip(), strict=False)
     except ValueError:
-        return 90
-    return max(90, min(900, network.num_addresses * 3))
+        return 120
+    return max(120, min(900, network.num_addresses * 8))
 
 
 def _open_ports_by_host(result: dict[str, Any]) -> dict[str, set[int]]:
