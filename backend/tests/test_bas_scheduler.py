@@ -213,20 +213,20 @@ def test_split_targets_falls_back_when_blank():
 
 
 def test_port_scan_max_wait_floors_at_the_fast_prereq_timeout_for_a_single_host():
-    assert _port_scan_max_wait("10.10.10.5") == 120
-    assert _port_scan_max_wait("10.10.10.0/30") == 120
+    assert _port_scan_max_wait("10.10.10.5") == 60
+    assert _port_scan_max_wait("10.10.10.0/30") == 60
 
 
 def test_port_scan_max_wait_scales_up_for_a_large_network():
-    assert _port_scan_max_wait("10.10.10.0/26") == 64 * 8
+    assert _port_scan_max_wait("10.10.10.0/26") == 64 * 4
 
 
 def test_port_scan_max_wait_caps_at_a_sane_ceiling_for_a_huge_network():
-    assert _port_scan_max_wait("10.0.0.0/8") == 900
+    assert _port_scan_max_wait("10.0.0.0/8") == 300
 
 
 def test_port_scan_max_wait_falls_back_to_the_fast_prereq_timeout_for_a_non_cidr_target():
-    assert _port_scan_max_wait("not-a-valid-target") == 120
+    assert _port_scan_max_wait("not-a-valid-target") == 60
 
 
 def test_port_scan_chunks_leaves_a_small_range_alone():

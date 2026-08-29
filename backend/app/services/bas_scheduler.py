@@ -461,8 +461,8 @@ def _port_scan_max_wait(target: str) -> int:
     try:
         network = ipaddress.ip_network(str(target or "").strip(), strict=False)
     except ValueError:
-        return 120
-    return max(120, min(900, network.num_addresses * 8))
+        return 60
+    return max(60, min(300, network.num_addresses * 4))
 
 
 def _open_ports_by_host(result: dict[str, Any]) -> dict[str, set[int]]:
