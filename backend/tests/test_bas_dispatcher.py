@@ -34,6 +34,40 @@ def test_dispatch_calls_execute_via_kali_with_the_catalogs_dispatch_key():
     mock_exec.assert_called_once_with("crackmapexec-bas", "10.10.10.5", scan_id=42, scan_mode="unit", env_vars=_STUB_ENV_VARS)
 
 
+def test_dispatch_forwards_max_wait_to_execute_via_kali_when_given():
+    """The mandatory port_service_scan pre-req passes a network-size-scaled
+    max_wait (see bas_scheduler._port_scan_max_wait) -- must reach
+    execute_via_kali, not get silently dropped."""
+    with patch("app.services.bas_dispatcher.execute_via_kali", return_value={"status": "executed"}) as mock_exec:
+        dispatch_bas_technique(
+            technique_key="smb_enum_cme",
+            target_hint="10.10.10.5",
+            bas_agent=SimpleNamespace(id=1),
+            scan_id=42,
+            schedule=_schedule(),
+            max_wait=5400,
+        )
+
+    mock_exec.assert_called_once_with(
+        "crackmapexec-bas", "10.10.10.5", scan_id=42, scan_mode="unit", env_vars=_STUB_ENV_VARS, max_wait=5400,
+    )
+
+
+def test_dispatch_omits_max_wait_when_not_given():
+    """No caller-supplied max_wait -- execute_via_kali must fall back to its
+    own default, not get an explicit None that could break its signature."""
+    with patch("app.services.bas_dispatcher.execute_via_kali", return_value={"status": "executed"}) as mock_exec:
+        dispatch_bas_technique(
+            technique_key="smb_enum_cme",
+            target_hint="10.10.10.5",
+            bas_agent=SimpleNamespace(id=1),
+            scan_id=42,
+            schedule=_schedule(),
+        )
+
+    mock_exec.assert_called_once_with("crackmapexec-bas", "10.10.10.5", scan_id=42, scan_mode="unit", env_vars=_STUB_ENV_VARS)
+
+
 def test_dispatch_calls_execute_via_kali_for_new_discovery_techniques():
     # (expected_tool, expected_normalized_target) -- a bare "10.10.10.5" input
     # is reshaped per each technique's own target_format (see

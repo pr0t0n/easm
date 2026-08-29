@@ -156,15 +156,15 @@ export default function BasControlCenterPage() {
 
   const loadAll = useCallback(async (silent = false) => {
     try {
-      const [{ data: c }, { data: a }, { data: t }, { data: ch }, { data: s }, { data: seg }, { data: o }] = await Promise.all([
+      const [{ data: c }, { data: a }, { data: t }, { data: ch }, { data: s }, { data: seg }] = await Promise.all([
         client.get("/api/bas/control-center"),
         client.get("/api/bas/agents"),
         client.get("/api/bas/techniques"),
         client.get("/api/bas/chains"),
         client.get("/api/bas/schedules"),
         client.get("/api/bas/network-segments"),
-        client.get("/api/bas/operations-center"),
       ]);
+      const { data: o } = await client.get("/api/bas/operations-center").catch(() => ({ data: null }));
       setCc(c);
       setAgents(a);
       setTechniques(t);
@@ -909,7 +909,14 @@ function DeployTab({ isAdmin, agents, techniques, chains, schedules, reload }) {
 
   const grouped = useMemo(() => {
     const byCategory = {};
-    for (const t of techniques) { byCategory[t.category] = byCategory[t.category] || []; byCategory[t.category].push(t); }
+    // port_service_scan is a mandatory CMDB pre-req now (always runs first,
+    // against every target, regardless of what's picked below) -- not a
+    // choice, so it's not offered as one. See bas_scheduler.execute_schedule_run.
+    for (const t of techniques) {
+      if (t.technique_key === "port_service_scan") continue;
+      byCategory[t.category] = byCategory[t.category] || [];
+      byCategory[t.category].push(t);
+    }
     return byCategory;
   }, [techniques]);
 
@@ -1135,6 +1142,9 @@ function DeployTab({ isAdmin, agents, techniques, chains, schedules, reload }) {
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               <span style={{ fontWeight: 600, fontSize: 11, lineHeight: "14px", color: TV.muted, letterSpacing: ".6px", textTransform: "uppercase" }}>Técnicas por categoria</span>
+              <span style={{ fontWeight: 400, fontSize: 11, lineHeight: "15px", color: TV.label }}>
+                Port &amp; Service Scanning roda sempre primeiro, automaticamente, como pré-requisito (CMDB) — outras técnicas que exigem uma porta específica (SMB, LDAP, etc.) só rodam nos hosts em que ela apareceu aberta.
+              </span>
               <div style={{ display: "flex", flexDirection: "column", gap: 10, maxHeight: 280, overflowY: "auto", opacity: form.chain_key ? .45 : 1, pointerEvents: form.chain_key ? "none" : "auto" }}>
                 {Object.entries(grouped).map(([category, items]) => (
                   <div key={category} style={{ display: "flex", flexDirection: "column", gap: 6 }}>

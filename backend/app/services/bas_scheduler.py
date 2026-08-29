@@ -409,6 +409,83 @@ def resume_schedule_run(db: Session, schedule: BasSchedule, scan_job_id: int) ->
     }
 
 
+_PORT_SCAN_CHUNK_HOSTS = 32
+
+
+def _all_chunk_addresses(chunk: str) -> list[str]:
+    """Every address in a port-scan chunk, including its own network/
+    broadcast addresses -- unlike _cidr_hosts (which excludes those as
+    "not independently usable hosts"), a chunk's network/broadcast address
+    can be an ordinary mid-range host of the LARGER CIDR it was split from
+    (e.g. 10.10.0.255 is just a normal host in 10.10.0.0/23, even though
+    it's chunk 10.10.0.0/24's own broadcast address) -- known_hosts must
+    match the same host list the per-technique fanout (_cidr_hosts on the
+    ORIGINAL, unchunked target) will actually dispatch against."""
+    try:
+        return [str(ip) for ip in ipaddress.ip_network(str(chunk or "").strip(), strict=False)]
+    except ValueError:
+        return [chunk]
+
+
+def _port_scan_chunks(target: str) -> list[str]:
+    """Splits a large CIDR into fixed-size /27-equivalent chunks (32
+    addresses each) so the mandatory port-scan pre-req reports back --
+    and the shadow ScanJob's progress/CMDB -- incrementally, chunk by
+    chunk, instead of the whole run sitting at 0% with nothing to show
+    until one monolithic scan of the entire range finishes (confirmed
+    live 2026-08-28: a /20 in a single dispatch left the CMDB view empty
+    with zero visible progress for over 30 minutes). A single host or an
+    already-small range is returned unchanged -- one "chunk"."""
+    try:
+        network = ipaddress.ip_network(str(target or "").strip(), strict=False)
+    except ValueError:
+        return [target]
+    if network.num_addresses <= _PORT_SCAN_CHUNK_HOSTS:
+        return [target]
+    new_prefix = 32 - (_PORT_SCAN_CHUNK_HOSTS - 1).bit_length()
+    try:
+        return [str(sub) for sub in network.subnets(new_prefix=new_prefix)]
+    except ValueError:
+        return [target]
+
+
+def _port_scan_max_wait(target: str) -> int:
+    """How long to let the mandatory port_service_scan pre-req run before
+    giving up. execute_via_kali's own default (1800s) is what a single
+    proxychains-tunneled nmap invocation was silently capped to regardless
+    of the profile's own declared timeout -- fine for a single host, but a
+    real /20 (~4094 hosts) was still under 10% done at that mark (confirmed
+    live 2026-08-28). Scales with the target's host count instead of
+    assuming one size fits every network mask; capped so a genuinely dead
+    dispatch doesn't hang forever."""
+    try:
+        network = ipaddress.ip_network(str(target or "").strip(), strict=False)
+    except ValueError:
+        return 90
+    return max(90, min(900, network.num_addresses * 3))
+
+
+def _open_ports_by_host(result: dict[str, Any]) -> dict[str, set[int]]:
+    """Builds a host -> {open TCP ports} map from a port_service_scan
+    dispatch's result -- the CMDB signal later host-based techniques gate
+    on (technique['required_ports']) instead of blindly enumerating LDAP/
+    SMB/AD state on every address in a network mask regardless of whether
+    anything is even listening there."""
+    by_host: dict[str, set[int]] = {}
+    for entry in result.get("open_ports") or []:
+        if not isinstance(entry, dict):
+            continue
+        host = str(entry.get("host") or "").strip()
+        port = entry.get("port")
+        if not host or port is None:
+            continue
+        try:
+            by_host.setdefault(host, set()).add(int(port))
+        except (TypeError, ValueError):
+            continue
+    return by_host
+
+
 def _run_was_stopped(db: Session, scan_job_id: int) -> bool:
     """Cooperative-cancellation check for execute_schedule_run's dispatch
     loop. A raw scalar read against the row -- not the already-loaded
@@ -441,16 +518,126 @@ def execute_schedule_run(
     if not agent or not shadow:
         return {"error": "agent_or_shadow_not_found"}
 
+    # port_service_scan is a mandatory pre-req now, not an optional pick --
+    # it always runs first for every target regardless of what's in
+    # technique_keys (explicit user decision, 2026-08-28: don't test every
+    # host in a network mask for LDAP/SMB/AD without first confirming via
+    # CMDB/port scan that the relevant port is even open there). Filter it
+    # out of the iterated list so an older schedule that still has it saved
+    # explicitly doesn't dispatch it twice.
+    effective_technique_keys = [k for k in schedule.technique_keys if k != "port_service_scan"]
+
+    # Chunked upfront so progress/CMDB fills in incrementally chunk-by-chunk
+    # instead of the whole run sitting at 0% with nothing to show until one
+    # monolithic scan of an entire large network finishes (confirmed live
+    # 2026-08-28: a /20 in a single dispatch left the CMDB view empty, no
+    # visible progress, for 30+ minutes). Computed once here so total_units
+    # below can count each chunk as its own unit.
+    port_scan_chunks_by_target = {t: _port_scan_chunks(t) for t in targets}
+
     job_ids: list[int] = []
-    total_units = max(1, len(targets) * max(1, len(schedule.technique_keys)))
+    total_units = max(
+        1,
+        sum(len(port_scan_chunks_by_target[t]) for t in targets) + len(targets) * len(effective_technique_keys),
+    )
     completed_units = 0
     cancelled = False
 
     for target in targets:
         if cancelled:
             break
+
+        # known_hosts: hosts whose chunk's port scan genuinely completed --
+        # gated techniques below trust an absence from open_ports_by_host for
+        # these (really means "nothing open"). A host NOT in known_hosts
+        # (its chunk failed/timed out/was skipped) is unknown, not confirmed
+        # closed -- gating falls back to testing it, per host, rather than
+        # silently skipping real testing because ONE chunk out of many never
+        # got an answer.
+        open_ports_by_host: dict[str, set[int]] = {}
+        known_hosts: set[str] = set()
+        port_scan_technique = get_technique("port_service_scan")
+        chunks = port_scan_chunks_by_target[target]
+
+        for chunk in chunks:
+            if _run_was_stopped(db, shadow.id):
+                cancelled = True
+                break
+
+            existing_port_scan_job = (
+                db.query(BasJob)
+                .filter(
+                    BasJob.scan_job_id == shadow.id,
+                    BasJob.technique_key == "port_service_scan",
+                    BasJob.target == chunk,
+                    BasJob.status.in_(("completed", "failed", "skipped")),
+                )
+                .order_by(BasJob.id.desc())
+                .first()
+            )
+            if existing_port_scan_job is not None:
+                # Resume: this chunk already ran in an earlier (stopped)
+                # attempt on this same shadow job -- reuse what it found
+                # instead of re-scanning it.
+                if existing_port_scan_job.status == "completed":
+                    open_ports_by_host.update(_open_ports_by_host(existing_port_scan_job.result or {}))
+                    known_hosts.update(_all_chunk_addresses(chunk))
+            else:
+                shadow.current_step = f"{port_scan_technique['display_name']} (pré-requisito CMDB) → {chunk}"
+                shadow.mission_progress = min(99, int(round(completed_units / total_units * 100)))
+                db.commit()
+
+                port_job = BasJob(
+                    schedule_id=schedule.id, agent_id=agent.id, owner_id=schedule.owner_id,
+                    access_group_id=schedule.access_group_id, scan_job_id=shadow.id,
+                    technique_key="port_service_scan", target=chunk,
+                    risk_tier=port_scan_technique["risk_tier"], status="dispatched_to_kali",
+                    dispatched_at=datetime.now(),
+                )
+                db.add(port_job)
+                db.commit()
+
+                outcome = dispatch_bas_technique(
+                    technique_key="port_service_scan", target_hint=chunk,
+                    bas_agent=agent, scan_id=shadow.id, schedule=schedule,
+                    max_wait=_port_scan_max_wait(chunk),
+                )
+                if not outcome["dispatched"]:
+                    port_job.status = "skipped"
+                    port_job.last_error = outcome["reason"]
+                    port_job.finished_at = datetime.now()
+                    db.commit()
+                    skipped.append({"technique_key": "port_service_scan", "target": chunk, "reason": outcome["reason"]})
+                else:
+                    result = outcome["result"]
+                    port_job.kali_job_id = str(result.get("dispatch_task_id") or "")
+                    port_job.result = result
+                    port_job.status = "completed" if result.get("status") == "executed" else "failed"
+                    port_job.last_error = None if port_job.status == "completed" else str(result.get("stderr") or result.get("error") or "")[:2000]
+                    port_job.finished_at = datetime.now()
+                    db.flush()
+
+                    port_finding = _finding_from_job_result(db, port_job, schedule, port_scan_technique, agent)
+                    if port_finding:
+                        port_job.finding_id = port_finding.id
+                    job_ids.append(port_job.id)
+                    db.commit()
+
+                    # A failed/errored chunk means the CMDB signal is simply
+                    # unknown for its hosts -- NOT "nothing is open" for
+                    # them. Not adding them to known_hosts makes gating fall
+                    # back to testing them individually below, instead of
+                    # silently skipping real testing because this one chunk
+                    # never got an answer.
+                    if port_job.status == "completed":
+                        open_ports_by_host.update(_open_ports_by_host(result))
+                        known_hosts.update(_all_chunk_addresses(chunk))
+            completed_units += 1
+        if cancelled:
+            break
+
         run_targets = [target]
-        selected_techniques = [get_technique(key) for key in schedule.technique_keys]
+        selected_techniques = [get_technique(key) for key in effective_technique_keys]
         all_host_based = bool(selected_techniques) and all(
             technique is not None
             and not technique.get("accepts_range")
@@ -460,9 +647,9 @@ def execute_schedule_run(
         if target_was_defaulted and all_host_based:
             hosts, target_error = _cidr_hosts(target)
             if target_error:
-                for technique_key in schedule.technique_keys:
+                for technique_key in effective_technique_keys:
                     skipped.append({"technique_key": technique_key, "target": target, "reason": target_error})
-                completed_units += len(schedule.technique_keys)
+                completed_units += len(effective_technique_keys)
                 continue
             if hosts:
                 run_targets = hosts
@@ -470,7 +657,7 @@ def execute_schedule_run(
         for run_target in run_targets:
             if cancelled:
                 break
-            for technique_key in schedule.technique_keys:
+            for technique_key in effective_technique_keys:
                 if _run_was_stopped(db, shadow.id):
                     cancelled = True
                     break
@@ -500,6 +687,26 @@ def execute_schedule_run(
                     skipped.append({"technique_key": technique_key, "target": run_target, "reason": target_error})
                     completed_units += 1
                     continue
+
+                required_ports = technique.get("required_ports")
+                if required_ports:
+                    # CMDB gate: a host whose port-scan chunk genuinely
+                    # completed (known_hosts) only gets tested when one of
+                    # the required ports actually showed up open there. A
+                    # host whose chunk failed/timed out (not in known_hosts)
+                    # is unknown, not confirmed closed -- falls back to
+                    # being tested anyway, same as before this gate existed.
+                    gated_targets = [
+                        h for h in dispatch_targets
+                        if h not in known_hosts or (open_ports_by_host.get(h) and any(p in open_ports_by_host[h] for p in required_ports))
+                    ]
+                    for h in dispatch_targets:
+                        if h not in gated_targets:
+                            skipped.append({
+                                "technique_key": technique_key, "target": h,
+                                "reason": f"port_not_open_per_port_scan:{required_ports}",
+                            })
+                    dispatch_targets = gated_targets
 
                 stop_current_target = False
                 for dispatch_target in dispatch_targets:
@@ -565,7 +772,7 @@ def execute_schedule_run(
                     db.commit()
 
                     if schedule.stop_on_failure and job.status == "failed":
-                        remaining = schedule.technique_keys[schedule.technique_keys.index(technique_key) + 1:]
+                        remaining = effective_technique_keys[effective_technique_keys.index(technique_key) + 1:]
                         for remaining_key in remaining:
                             skipped.append({"technique_key": remaining_key, "target": dispatch_target, "reason": "chain_stopped_after_failure"})
                         logger.info(

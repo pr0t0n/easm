@@ -142,12 +142,14 @@ port_service_scan:
   tool: nmap
   category: bas
   phase: BAS_INTERNAL
-  description: "BAS: TCP-connect port + service-version scan across the top 100 ports, tunneled through the BAS agent."
+  description: "BAS: TCP-connect port scan, tunneled through the BAS agent. Runs unconditionally as every BAS schedule's mandatory CMDB pre-req, so its port list is a fixed, explicit set to guarantee the specific ports later gated techniques check for are always included."
   # -sT (TCP connect scan) required: proxychains only intercepts connect(),
   # never nmap's default raw-socket SYN scan (-sS).
   cmd: ["proxychains4", "-f", "{env_BAS_PROXYCHAINS_CONF}",
-        "nmap", "-Pn", "-sT", "-sV", "--open", "--top-ports", "100", "{target}"]
-  timeout: 240
+        "nmap", "-Pn", "-sT", "-T4", "--max-retries", "1", "--host-timeout", "20s", "--open",
+        "-p", "21,22,23,25,53,80,88,110,111,135,139,143,389,443,445,464,636,993,995,1433,1723,3268,3269,3306,3389,5900,8080",
+        "{target}"]
+  timeout: 90
   allowed_return_codes: [0, 1]
   parser: raw
 

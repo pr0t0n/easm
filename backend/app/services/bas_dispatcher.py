@@ -98,6 +98,7 @@ def dispatch_bas_technique(
     bas_agent: Any,
     scan_id: int,
     schedule: Any | None = None,
+    max_wait: int | None = None,
 ) -> dict[str, Any]:
     """Resolves the technique's kali tool/profile, checks authorization, and
     dispatches through execute_via_kali against the SPECIFIC bas_agent's real
@@ -133,5 +134,8 @@ def dispatch_bas_technique(
         env_vars["BAS_TUNNEL_HOST"], env_vars["BAS_TUNNEL_PORT"],
         target_hint, technique.get("target_format", "host"), normalized_target, scan_id,
     )
-    result = execute_via_kali(kali_tool_name, normalized_target, scan_id=scan_id, scan_mode="unit", env_vars=env_vars)
+    kwargs: dict[str, Any] = {}
+    if max_wait is not None:
+        kwargs["max_wait"] = max_wait
+    result = execute_via_kali(kali_tool_name, normalized_target, scan_id=scan_id, scan_mode="unit", env_vars=env_vars, **kwargs)
     return {"dispatched": True, "result": result, "agent_kind": getattr(bas_agent, "kind", "stub")}

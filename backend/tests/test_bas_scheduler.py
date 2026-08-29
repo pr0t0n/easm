@@ -16,6 +16,8 @@ from app.services.bas_scheduler import (
     _extract_key_findings,
     _finding_from_job_result,
     _is_due,
+    _port_scan_chunks,
+    _port_scan_max_wait,
     _split_targets,
     execute_schedule_run,
     fire_schedule,
@@ -88,15 +90,18 @@ def _wire_db_for_agent(db, agent):
     """Wires a MagicMock DB session for fire_schedule/execute_schedule_run
     tests that don't care about resume: BasAgent/ScanJob lookups resolve to
     `agent` (harmless aliasing -- none of these tests assert on shadow/agent
-    identity), while the resume-idempotency existence check
-    (db.query(BasJob.id)...) always reports "nothing dispatched yet" --
-    matching a fresh, non-resumed run, so dispatch_bas_technique still gets
-    called for every (technique, target) pair like before that check
-    existed."""
+    identity), while both idempotency checks -- the mandatory port_service_
+    scan pre-req's "did it already run for this target" (db.query(BasJob)...)
+    and the regular per-technique resume check (db.query(BasJob.id)...) --
+    always report "nothing dispatched yet", matching a fresh, non-resumed
+    run, so both the pre-req and every selected technique still dispatch
+    like before either check existed."""
     def fake_query(*entities):
         m = MagicMock()
         if entities and entities[0] is BasJob.id:
             m.filter.return_value.first.return_value = None
+        elif entities and entities[0] is BasJob:
+            m.filter.return_value.order_by.return_value.first.return_value = None
         else:
             m.filter.return_value.first.return_value = agent
         return m
@@ -207,6 +212,42 @@ def test_split_targets_falls_back_when_blank():
     assert _split_targets("   ", "fallback") == ["fallback"]
 
 
+def test_port_scan_max_wait_floors_at_the_fast_prereq_timeout_for_a_single_host():
+    assert _port_scan_max_wait("10.10.10.5") == 90
+    assert _port_scan_max_wait("10.10.10.0/30") == 90
+
+
+def test_port_scan_max_wait_scales_up_for_a_large_network():
+    assert _port_scan_max_wait("10.10.10.0/26") == 64 * 3
+
+
+def test_port_scan_max_wait_caps_at_a_sane_ceiling_for_a_huge_network():
+    assert _port_scan_max_wait("10.0.0.0/8") == 900
+
+
+def test_port_scan_max_wait_falls_back_to_the_fast_prereq_timeout_for_a_non_cidr_target():
+    assert _port_scan_max_wait("not-a-valid-target") == 90
+
+
+def test_port_scan_chunks_leaves_a_small_range_alone():
+    assert _port_scan_chunks("10.10.10.5") == ["10.10.10.5"]
+    assert _port_scan_chunks("10.10.10.0/27") == ["10.10.10.0/27"]
+
+
+def test_port_scan_chunks_splits_a_large_network_into_27_bit_blocks():
+    """Explicit user decision (2026-08-28): a monolithic port scan of an
+    entire large network left progress/CMDB empty for 30+ minutes with
+    nothing to show -- chunking gives incremental feedback instead."""
+    chunks = _port_scan_chunks("10.10.128.0/20")
+    assert len(chunks) == 128
+    assert chunks[0] == "10.10.128.0/27"
+    assert chunks[-1] == "10.10.143.224/27"
+
+
+def test_port_scan_chunks_falls_back_to_the_whole_target_for_a_non_cidr_value():
+    assert _port_scan_chunks("not-a-valid-target") == ["not-a-valid-target"]
+
+
 def test_fire_schedule_defaults_to_the_agents_own_network_when_target_hint_is_blank():
     db = MagicMock()
     agent = _agent(local_network_cidr="10.10.10.5/24")
@@ -222,12 +263,16 @@ def test_fire_schedule_defaults_to_the_agents_own_network_when_target_hint_is_bl
     ) as mock_dispatch:
         result = fire_schedule(db, schedule)
 
-    mock_dispatch.assert_called_once()
-    assert mock_dispatch.call_args.kwargs["target_hint"] == "10.10.10.5/24"
-    assert len(result["job_ids"]) == 1
+    assert mock_dispatch.call_count == 8
+    assert mock_dispatch.call_args_list[0].kwargs["target_hint"] == "10.10.10.0/27"
+    assert mock_dispatch.call_args_list[-1].kwargs["target_hint"] == "10.10.10.224/27"
+    assert len(result["job_ids"]) == 8
 
 
 def test_fire_schedule_expands_agent_network_for_host_based_techniques():
+    """port_service_scan always runs first now (mandatory CMDB pre-req,
+    against the whole CIDR) -- network_share_discovery (SMB, port 445) then
+    only fans out to hosts the pre-req actually found port 445 open on."""
     db = MagicMock()
     agent = _agent(local_network_cidr="10.10.10.0/30")
     _wire_db_for_agent(db, agent)
@@ -238,26 +283,40 @@ def test_fire_schedule_expands_agent_network_for_host_based_techniques():
 
     with patch(
         "app.services.bas_scheduler.dispatch_bas_technique",
-        return_value={"dispatched": True, "result": {"status": "executed"}, "agent_kind": "real"},
+        return_value={
+            "dispatched": True,
+            "result": {
+                "status": "executed",
+                "open_ports": [
+                    {"host": "10.10.10.1", "port": 445, "protocol": "tcp", "service": "microsoft-ds"},
+                    {"host": "10.10.10.2", "port": 445, "protocol": "tcp", "service": "microsoft-ds"},
+                ],
+            },
+            "agent_kind": "real",
+        },
     ) as mock_dispatch:
         result = fire_schedule(db, schedule)
 
-    assert [call.kwargs["target_hint"] for call in mock_dispatch.call_args_list] == ["10.10.10.1", "10.10.10.2"]
-    assert len(result["job_ids"]) == 2
+    assert [call.kwargs["target_hint"] for call in mock_dispatch.call_args_list] == [
+        "10.10.10.0/30", "10.10.10.1", "10.10.10.2",
+    ]
+    assert len(result["job_ids"]) == 3  # port scan + 2 network_share_discovery dispatches
 
 
 def test_fire_schedule_expands_host_fanout_with_no_upper_bound():
     """No cap on how large a network a host-based technique fans out over --
     explicit user decision (2026-08-28): a prior session added a 256-host
     fanout ceiling nobody asked for, silently skipping techniques against
-    larger agent networks. Removed entirely, not replaced with a bigger cap."""
+    larger agent networks. Removed entirely, not replaced with a bigger cap.
+    Uses an ungated technique (no required_ports) so the port-scan CMDB
+    gate added later the same day doesn't interfere with this assertion."""
     db = MagicMock()
     agent = _agent(local_network_cidr="10.10.0.0/23")  # 510 usable hosts, well past the old 256-host ceiling
     _wire_db_for_agent(db, agent)
 
     schedule = _schedule(target_hint="", agent_id=13)
     schedule.stop_on_failure = False
-    schedule.technique_keys = ["network_share_discovery"]
+    schedule.technique_keys = ["owasp_web_app_scan"]  # safe tier, ungated, host-based
 
     with patch(
         "app.services.bas_scheduler.dispatch_bas_technique",
@@ -265,9 +324,9 @@ def test_fire_schedule_expands_host_fanout_with_no_upper_bound():
     ) as mock_dispatch:
         result = fire_schedule(db, schedule)
 
-    assert mock_dispatch.call_count == 510
+    assert mock_dispatch.call_count == 526  # mandatory port scan (16 /27 chunks for a /23) + 510 hosts
     assert result["skipped"] == []
-    assert len(result["job_ids"]) == 510
+    assert len(result["job_ids"]) == 526
 
 
 def test_fire_schedule_skips_everything_with_a_clear_reason_when_agent_network_is_unknown():
@@ -291,6 +350,10 @@ def test_fire_schedule_skips_everything_with_a_clear_reason_when_agent_network_i
 
 
 def test_fire_schedule_dispatches_one_job_per_technique_per_target():
+    """A mandatory port_service_scan pre-req now runs before each target's
+    technique chain -- its (shared, mocked) result reports both SMB/445 and
+    LDAP/389 open so neither of the two gated techniques below gets
+    filtered out."""
     db = MagicMock()
     agent = SimpleNamespace(id=13, kind="real", hostname="mac.local", tunnel_host="", tunnel_port=None)
     _wire_db_for_agent(db, agent)
@@ -299,16 +362,31 @@ def test_fire_schedule_dispatches_one_job_per_technique_per_target():
     schedule.stop_on_failure = False
     schedule.technique_keys = ["network_share_discovery", "ad_scouting_ldap"]
 
+    def open_ports_for(host):
+        return {
+            "dispatched": True,
+            "result": {
+                "status": "executed",
+                "open_ports": [
+                    {"host": host, "port": 445, "protocol": "tcp", "service": "microsoft-ds"},
+                    {"host": host, "port": 389, "protocol": "tcp", "service": "ldap"},
+                ],
+            },
+            "agent_kind": "real",
+        }
+
     with patch(
         "app.services.bas_scheduler.dispatch_bas_technique",
-        return_value={"dispatched": True, "result": {"status": "executed"}, "agent_kind": "real"},
+        side_effect=lambda *, target_hint, **_kw: open_ports_for(target_hint),
     ) as mock_dispatch:
         result = fire_schedule(db, schedule)
 
-    assert mock_dispatch.call_count == 4  # 2 targets x 2 techniques
+    assert mock_dispatch.call_count == 6  # 2 targets x (1 port scan + 2 techniques)
     dispatched_targets = [call.kwargs["target_hint"] for call in mock_dispatch.call_args_list]
-    assert dispatched_targets == ["10.0.0.5", "10.0.0.5", "10.0.0.6", "10.0.0.6"]
-    assert len(result["job_ids"]) == 4
+    assert dispatched_targets == [
+        "10.0.0.5", "10.0.0.5", "10.0.0.5", "10.0.0.6", "10.0.0.6", "10.0.0.6",
+    ]
+    assert len(result["job_ids"]) == 6
 
 
 def test_fire_schedule_stop_on_failure_only_stops_the_failing_targets_own_chain():
@@ -323,42 +401,54 @@ def test_fire_schedule_stop_on_failure_only_stops_the_failing_targets_own_chain(
     schedule.stop_on_failure = True
     schedule.technique_keys = ["network_share_discovery", "ad_scouting_ldap"]
 
+    open_ports_result = {"status": "executed", "open_ports": [
+        {"host": "10.0.0.5", "port": 445, "protocol": "tcp", "service": "microsoft-ds"},
+        {"host": "10.0.0.5", "port": 389, "protocol": "tcp", "service": "ldap"},
+        {"host": "10.0.0.6", "port": 445, "protocol": "tcp", "service": "microsoft-ds"},
+        {"host": "10.0.0.6", "port": 389, "protocol": "tcp", "service": "ldap"},
+    ]}
     outcomes = [
+        {"dispatched": True, "result": open_ports_result, "agent_kind": "real"},  # target 1: mandatory port scan
         {"dispatched": True, "result": {"status": "error"}, "agent_kind": "real"},  # target 1, step 1: fails
         # target 1, step 2 skipped (chain_stopped_after_failure)
+        {"dispatched": True, "result": open_ports_result, "agent_kind": "real"},  # target 2: mandatory port scan
         {"dispatched": True, "result": {"status": "executed"}, "agent_kind": "real"},  # target 2, step 1
         {"dispatched": True, "result": {"status": "executed"}, "agent_kind": "real"},  # target 2, step 2
     ]
     with patch("app.services.bas_scheduler.dispatch_bas_technique", side_effect=outcomes) as mock_dispatch:
         result = fire_schedule(db, schedule)
 
-    assert mock_dispatch.call_count == 3
+    assert mock_dispatch.call_count == 5  # 2 port scans + target 1's 1 attempt + target 2's 2 attempts
     assert {"technique_key": "ad_scouting_ldap", "target": "10.0.0.5", "reason": "chain_stopped_after_failure"} in result["skipped"]
-    assert len(result["job_ids"]) == 3  # target 1's failed job + target 2's two successful jobs
+    assert len(result["job_ids"]) == 5  # 2 port scan jobs + target 1's failed job + target 2's two successful jobs
 
 
 def test_fire_schedule_stops_after_a_failure_when_stop_on_failure_is_set():
     """A chain schedule (stop_on_failure=True) must not keep firing later
     steps once an earlier one genuinely fails -- those steps' premise (the
     earlier one succeeding) no longer holds, so running them produces noise
-    instead of signal."""
+    instead of signal. port_service_scan is no longer listed explicitly --
+    it's a mandatory pre-req now, dispatched before the chain regardless."""
     db = MagicMock()
     agent = SimpleNamespace(id=13, kind="real", hostname="mac.local", tunnel_host="", tunnel_port=None)
     _wire_db_for_agent(db, agent)
 
     schedule = _schedule(target_hint="192.168.1.65", agent_id=13)
     schedule.stop_on_failure = True
-    schedule.technique_keys = ["network_share_discovery", "ad_scouting_ldap", "port_service_scan"]
+    schedule.technique_keys = ["network_share_discovery", "ad_scouting_ldap"]
 
     outcomes = [
-        {"dispatched": True, "result": {"status": "executed"}, "agent_kind": "real"},
-        {"dispatched": True, "result": {"status": "error"}, "agent_kind": "real"},
+        {"dispatched": True, "result": {"status": "executed", "open_ports": [
+            {"host": "192.168.1.65", "port": 445, "protocol": "tcp", "service": "microsoft-ds"},
+            {"host": "192.168.1.65", "port": 389, "protocol": "tcp", "service": "ldap"},
+        ]}, "agent_kind": "real"},  # mandatory port scan
+        {"dispatched": True, "result": {"status": "error"}, "agent_kind": "real"},  # network_share_discovery fails
     ]
     with patch("app.services.bas_scheduler.dispatch_bas_technique", side_effect=outcomes) as mock_dispatch:
         result = fire_schedule(db, schedule)
 
-    assert mock_dispatch.call_count == 2  # third step never dispatched
-    assert {"technique_key": "port_service_scan", "target": "192.168.1.65", "reason": "chain_stopped_after_failure"} in result["skipped"]
+    assert mock_dispatch.call_count == 2  # port scan + network_share_discovery; ad_scouting_ldap never dispatched
+    assert {"technique_key": "ad_scouting_ldap", "target": "192.168.1.65", "reason": "chain_stopped_after_failure"} in result["skipped"]
 
 
 def test_fire_schedule_does_not_stop_early_when_stop_on_failure_is_false():
@@ -368,17 +458,20 @@ def test_fire_schedule_does_not_stop_early_when_stop_on_failure_is_false():
 
     schedule = _schedule(target_hint="192.168.1.65", agent_id=13)
     schedule.stop_on_failure = False
-    schedule.technique_keys = ["network_share_discovery", "ad_scouting_ldap", "port_service_scan"]
+    schedule.technique_keys = ["network_share_discovery", "ad_scouting_ldap"]
 
     outcomes = [
-        {"dispatched": True, "result": {"status": "executed"}, "agent_kind": "real"},
+        {"dispatched": True, "result": {"status": "executed", "open_ports": [
+            {"host": "192.168.1.65", "port": 445, "protocol": "tcp", "service": "microsoft-ds"},
+            {"host": "192.168.1.65", "port": 389, "protocol": "tcp", "service": "ldap"},
+        ]}, "agent_kind": "real"},  # mandatory port scan
         {"dispatched": True, "result": {"status": "error"}, "agent_kind": "real"},
         {"dispatched": True, "result": {"status": "executed"}, "agent_kind": "real"},
     ]
     with patch("app.services.bas_scheduler.dispatch_bas_technique", side_effect=outcomes) as mock_dispatch:
         result = fire_schedule(db, schedule)
 
-    assert mock_dispatch.call_count == 3
+    assert mock_dispatch.call_count == 3  # port scan + 2 techniques
     assert result["skipped"] == []
 
 
@@ -430,6 +523,126 @@ def test_execute_schedule_run_stops_cooperatively_when_scan_job_is_marked_stoppe
     assert shadow.current_step == "Interrompido pelo usuário"
 
 
+def test_mandatory_port_scan_dispatches_first_even_when_absent_from_technique_keys():
+    """explicit user decision (2026-08-28): port_service_scan is a
+    prerequisite of every BAS run now, not an optional pick -- it must
+    dispatch before anything else even when a schedule's technique_keys
+    never mentions it at all."""
+    db = MagicMock()
+    agent = _agent(local_network_cidr="10.10.10.5/32")
+    _wire_db_for_agent(db, agent)
+
+    schedule = _schedule(target_hint="", agent_id=13)
+    schedule.stop_on_failure = False
+    schedule.technique_keys = ["ad_scouting_ldap"]
+
+    with patch(
+        "app.services.bas_scheduler.dispatch_bas_technique",
+        return_value={
+            "dispatched": True,
+            "result": {"status": "executed", "open_ports": [
+                {"host": "10.10.10.5", "port": 389, "protocol": "tcp", "service": "ldap"},
+            ]},
+            "agent_kind": "real",
+        },
+    ) as mock_dispatch:
+        fire_schedule(db, schedule)
+
+    assert mock_dispatch.call_args_list[0].kwargs["technique_key"] == "port_service_scan"
+    assert mock_dispatch.call_count == 2  # port scan + ad_scouting_ldap
+
+
+def test_port_scan_gate_only_dispatches_hosts_with_the_required_port_open():
+    """A host-based technique with required_ports set (ad_scouting_ldap ->
+    LDAP 389/636) must only be dispatched against hosts the mandatory port
+    scan actually found that port open on -- not blindly against every host
+    in the network mask."""
+    db = MagicMock()
+    agent = _agent(local_network_cidr="10.10.10.0/30")  # hosts .1 and .2
+    _wire_db_for_agent(db, agent)
+
+    schedule = _schedule(target_hint="", agent_id=13)
+    schedule.stop_on_failure = False
+    schedule.technique_keys = ["ad_scouting_ldap"]
+
+    def dispatch_side_effect(*, technique_key, target_hint, **_kw):
+        if technique_key == "port_service_scan":
+            return {"dispatched": True, "result": {"status": "executed", "open_ports": [
+                {"host": "10.10.10.1", "port": 389, "protocol": "tcp", "service": "ldap"},
+                # .2 has nothing open -- absent from open_ports entirely.
+            ]}, "agent_kind": "real"}
+        return {"dispatched": True, "result": {"status": "executed"}, "agent_kind": "real"}
+
+    with patch("app.services.bas_scheduler.dispatch_bas_technique", side_effect=dispatch_side_effect) as mock_dispatch:
+        result = fire_schedule(db, schedule)
+
+    dispatched = [call.kwargs["target_hint"] for call in mock_dispatch.call_args_list]
+    assert dispatched == ["10.10.10.0/30", "10.10.10.1"]  # port scan, then only .1 (has LDAP open)
+    assert {"technique_key": "ad_scouting_ldap", "target": "10.10.10.2", "reason": "port_not_open_per_port_scan:[389, 636]"} in result["skipped"]
+
+
+def test_port_scan_failure_falls_back_to_testing_every_host():
+    """A failed/errored port scan means the CMDB signal is unknown -- not
+    "nothing is open". Gated techniques must fall back to testing every
+    host rather than silently skipping real testing because the one
+    prerequisite that was supposed to enable it never got an answer."""
+    db = MagicMock()
+    agent = _agent(local_network_cidr="10.10.10.0/30")  # hosts .1 and .2
+    _wire_db_for_agent(db, agent)
+
+    schedule = _schedule(target_hint="", agent_id=13)
+    schedule.stop_on_failure = False
+    schedule.technique_keys = ["ad_scouting_ldap"]
+
+    def dispatch_side_effect(*, technique_key, target_hint, **_kw):
+        if technique_key == "port_service_scan":
+            return {"dispatched": False, "reason": "agent_offline"}
+        return {"dispatched": True, "result": {"status": "executed"}, "agent_kind": "real"}
+
+    with patch("app.services.bas_scheduler.dispatch_bas_technique", side_effect=dispatch_side_effect) as mock_dispatch:
+        result = fire_schedule(db, schedule)
+
+    dispatched = [call.kwargs["target_hint"] for call in mock_dispatch.call_args_list]
+    assert dispatched == ["10.10.10.0/30", "10.10.10.1", "10.10.10.2"]  # both hosts still tested
+    assert not any(s["reason"].startswith("port_not_open_per_port_scan") for s in result["skipped"])
+
+
+def test_port_scan_gate_falls_back_per_host_for_a_chunk_that_failed_while_others_succeeded():
+    """A /23 network scan splits into sixteen /27 chunks. One completes (and
+    gates its own hosts normally); the other fails -- its hosts must still
+    be tested (unknown, not confirmed closed), while the completed chunk's
+    hosts without the required port stay correctly gated out."""
+    db = MagicMock()
+    agent = _agent(local_network_cidr="10.10.0.0/23")
+    _wire_db_for_agent(db, agent)
+
+    schedule = _schedule(target_hint="", agent_id=13)
+    schedule.stop_on_failure = False
+    schedule.technique_keys = ["ad_scouting_ldap"]
+
+    def dispatch_side_effect(*, technique_key, target_hint, **_kw):
+        if technique_key == "port_service_scan":
+            if target_hint == "10.10.0.0/27":
+                return {"dispatched": True, "result": {"status": "executed", "open_ports": [
+                    {"host": "10.10.0.5", "port": 389, "protocol": "tcp", "service": "ldap"},
+                ]}, "agent_kind": "real"}
+            return {"dispatched": False, "reason": "agent_offline"}
+        return {"dispatched": True, "result": {"status": "executed"}, "agent_kind": "real"}
+
+    with patch("app.services.bas_scheduler.dispatch_bas_technique", side_effect=dispatch_side_effect) as mock_dispatch:
+        result = fire_schedule(db, schedule)
+
+    ldap_dispatches = [
+        call.kwargs["target_hint"] for call in mock_dispatch.call_args_list
+        if call.kwargs["technique_key"] == "ad_scouting_ldap"
+    ]
+    assert "10.10.0.5" in ldap_dispatches
+    assert len(ldap_dispatches) == 1 + 479
+    gated_out = [s for s in result["skipped"] if s["reason"].startswith("port_not_open_per_port_scan")]
+    assert len(gated_out) == 30
+    assert all(s["target"].startswith("10.10.0.") for s in gated_out)
+
+
 def test_resume_schedule_run_reactivates_a_stopped_shadow_job():
     db = MagicMock()
     agent = _agent(local_network_cidr="10.10.10.0/30")
@@ -479,15 +692,18 @@ def test_resume_schedule_run_refuses_a_job_that_isnt_actually_stopped():
 def test_resumed_run_skips_a_target_already_dispatched_before_the_stop():
     """The whole point of resume: a (technique, target) pair that already
     has a terminal BasJob on this exact scan_job_id must not be dispatched
-    again -- only what was never reached the first time actually runs."""
+    again -- only what was never reached the first time actually runs. The
+    mandatory port_service_scan pre-req already completed before the stop
+    too (with SMB/445 open on the one host), so it must be reused, not
+    redispatched, and it's what lets network_share_discovery's host through
+    the CMDB gate."""
     db = MagicMock()
     agent = _agent(local_network_cidr="10.10.10.5/32")  # a single host: 10.10.10.5
     shadow = SimpleNamespace(id=99, status="stopped", current_step="", mission_progress=50)
-
-    # First technique (network_share_discovery) already ran against this
-    # host before the stop -- reports a terminal BasJob already exists.
-    # Second technique (port_service_scan) never got there -- reports none.
-    basjob_lookup_calls = {"n": 0}
+    completed_port_scan = SimpleNamespace(
+        status="completed",
+        result={"open_ports": [{"host": "10.10.10.5", "port": 445, "protocol": "tcp", "service": "microsoft-ds"}]},
+    )
 
     def fake_query(*entities):
         m = MagicMock()
@@ -495,16 +711,17 @@ def test_resumed_run_skips_a_target_already_dispatched_before_the_stop():
             m.filter.return_value.first.return_value = agent
         elif entities and entities[0] is ScanJob:
             m.filter.return_value.first.return_value = shadow
+        elif entities and entities[0] is BasJob:
+            m.filter.return_value.order_by.return_value.first.return_value = completed_port_scan
         elif entities and entities[0] is BasJob.id:
-            basjob_lookup_calls["n"] += 1
-            m.filter.return_value.first.return_value = (1,) if basjob_lookup_calls["n"] == 1 else None
+            m.filter.return_value.first.return_value = None  # network_share_discovery not yet done
         return m
     db.query.side_effect = fake_query
     db.execute.return_value.first.return_value = ("running",)  # never stopped again mid-resume
 
     schedule = _schedule(target_hint="", agent_id=13)
     schedule.stop_on_failure = False
-    schedule.technique_keys = ["network_share_discovery", "port_service_scan"]
+    schedule.technique_keys = ["network_share_discovery"]
 
     resumed = resume_schedule_run(db, schedule, 99)
     assert resumed["queued"] is True
@@ -518,7 +735,7 @@ def test_resumed_run_skips_a_target_already_dispatched_before_the_stop():
             resumed["target_was_defaulted"], resumed["skipped"],
         )
 
-    assert mock_dispatch.call_count == 1  # only port_service_scan (not yet done) actually dispatches
+    assert mock_dispatch.call_count == 1  # only network_share_discovery -- port scan reused, not redone
     assert shadow.status == "completed"  # a resumed run still reaches its normal terminal state
 
 

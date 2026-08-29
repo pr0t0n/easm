@@ -84,6 +84,17 @@ def _technique(
     # Generic, technique-level remediation guidance shown in the BAS report
     # when this technique produces a real (non-simulated) finding.
     recommendation: str = "",
+    # CMDB-gating: for a host-based (non-accepts_range) technique, the TCP
+    # port(s) that must have shown up "open" in the mandatory port_service_scan
+    # pre-req before this technique bothers dispatching against a given host
+    # at all. None means ungated (always dispatched, same as before this
+    # field existed) -- reserved for techniques with no single obvious
+    # required port. Explicit user decision (2026-08-28): don't blindly
+    # enumerate SMB/LDAP/AD state on every host in a network mask when the
+    # port scan already showed the service isn't even listening there --
+    # port_service_scan is why it always runs first now, unconditionally,
+    # regardless of what's in a schedule's technique_keys.
+    required_ports: list[int] | None = None,
 ) -> dict[str, Any]:
     return {
         "technique_key": technique_key,
@@ -107,6 +118,7 @@ def _technique(
         "target_format": target_format,
         "accepts_range": accepts_range,
         "recommendation": recommendation,
+        "required_ports": required_ports,
     }
 
 
@@ -139,6 +151,7 @@ BAS_TECHNIQUE_CATALOG: list[dict[str, Any]] = [
         availability="simulated", execution_backend="kali_proxychains",
         requires_tcp=True, is_simulated_in_phase_1=True,
         target_format="host", recommendation="Desative null sessions RPC/SMB; restrinja enumeracao anonima de usuarios/RIDs; audite ACLs de compartilhamentos expostos.",
+        required_ports=[445],
     ),
     _technique(
         "ad_bloodhound_collect",
@@ -150,6 +163,7 @@ BAS_TECHNIQUE_CATALOG: list[dict[str, Any]] = [
         availability="simulated", execution_backend="kali_proxychains",
         requires_tcp=True, is_simulated_in_phase_1=True,
         target_format="host", recommendation="Revise ACLs de Active Directory alcancaveis via LDAP anonimo/autenticado; monitore volumes anormais de consultas LDAP vindos de contas de baixo privilegio.",
+        required_ports=[389, 636],
     ),
     _technique(
         "ad_kerberoast",
@@ -161,6 +175,7 @@ BAS_TECHNIQUE_CATALOG: list[dict[str, Any]] = [
         availability="simulated", execution_backend="kali_proxychains",
         requires_tcp=True, is_simulated_in_phase_1=True,
         target_format="host", recommendation="Use senhas longas e aleatorias para contas de servico; habilite criptografia AES para tickets Kerberos; monitore requisicoes de TGS em massa (indicativo de kerberoasting).",
+        required_ports=[88],
     ),
     _technique(
         "ntlm_relay_smb",
@@ -172,6 +187,7 @@ BAS_TECHNIQUE_CATALOG: list[dict[str, Any]] = [
         availability="simulated", execution_backend="kali_proxychains",
         requires_tcp=True, is_simulated_in_phase_1=True,
         target_format="host", recommendation="Habilite SMB signing em todos os hosts; desative NTLM quando possivel em favor de Kerberos; segmente a rede para reduzir superficie de relay.",
+        required_ports=[445],
     ),
 
     # ── Requires a real agent on the customer's L2 segment -- never run as
@@ -275,6 +291,7 @@ BAS_TECHNIQUE_CATALOG: list[dict[str, Any]] = [
         availability="simulated", execution_backend="kali_proxychains",
         requires_tcp=True, is_simulated_in_phase_1=True,
         target_format="host", recommendation="Restrinja permissoes de compartilhamentos SMB ao minimo necessario; remova acesso 'Everyone'/anonimo; audite compartilhamentos com dados sensiveis.",
+        required_ports=[445],
     ),
     _technique(
         "ad_scouting_ldap",
@@ -286,6 +303,7 @@ BAS_TECHNIQUE_CATALOG: list[dict[str, Any]] = [
         availability="simulated", execution_backend="kali_proxychains",
         requires_tcp=True, is_simulated_in_phase_1=True,
         target_format="host", recommendation="Desative bind anonimo LDAP no controlador de dominio; restrinja consultas LDAP nao autenticadas; monitore volumes de consulta anomalos.",
+        required_ports=[389, 636],
     ),
     _technique(
         "cloud_directory_scouting",
@@ -432,6 +450,7 @@ BAS_TECHNIQUE_CATALOG: list[dict[str, Any]] = [
         availability="simulated", execution_backend="kali_proxychains",
         requires_tcp=True, is_simulated_in_phase_1=True,
         target_format="host", recommendation="Aplique a correcao do CVE-2020-1472 (Zerologon); force 'FullSecureChannelProtection' no controlador de dominio; monitore falhas de autenticacao Netlogon.",
+        required_ports=[445],
     ),
     _technique(
         "owasp_web_app_scan",
