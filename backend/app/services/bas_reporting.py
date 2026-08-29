@@ -90,6 +90,8 @@ _SMB_LINE_RE = re.compile(
     r"^SMB\s+(?P<ip>\d+\.\d+\.\d+\.\d+)\s+445\s+(?P<host>\S+)\s+\[\*\]\s+(?P<os>.*?)\s+\(name:.*?\)\s+\(domain:(?P<domain>.*?)\)\s+\(signing:(?P<signing>True|False)\)\s+\(SMBv1:(?P<smbv1>True|False)\)"
 )
 _IPV4_RE = re.compile(r"\b(?P<ip>(?:\d{1,3}\.){3}\d{1,3})\b")
+_MAC_RE = re.compile(r"^MAC Address:\s+(?P<mac>(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2})(?:\s+\((?P<vendor>.*?)\))?", re.IGNORECASE)
+_PROXY_ENDPOINT_RE = re.compile(r"(?P<ip>(?:\d{1,3}\.){3}\d{1,3}):(?P<port>\d+)")
 
 
 def _smb_observations(stdout: str) -> list[dict[str, Any]]:
@@ -190,6 +192,171 @@ def _nmap_summary(result: dict[str, Any]) -> dict[str, Any]:
     return summary
 
 
+def _ports_from_nmap_command(command: str) -> list[int]:
+    match = re.search(r"(?:^|\s)-p\s*(?P<ports>[0-9,\-]+)(?:\s|$)", str(command or ""))
+    if not match:
+        return []
+    ports: set[int] = set()
+    for part in match.group("ports").split(","):
+        if "-" in part:
+            start_raw, end_raw = part.split("-", 1)
+            try:
+                start, end = int(start_raw), int(end_raw)
+            except ValueError:
+                continue
+            if 0 < start <= end <= 65535 and end - start <= 1000:
+                ports.update(range(start, end + 1))
+            continue
+        try:
+            port = int(part)
+        except ValueError:
+            continue
+        if 0 < port <= 65535:
+            ports.add(port)
+    return sorted(ports)
+
+
+def _target_network_metadata(target: str) -> dict[str, Any]:
+    raw = str(target or "").strip()
+    if "/" not in raw:
+        return {}
+    try:
+        network = ipaddress.ip_network(raw, strict=False)
+    except ValueError:
+        return {}
+    return {"cidr": str(network), "mask": network.prefixlen, "netmask": str(network.netmask)}
+
+
+def _cidr_addresses_for_unitary_scan(target: str, summary: dict[str, Any]) -> list[str]:
+    metadata = _target_network_metadata(target)
+    if not metadata:
+        return []
+    network = ipaddress.ip_network(metadata["cidr"], strict=False)
+    expected = int(summary.get("ip_addresses") or summary.get("hosts_up") or 0)
+    if network.num_addresses > 1024:
+        return []
+    if expected and expected < network.num_addresses:
+        return [str(ip) for ip in network][:expected]
+    return [str(ip) for ip in network]
+
+
+def _merge_host_ref(refs: dict[str, dict[str, Any]], ip: str, updates: dict[str, Any]) -> dict[str, Any] | None:
+    clean_ip = _valid_observed_ip(ip)
+    if not clean_ip:
+        return None
+    ref = refs.setdefault(clean_ip, {
+        "key": clean_ip,
+        "ip": clean_ip,
+        "hostname": clean_ip,
+        "os": "",
+        "domain": "",
+        "source": "nmap_target",
+        "evidence": clean_ip,
+        "mac_address": "",
+        "mac_vendor": "",
+        "arp_status": "not_observed",
+        "hostname_resolution_status": "not_observed",
+    })
+    for key, value in updates.items():
+        if value in (None, "", [], {}):
+            continue
+        if key == "source" and ref.get("source") not in {"nmap_target", "log_text"}:
+            continue
+        if key in {"attempted_ports", "tested_tcp_ports"}:
+            current = set(ref.get(key) or [])
+            current.update(value)
+            ref[key] = sorted(current)
+            continue
+        ref[key] = value
+    return ref
+
+
+def _nmap_report_host_refs(result: dict[str, Any]) -> list[dict[str, Any]]:
+    refs: dict[str, dict[str, Any]] = {}
+    current_ip = ""
+    for line in str(result.get("stdout") or "").splitlines():
+        clean = line.strip()
+        if clean.lower().startswith("nmap scan report for "):
+            raw = clean[len("Nmap scan report for "):].strip()
+            match = re.match(r"(?P<hostname>.*?)\s+\((?P<ip>\d+\.\d+\.\d+\.\d+)\)$", raw)
+            if match:
+                ip = _valid_observed_ip(match.group("ip"))
+                hostname = match.group("hostname").strip()
+            else:
+                first_ip = _IPV4_RE.search(raw)
+                ip = _valid_observed_ip(first_ip.group("ip")) if first_ip else ""
+                hostname = raw if ip != raw else ""
+            current_ip = ip
+            if current_ip:
+                _merge_host_ref(refs, current_ip, {
+                    "hostname": hostname or current_ip,
+                    "source": "nmap_report",
+                    "evidence": clean,
+                    "hostname_resolution_status": "resolved_from_nmap" if hostname and hostname != current_ip else "not_observed",
+                })
+            continue
+        mac_match = _MAC_RE.search(clean)
+        if mac_match and current_ip:
+            _merge_host_ref(refs, current_ip, {
+                "mac_address": mac_match.group("mac").upper(),
+                "mac_vendor": (mac_match.group("vendor") or "").strip(),
+                "arp_status": "observed",
+            })
+    return list(refs.values())
+
+
+def _proxychains_attempt_host_refs(result: dict[str, Any]) -> list[dict[str, Any]]:
+    refs: dict[str, dict[str, Any]] = {}
+    for line in str(result.get("stderr") or "").splitlines():
+        if "dynamic chain" not in line.lower():
+            continue
+        endpoints = list(_PROXY_ENDPOINT_RE.finditer(line))
+        if not endpoints:
+            continue
+        endpoint = endpoints[-1]
+        ip = _valid_observed_ip(endpoint.group("ip"))
+        if not ip:
+            continue
+        _merge_host_ref(refs, ip, {
+            "source": "proxychains_attempt",
+            "evidence": f"{ip}:{endpoint.group('port')} via relay BAS",
+            "attempted_ports": [int(endpoint.group("port"))],
+        })
+    return list(refs.values())
+
+
+def _port_scan_host_refs(job: Any, result: dict[str, Any]) -> list[dict[str, Any]]:
+    refs: dict[str, dict[str, Any]] = {}
+    target = str(getattr(job, "target", "") or result.get("target") or "")
+    metadata = _target_network_metadata(target)
+    tested_ports = _ports_from_nmap_command(str(result.get("command") or ""))
+    summary = _nmap_summary(result)
+    for ref in _nmap_report_host_refs(result) + _proxychains_attempt_host_refs(result):
+        ip = ref.get("ip")
+        if not ip:
+            continue
+        merged = _merge_host_ref(refs, ip, {**metadata, **ref})
+        if merged is not None and tested_ports:
+            _merge_host_ref(refs, ip, {"tested_tcp_ports": tested_ports})
+    for port in _nmap_open_ports(result):
+        host = str(port["host"])
+        ip = _valid_observed_ip(host) or host
+        merged = _merge_host_ref(refs, ip, {
+            **metadata,
+            "hostname": host,
+            "source": "nmap_result",
+            "evidence": f"{host}: {port['port']}/{port['protocol']} open {port['service']}",
+            "open_ports": [port],
+        })
+        if merged is not None and tested_ports:
+            _merge_host_ref(refs, ip, {"tested_tcp_ports": tested_ports})
+    for ip in _cidr_addresses_for_unitary_scan(target, summary):
+        merged = _merge_host_ref(refs, ip, {**metadata, "source": "nmap_target", "evidence": f"{ip} testado no alvo {target}"})
+        if merged is not None and tested_ports:
+            _merge_host_ref(refs, ip, {"tested_tcp_ports": tested_ports})
+    return sorted(refs.values(), key=lambda ref: ipaddress.ip_address(ref["ip"]))
+
+
 def _valid_observed_ip(value: str) -> str:
     try:
         ip = ipaddress.ip_address(str(value or "").strip())
@@ -244,11 +411,14 @@ def _asset_refs_from_text(text: str) -> list[dict[str, Any]]:
 
 def _asset_refs_from_job(job: Any, result: dict[str, Any], extra_text: str = "") -> list[dict[str, Any]]:
     refs: dict[str, dict[str, Any]] = {}
+    if str(getattr(job, "technique_key", "") or "") in {"port_service_scan", "firewall_segmentation_test"}:
+        for ref in _port_scan_host_refs(job, result):
+            refs[ref["key"]] = ref
     for port in _nmap_open_ports(result):
         host = str(port["host"])
         ip = _valid_observed_ip(host)
         key = ip or host
-        refs[key] = {
+        refs.setdefault(key, {
             "key": key,
             "ip": ip or host,
             "hostname": host,
@@ -256,7 +426,7 @@ def _asset_refs_from_job(job: Any, result: dict[str, Any], extra_text: str = "")
             "domain": "" if ip else host,
             "source": "nmap_result",
             "evidence": f"{host}: {port['port']}/{port['protocol']} open {port['service']}",
-        }
+        })
     text = "\n".join([
         str(result.get("stdout") or ""),
         str(result.get("stdout_full") or ""),
@@ -702,6 +872,15 @@ def bas_findings_view(
                 exploit_by_cve[cve] = check_exploitdb(cve)
             except Exception:
                 exploit_by_cve[cve] = {"available": None, "refs": []}
+    bas_job_ids = sorted({
+        int((f.details or {}).get("bas_job_id"))
+        for f in rows
+        if str((f.details or {}).get("bas_job_id") or "").isdigit()
+    })
+    jobs_by_id: dict[int, BasJob] = {}
+    if bas_job_ids:
+        for job in db.query(BasJob).filter(BasJob.id.in_(bas_job_ids)).all():
+            jobs_by_id[job.id] = job
 
     def observation_summary(key_findings: list[Any]) -> str:
         lines = [str(item).strip() for item in key_findings or [] if str(item).strip()]
@@ -716,6 +895,55 @@ def bas_findings_view(
             ports = next((line for line in lines if line.startswith("Portas TCP testadas:")), "")
             return " | ".join(part for part in (summary, ports, no_open) if part)[:1000]
         return " | ".join(lines[:3])[:1000]
+
+    def host_key_findings(base_lines: list[Any], host_ref: dict[str, Any], job: BasJob) -> list[str]:
+        result = job.result or {}
+        target = str(getattr(job, "target", "") or result.get("target") or "")
+        tested_ports = host_ref.get("tested_tcp_ports") or _ports_from_nmap_command(str(result.get("command") or ""))
+        open_ports = [
+            port for port in _nmap_open_ports(result)
+            if str(port.get("host") or "") == host_ref["ip"]
+        ]
+        lines = [f"Host testado: {host_ref['ip']}"]
+        hostname = str(host_ref.get("hostname") or "")
+        if hostname and hostname != host_ref["ip"]:
+            lines.append(f"Hostname resolvido: {hostname}")
+        else:
+            lines.append("Hostname resolvido: não observado na saída da ferramenta")
+        if host_ref.get("cidr"):
+            lines.append(f"Máscara do teste: /{host_ref.get('mask')} ({host_ref.get('netmask')})")
+        if host_ref.get("mac_address"):
+            vendor = f" ({host_ref.get('mac_vendor')})" if host_ref.get("mac_vendor") else ""
+            lines.append(f"ARP/MAC observado: {host_ref.get('mac_address')}{vendor}")
+        else:
+            lines.append("ARP/MAC observado: não disponível pelo método atual")
+        if tested_ports:
+            lines.append(f"Portas TCP testadas: {','.join(str(port) for port in tested_ports)}")
+        if open_ports:
+            lines.extend(f"{port['host']}: {port['port']}/{port['protocol']} open {port['service']}" for port in open_ports)
+        elif tested_ports:
+            lines.append("Nenhuma das portas TCP BAS foi observada aberta neste host.")
+        if target:
+            lines.append(f"Range de origem do teste: {target}")
+        summary = next((str(item).strip() for item in base_lines or [] if str(item).strip().startswith("Resumo nmap:")), "")
+        if summary:
+            lines.append(summary)
+        return lines
+
+    def host_observation_summary(host_ref: dict[str, Any], job: BasJob) -> str:
+        result = job.result or {}
+        target = str(getattr(job, "target", "") or result.get("target") or "")
+        tested_ports = host_ref.get("tested_tcp_ports") or _ports_from_nmap_command(str(result.get("command") or ""))
+        open_ports = [
+            port for port in _nmap_open_ports(result)
+            if str(port.get("host") or "") == host_ref["ip"]
+        ]
+        if open_ports:
+            sample = ", ".join(f"{port['port']}/{port['protocol']} {port['service']}" for port in open_ports[:3])
+            return f"Host {host_ref['ip']}: {len(open_ports)} porta(s) aberta(s): {sample}"[:1000]
+        ports = f"portas {','.join(str(port) for port in tested_ports)}" if tested_ports else "portas não parseadas"
+        range_hint = f" no range {target}" if target else ""
+        return f"Host {host_ref['ip']} testado{range_hint}; {ports}; nenhuma porta TCP BAS aberta observada."[:1000]
 
     results = []
     for f in rows:
@@ -735,18 +963,17 @@ def bas_findings_view(
             {"ip": ref["ip"], "hostname": ref["hostname"], "domain": ref["domain"], "source": ref["source"], "evidence": ref["evidence"]}
             for ref in _asset_refs_from_text(finding_text)
         ]
-        results.append({
+        base_row = {
             "id": f.id, "title": f.title, "created_at": f.created_at,
+            "finding_id": f.id,
             "severity": f.severity,
             "technique_key": details.get("technique_key"),
             "category": details.get("category"),
             "risk_tier": details.get("risk_tier"),
             "target": details.get("target"),
+            "raw_target": details.get("target"),
             "mitre_refs": details.get("mitre_refs", []),
             "recommendation": details.get("recommendation", ""),
-            # Real content extracted from the tool's actual output (see
-            # bas_scheduler._extract_key_findings) -- empty for a stub
-            # dispatch or a real one that genuinely found nothing.
             "key_findings": key_findings,
             "observation_summary": observation_summary(key_findings),
             "affected_assets": affected_assets,
@@ -763,7 +990,42 @@ def bas_findings_view(
             "epss_percentile": epss_row.get("percentile") if epss_row else None,
             "exploit_available": exploit_row.get("available") if exploit_row else None,
             "exploit_refs": exploit_row.get("refs", []) if exploit_row else [],
-        })
+        }
+        job = jobs_by_id.get(int(details.get("bas_job_id") or 0)) if str(details.get("bas_job_id") or "").isdigit() else None
+        if (
+            job is not None
+            and details.get("technique_key") in {"port_service_scan", "firewall_segmentation_test"}
+            and _target_network_metadata(str(getattr(job, "target", "") or (job.result or {}).get("target") or details.get("target") or ""))
+        ):
+            host_refs = _port_scan_host_refs(job, job.result or {})
+            if host_refs:
+                for ref in host_refs:
+                    host_asset = {
+                        "ip": ref["ip"],
+                        "hostname": ref.get("hostname") or ref["ip"],
+                        "domain": ref.get("domain") or "",
+                        "source": ref.get("source") or "nmap_target",
+                        "evidence": ref.get("evidence") or ref["ip"],
+                        "mac_address": ref.get("mac_address") or "",
+                        "mac_vendor": ref.get("mac_vendor") or "",
+                        "arp_status": ref.get("arp_status") or "not_observed",
+                        "mask": ref.get("mask"),
+                        "netmask": ref.get("netmask") or "",
+                        "cidr": ref.get("cidr") or "",
+                    }
+                    results.append({
+                        **base_row,
+                        "id": f"{f.id}:{ref['ip']}",
+                        "target": ref["ip"],
+                        "host": ref["ip"],
+                        "hostname": host_asset["hostname"],
+                        "raw_target": str(getattr(job, "target", "") or (job.result or {}).get("target") or details.get("target") or ""),
+                        "key_findings": host_key_findings(key_findings, ref, job),
+                        "observation_summary": host_observation_summary(ref, job),
+                        "affected_assets": [host_asset],
+                    })
+                continue
+        results.append(base_row)
     return results
 
 
@@ -1017,6 +1279,14 @@ def attack_path_inventory(
                 "hostname": ip,
                 "os": "",
                 "domain": "",
+                "cidr": "",
+                "mask": None,
+                "netmask": "",
+                "mac_address": "",
+                "mac_vendor": "",
+                "arp_status": "not_observed",
+                "hostname_resolution_status": "not_observed",
+                "tested_tcp_ports": [],
                 "first_seen": job.created_at,
                 "last_seen": job.created_at,
                 "source_job_ids": [],
@@ -1038,6 +1308,19 @@ def attack_path_inventory(
         if schedule_ref and schedule_ref not in asset["schedule_ids"]:
             asset["schedule_ids"].append(schedule_ref)
         return asset
+
+    def enrich_asset(asset: dict[str, Any], ref: dict[str, Any]) -> None:
+        if ref.get("hostname") and asset["hostname"] == asset["ip"]:
+            asset["hostname"] = ref["hostname"]
+        if ref.get("domain") and not asset["domain"]:
+            asset["domain"] = ref["domain"]
+        for key in ("os", "cidr", "mask", "netmask", "mac_address", "mac_vendor", "arp_status", "hostname_resolution_status"):
+            if ref.get(key) not in (None, "", []):
+                asset[key] = ref[key]
+        if ref.get("tested_tcp_ports"):
+            ports = set(asset.get("tested_tcp_ports") or [])
+            ports.update(ref["tested_tcp_ports"])
+            asset["tested_tcp_ports"] = sorted(ports)
 
     def attach_observation(asset: dict[str, Any], ref: dict[str, Any]) -> None:
         evidence = str(ref.get("evidence") or "").strip()
@@ -1078,6 +1361,17 @@ def attack_path_inventory(
         log_text = "\n".join(logs_by_scan.get(getattr(job, "scan_job_id", None), []))
         finding = findings_by_id.get(getattr(job, "finding_id", None))
         if proof_valid and job.technique_key in {"port_service_scan", "firewall_segmentation_test"}:
+            for ref in _port_scan_host_refs(job, result):
+                asset = ensure_asset(ref["ip"], job, agent, schedule)
+                enrich_asset(asset, ref)
+                ports = ref.get("tested_tcp_ports") or _ports_from_nmap_command(str(result.get("command") or ""))
+                evidence = f"{ref['ip']} testado em {getattr(job, 'target', '') or result.get('target') or 'alvo BAS'}"
+                if ports:
+                    evidence = f"{evidence}; portas TCP: {','.join(str(port) for port in ports)}"
+                if not ref.get("open_ports"):
+                    evidence = f"{evidence}; sem portas TCP BAS abertas observadas"
+                attach_observation(asset, {"source": ref.get("source") or "nmap_target", "evidence": evidence})
+                attach_finding(asset, finding, ref, proof_valid)
             for port in _nmap_open_ports(result):
                 asset = ensure_asset(port["host"], job, agent, schedule)
                 service = {
@@ -1129,10 +1423,7 @@ def attack_path_inventory(
                         asset["risk_level"] = "medium"
         for ref in _asset_refs_from_job(job, result, extra_text=log_text):
             asset = ensure_asset(ref["ip"], job, agent, schedule)
-            if ref.get("hostname") and asset["hostname"] == asset["ip"]:
-                asset["hostname"] = ref["hostname"]
-            if ref.get("domain") and not asset["domain"]:
-                asset["domain"] = ref["domain"]
+            enrich_asset(asset, ref)
             attach_observation(asset, ref)
             attach_finding(asset, finding, ref, proof_valid)
 

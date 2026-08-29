@@ -1409,21 +1409,22 @@ function CmdbTab({ cc, segments, reload }) {
           </select>
           <button className="btn" onClick={() => setFilters({ port: "", host: "", ip: "", os: "", status: "" })} style={{ background: "transparent", border: `1px solid ${TV.border}`, color: TV.text }}>Limpar</button>
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "110px minmax(0,1fr) 96px 90px 110px 110px 100px 80px", gap: 12, padding: "0 12px 8px", borderBottom: `1px solid ${TV.border}` }}>
-          {["IP", "Hostname", "Status", "Porta", "Business unit", "Criticidade", "Risco", "Vulns"].map((h) => (
+        <div style={{ display: "grid", gridTemplateColumns: "110px minmax(0,1fr) minmax(0,1fr) 82px 96px 90px 110px 100px 80px", gap: 12, padding: "0 12px 8px", borderBottom: `1px solid ${TV.border}` }}>
+          {["IP", "Hostname", "ARP/MAC", "Mask", "Status", "Porta", "Business unit", "Risco", "Achados"].map((h) => (
             <span key={h} style={{ fontWeight: 600, fontSize: 10, lineHeight: "13px", color: TV.label, textTransform: "uppercase", letterSpacing: ".6px" }}>{h}</span>
           ))}
         </div>
         {rows.length === 0 && <Empty>Nenhum host com essa porta/serviço no CMDB atual.</Empty>}
         <div style={{ maxHeight: 620, overflowY: "auto" }}>
           {rows.map(({ asset, svc }, idx) => (
-            <div key={`${asset.ip}:${svc.port}:${idx}`} style={{ display: "grid", gridTemplateColumns: "110px minmax(0,1fr) 96px 90px 110px 110px 100px 80px", gap: 12, alignItems: "center", padding: "10px 12px", borderBottom: `1px solid ${TV.border}` }}>
+            <div key={`${asset.ip}:${svc.port}:${idx}`} style={{ display: "grid", gridTemplateColumns: "110px minmax(0,1fr) minmax(0,1fr) 82px 96px 90px 110px 100px 80px", gap: 12, alignItems: "center", padding: "10px 12px", borderBottom: `1px solid ${TV.border}` }}>
               <span style={{ fontWeight: 600, fontSize: 12, lineHeight: "16px", fontFamily: "var(--font-mono,monospace)" }}>{asset.ip}</span>
-              <span style={{ fontWeight: 400, fontSize: 12, lineHeight: "16px", color: TV.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{asset.hostname}</span>
+              <span title={asset.hostname_resolution_status === "not_observed" ? "Hostname não observado na saída das ferramentas" : ""} style={{ fontWeight: 400, fontSize: 12, lineHeight: "16px", color: TV.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{asset.hostname}</span>
+              <span title={asset.mac_vendor || asset.arp_status || ""} style={{ fontWeight: 400, fontSize: 11, lineHeight: "15px", color: asset.mac_address ? TV.text : TV.label, fontFamily: "var(--font-mono,monospace)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{asset.mac_address || "não observado"}</span>
+              <span style={{ fontWeight: 600, fontSize: 11, lineHeight: "15px", color: TV.text, fontFamily: "var(--font-mono,monospace)" }}>{asset.mask ? `/${asset.mask}` : "—"}</span>
               <Pill color={assetStatus(asset).color}>{assetStatus(asset).label}</Pill>
               <span style={{ fontWeight: 600, fontSize: 12, lineHeight: "16px", fontFamily: "var(--font-mono,monospace)" }}>{svc.port}/{svc.protocol}</span>
               <span style={{ fontWeight: 400, fontSize: 11.5, lineHeight: "16px", color: asset.classified ? TV.text : TV.label }}>{asset.business_unit || "—"}</span>
-              <span style={{ fontWeight: 400, fontSize: 11.5, lineHeight: "16px", color: TV.text }}>{asset.criticality || "—"}</span>
               <Pill color={RISK_COLOR[asset.risk_level] || TV.muted}>{asset.risk_level}</Pill>
               <div style={{ display: "flex", alignItems: "center", gap: 8, justifyContent: "flex-end" }}>
                 <span style={{ fontWeight: 400, fontSize: 11, lineHeight: "16px", color: TV.muted }}>{asset.vulnerabilities?.length || 0}</span>
@@ -1548,7 +1549,7 @@ function VulnsTab({ cc }) {
             </div>
             <span style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
               <span style={{ fontWeight: 600, fontSize: 11.5, lineHeight: "16px", color: TV.text, fontFamily: "var(--font-mono,monospace)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.affected_assets?.map((asset) => asset.ip).join(", ") || f.target || "—"}</span>
-              <span style={{ fontWeight: 400, fontSize: 10, lineHeight: "13px", color: TV.label, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.target || "sem alvo bruto"}</span>
+              <span style={{ fontWeight: 400, fontSize: 10, lineHeight: "13px", color: TV.label, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.raw_target && f.raw_target !== f.target ? `origem: ${f.raw_target}` : f.target || "sem alvo bruto"}</span>
             </span>
             <span style={{ fontWeight: 400, fontSize: 11, lineHeight: "15px", color: TV.text, fontFamily: "var(--font-mono,monospace)", overflow: "hidden", textOverflow: "ellipsis" }}>{f.observation_summary || f.key_findings?.[0] || "sem evidência parseada"}</span>
             <span style={{ fontWeight: 600, fontSize: 10.5, lineHeight: "14px", color: f.proof_valid ? "#1f8a59" : TV.muted }}>
@@ -1571,7 +1572,7 @@ function VulnsTab({ cc }) {
               <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                 {(f.affected_assets || []).length ? (f.affected_assets || []).map((asset) => (
                   <span key={`${f.id}-${asset.ip}-${asset.hostname}`} style={{ fontWeight: 600, fontSize: 10.5, lineHeight: "14px", color: TV.text, border: `1px solid ${TV.border}`, borderRadius: 999, padding: "2px 7px", fontFamily: "var(--font-mono,monospace)" }}>
-                    {asset.hostname && asset.hostname !== asset.ip ? `${asset.hostname} · ${asset.ip}` : asset.ip}
+                    {asset.hostname && asset.hostname !== asset.ip ? `${asset.hostname} · ${asset.ip}` : asset.ip}{asset.mask ? ` · /${asset.mask}` : ""}
                   </span>
                 )) : (
                   <span style={{ fontWeight: 600, fontSize: 10.5, lineHeight: "14px", color: TV.label, border: `1px solid ${TV.border}`, borderRadius: 999, padding: "2px 7px", fontFamily: "var(--font-mono,monospace)" }}>

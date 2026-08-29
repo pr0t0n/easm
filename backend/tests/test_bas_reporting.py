@@ -218,6 +218,70 @@ def test_bas_findings_view_summarizes_no_open_ports_observation():
     )
 
 
+def test_bas_findings_view_expands_portscan_range_findings_by_host():
+    from datetime import datetime
+
+    result = {
+        "target": "10.99.0.0/30",
+        "command": "proxychains4 nmap -Pn -sT -T4 --open -p 22,80 10.99.0.0/30",
+        "stdout": "Nmap done: 4 IP addresses (4 hosts up) scanned in 0.21 seconds",
+        "nmap_summary": {"ip_addresses": 4, "hosts_up": 4, "duration_seconds": 0.21},
+        "bas_proof": _proof(True),
+    }
+    job = SimpleNamespace(id=101, target="10.99.0.0/30", technique_key="port_service_scan", result=result)
+    finding = SimpleNamespace(
+        id=8, title="BAS: Port & Service Scanning", created_at=datetime(2026, 8, 28, 12, 0), severity="info", cve=None, cvss=None,
+        details={
+            "technique_key": "port_service_scan",
+            "category": "network",
+            "risk_tier": "safe",
+            "target": "10.99.0.0/30",
+            "bas_job_id": 101,
+            "key_findings": [
+                "Alvo varrido: 10.99.0.0/30",
+                "Portas TCP testadas: 22,80",
+                "Resumo nmap: 4 IP(s) varrido(s), 4 host(s) tratados como ativos pelo -Pn, duração 0.21s.",
+                "Nenhuma das portas TCP BAS foi observada aberta no alvo.",
+            ],
+            "proof": {"valid": True, "target": "10.99.0.0/30"},
+            "simulated": False,
+        },
+    )
+    db = MagicMock()
+
+    def query_side_effect(*args):
+        if args and args[0] is bas_reporting.Finding:
+            return _query_chain([finding])
+        if args and args[0] is bas_reporting.BasJob:
+            return _query_chain([job])
+        return _query_chain([])
+
+    db.query.side_effect = query_side_effect
+
+    rows = bas_reporting.bas_findings_view(db)
+
+    assert [row["target"] for row in rows] == ["10.99.0.0", "10.99.0.1", "10.99.0.2", "10.99.0.3"]
+    assert rows[0]["id"] == "8:10.99.0.0"
+    assert rows[0]["finding_id"] == 8
+    assert rows[0]["raw_target"] == "10.99.0.0/30"
+    assert rows[0]["affected_assets"] == [{
+        "ip": "10.99.0.0",
+        "hostname": "10.99.0.0",
+        "domain": "",
+        "source": "nmap_target",
+        "evidence": "10.99.0.0 testado no alvo 10.99.0.0/30",
+        "mac_address": "",
+        "mac_vendor": "",
+        "arp_status": "not_observed",
+        "mask": 30,
+        "netmask": "255.255.255.252",
+        "cidr": "10.99.0.0/30",
+    }]
+    assert "Host testado: 10.99.0.0" in rows[0]["key_findings"]
+    assert "Nenhuma das portas TCP BAS foi observada aberta neste host." in rows[0]["key_findings"]
+    assert rows[0]["observation_summary"] == "Host 10.99.0.0 testado no range 10.99.0.0/30; portas 22,80; nenhuma porta TCP BAS aberta observada."
+
+
 def test_asset_refs_ignore_proxychains_infrastructure_ips():
     refs = bas_reporting._asset_refs_from_text(
         "\n".join([
@@ -601,6 +665,58 @@ def test_attack_path_inventory_includes_attempted_host_without_valid_finding():
     assert result["cmdb_assets"][0]["schedule_ids"] == [10]
     assert result["cmdb_assets"][0]["vulnerabilities"] == []
     assert result["cmdb_assets"][0]["observations"]
+
+
+def test_attack_path_inventory_includes_all_portscan_range_hosts_with_network_metadata():
+    from datetime import datetime
+
+    result_payload = {
+        "target": "10.99.0.0/30",
+        "command": "proxychains4 nmap -Pn -sT -T4 --open -p 22,80 10.99.0.0/30",
+        "stdout": "\n".join([
+            "Nmap scan report for printer.local (10.99.0.2)",
+            "MAC Address: AA:BB:CC:11:22:33 (Example Vendor)",
+            "Nmap done: 4 IP addresses (4 hosts up) scanned in 0.19 seconds",
+        ]),
+        "nmap_summary": {"ip_addresses": 4, "hosts_up": 4, "duration_seconds": 0.19},
+        "bas_proof": _proof(True),
+    }
+    job = SimpleNamespace(
+        id=102,
+        scan_job_id=125,
+        schedule_id=10,
+        finding_id=None,
+        technique_key="port_service_scan",
+        status="completed",
+        target="10.99.0.0/30",
+        result=result_payload,
+        created_at=datetime(2026, 8, 28, 13, 9),
+    )
+    agent = SimpleNamespace(id=19, kind="real")
+    schedule = SimpleNamespace(id=10, name="range")
+    db = MagicMock()
+
+    def query_side_effect(*args):
+        if args and args[0] is bas_reporting.BasNetworkSegmentTag:
+            return _query_chain([])
+        if args and args[0] is bas_reporting.ScanLog:
+            return _query_chain([])
+        return _query_chain([(job, agent, schedule)])
+
+    db.query.side_effect = query_side_effect
+
+    result = bas_reporting.attack_path_inventory(db)
+    assets = {asset["ip"]: asset for asset in result["cmdb_assets"]}
+
+    assert sorted(assets) == ["10.99.0.0", "10.99.0.1", "10.99.0.2", "10.99.0.3"]
+    assert assets["10.99.0.1"]["mask"] == 30
+    assert assets["10.99.0.1"]["netmask"] == "255.255.255.252"
+    assert assets["10.99.0.1"]["tested_tcp_ports"] == [22, 80]
+    assert assets["10.99.0.1"]["arp_status"] == "not_observed"
+    assert assets["10.99.0.2"]["hostname"] == "printer.local"
+    assert assets["10.99.0.2"]["hostname_resolution_status"] == "resolved_from_nmap"
+    assert assets["10.99.0.2"]["mac_address"] == "AA:BB:CC:11:22:33"
+    assert assets["10.99.0.2"]["mac_vendor"] == "Example Vendor"
 
 
 def test_chain_attack_path_groups_steps_by_the_shadow_scan_job_in_order():
