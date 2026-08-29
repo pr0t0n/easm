@@ -291,9 +291,9 @@ export default function BasReportPage() {
           <span className="report-sub">clique num achado validado para ver o que foi observado de fato e como corrigir</span>
           <div className="attack-table-wrap">
             <table className="attack-table report-plan">
-              <thead><tr><th>Achado</th><th>Técnica</th><th>Severidade</th><th>MITRE</th><th>Prova</th><th>Data</th></tr></thead>
+              <thead><tr><th>Achado</th><th>Técnica</th><th>Severidade</th><th>Observado</th><th>MITRE</th><th>Prova</th><th>Data</th></tr></thead>
               <tbody>
-                {findings.length === 0 && <tr><td colSpan={6}>Nenhum achado BAS registrado ainda.</td></tr>}
+                {findings.length === 0 && <tr><td colSpan={7}>Nenhum achado BAS registrado ainda.</td></tr>}
                 {findings.map((f) => {
                   const expanded = expandedFindingId === f.id;
                   const canExpand = !f.simulated && f.proof_valid && (f.key_findings?.length > 0 || f.recommendation);
@@ -306,13 +306,14 @@ export default function BasReportPage() {
                         <td>{canExpand ? (expanded ? "▾ " : "▸ ") : ""}{f.title}</td>
                         <td className="sk-mono">{f.technique_key}</td>
                         <td><span style={{ fontSize: 11, fontWeight: 700, color: SEV_COLOR[f.severity] || "inherit" }}>{SEV_LABEL[f.severity] || f.severity}</span></td>
+                        <td className="sk-mono" style={{ fontSize: 11, maxWidth: 420 }}>{f.observation_summary || f.key_findings?.[0] || "—"}</td>
                         <td className="sk-mono" style={{ fontSize: 11 }}>{(f.mitre_refs || []).join(", ") || "—"}</td>
                         <td>{f.simulated ? "Simulado" : f.proof_valid ? "Validado" : "Sem prova"}</td>
                         <td className="sk-mono">{f.created_at}</td>
                       </tr>
                       {expanded && (
                         <tr>
-                          <td colSpan={6} style={{ background: "var(--surface-soft)" }}>
+                          <td colSpan={7} style={{ background: "var(--surface-soft)" }}>
                             {f.key_findings?.length > 0 && (
                               <div style={{ marginBottom: 8 }}>
                                 <b style={{ fontSize: 12 }}>O que foi observado:</b>

@@ -531,8 +531,11 @@ export default function BasOperationsCenterPage() {
           <div style={{ display: "grid", gap: 6, maxHeight: 220, overflowY: "auto" }}>
             {findings.length === 0 && <div style={{ fontSize: 11, color: TV.muted }}>Nenhuma finding do BAS ainda.</div>}
             {findings.map((f) => (
-              <div key={f.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: TV.surface2, borderRadius: 8, padding: "7px 10px" }}>
-                <div style={{ fontSize: 11, color: TV.text }}>{f.title}</div>
+              <div key={f.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, background: TV.surface2, borderRadius: 8, padding: "7px 10px" }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 11, color: TV.text }}>{f.title}</div>
+                  <div style={{ fontFamily: "var(--font-mono)", fontSize: 9.5, color: TV.muted, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{f.observation_summary || f.key_findings?.[0] || "sem evidência parseada"}</div>
+                </div>
                 {f.simulated ? (
                   <span style={{ fontSize: 9.5, fontWeight: 700, color: "#d4a500", border: "1px solid rgba(212,165,0,0.4)", borderRadius: 4, padding: "1px 5px" }}>SIMULADO</span>
                 ) : f.proof_valid ? (

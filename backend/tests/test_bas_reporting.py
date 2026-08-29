@@ -185,6 +185,37 @@ def test_bas_findings_view_extracts_affected_assets_from_evidence():
 
     assert rows[0]["affected_assets"][0]["ip"] == "10.99.0.12"
     assert rows[0]["affected_assets"][0]["source"] == "log_text"
+    assert rows[0]["observation_summary"] == "1 porta(s) aberta(s): 10.99.0.12: 8080/tcp open http-proxy"
+
+
+def test_bas_findings_view_summarizes_no_open_ports_observation():
+    db = MagicMock()
+    finding = SimpleNamespace(
+        id=8, title="BAS: Port & Service Scanning", created_at="now", severity="info", cve=None, cvss=None,
+        details={
+            "technique_key": "port_service_scan",
+            "category": "network",
+            "risk_tier": "safe",
+            "target": "10.125.143.240/28",
+            "key_findings": [
+                "Alvo varrido: 10.125.143.240/28",
+                "Portas TCP testadas: 22,80,88,389,443,445,464,636,3389,3268,3269",
+                "Resumo nmap: 16 IP(s) varrido(s), 16 host(s) tratados como ativos pelo -Pn, duração 1.07s.",
+                "Nenhuma das portas TCP BAS foi observada aberta no alvo.",
+            ],
+            "proof": {"valid": True, "target": "10.125.143.240/28"},
+            "simulated": False,
+        },
+    )
+    db.query.return_value = _query_chain([finding])
+
+    rows = bas_reporting.bas_findings_view(db)
+
+    assert rows[0]["observation_summary"] == (
+        "Resumo nmap: 16 IP(s) varrido(s), 16 host(s) tratados como ativos pelo -Pn, duração 1.07s. | "
+        "Portas TCP testadas: 22,80,88,389,443,445,464,636,3389,3268,3269 | "
+        "Nenhuma das portas TCP BAS foi observada aberta no alvo."
+    )
 
 
 def test_asset_refs_ignore_proxychains_infrastructure_ips():

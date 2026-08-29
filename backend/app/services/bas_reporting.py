@@ -703,6 +703,20 @@ def bas_findings_view(
             except Exception:
                 exploit_by_cve[cve] = {"available": None, "refs": []}
 
+    def observation_summary(key_findings: list[Any]) -> str:
+        lines = [str(item).strip() for item in key_findings or [] if str(item).strip()]
+        if not lines:
+            return ""
+        open_lines = [line for line in lines if "/tcp" in line and " open" in line.lower()]
+        if open_lines:
+            return f"{len(open_lines)} porta(s) aberta(s): {', '.join(open_lines[:3])}"[:1000]
+        no_open = next((line for line in lines if line.startswith("Nenhuma das portas TCP BAS foi observada aberta")), "")
+        if no_open:
+            summary = next((line for line in lines if line.startswith("Resumo nmap:")), "")
+            ports = next((line for line in lines if line.startswith("Portas TCP testadas:")), "")
+            return " | ".join(part for part in (summary, ports, no_open) if part)[:1000]
+        return " | ".join(lines[:3])[:1000]
+
     results = []
     for f in rows:
         cve = f.cve
@@ -710,11 +724,12 @@ def bas_findings_view(
         exploit_row = exploit_by_cve.get(cve) if cve else None
         details = f.details or {}
         proof = details.get("proof") or {}
+        key_findings = details.get("key_findings", [])
         finding_text = "\n".join([
             str(details.get("target") or ""),
             str(proof.get("target") or ""),
             str(proof.get("evidence") or ""),
-            "\n".join(str(item) for item in details.get("key_findings", []) or []),
+            "\n".join(str(item) for item in key_findings or []),
         ])
         affected_assets = [
             {"ip": ref["ip"], "hostname": ref["hostname"], "domain": ref["domain"], "source": ref["source"], "evidence": ref["evidence"]}
@@ -732,7 +747,8 @@ def bas_findings_view(
             # Real content extracted from the tool's actual output (see
             # bas_scheduler._extract_key_findings) -- empty for a stub
             # dispatch or a real one that genuinely found nothing.
-            "key_findings": details.get("key_findings", []),
+            "key_findings": key_findings,
+            "observation_summary": observation_summary(key_findings),
             "affected_assets": affected_assets,
             "simulated": bool(details.get("simulated", True)),
             "proof": proof,
