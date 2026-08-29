@@ -962,6 +962,18 @@ function DeployTab({ isAdmin, agents, techniques, chains, schedules, reload }) {
     try { await client.delete(`/api/bas/schedules/${id}`); await reload(); toastSuccess("Agendamento removido."); }
     catch (error) { toastError(error?.response?.data?.detail || "Falha ao excluir agendamento."); }
   };
+  const deleteAgent = async (agent) => {
+    if (!isAdmin) return;
+    const name = agent.label || agent.hostname || `agente #${agent.id}`;
+    if (!window.confirm(`Excluir ${name}? Isso remove agendamentos, jobs e achados BAS gerados por este agente.`)) return;
+    try {
+      await client.delete(`/api/bas/agents/${agent.id}`);
+      await reload();
+      toastSuccess("Agente removido.");
+    } catch (error) {
+      toastError(error?.response?.data?.detail || "Falha ao excluir agente.");
+    }
+  };
   const runNow = async (id) => {
     setRuns((prev) => ({ ...prev, [id]: { scanJobId: null, status: "starting", currentStep: "", missionProgress: 0 } }));
     try {
@@ -1195,9 +1207,14 @@ function DeployTab({ isAdmin, agents, techniques, chains, schedules, reload }) {
               <div key={a.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: TV.surface2, border: `1px solid ${TV.border}`, borderRadius: 8, padding: "9px 12px" }}>
                 <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
                   <span style={{ fontWeight: 600, fontSize: 12, lineHeight: "16px" }}>{a.label || a.hostname}</span>
-                  <span style={{ fontWeight: 400, fontSize: 10.5, lineHeight: "14px", color: TV.label }}>{a.os} · {a.local_network_cidr || "sem rede"}</span>
+                  <span style={{ fontWeight: 400, fontSize: 10.5, lineHeight: "14px", color: TV.label }}>{a.os} · {a.local_network_cidr || "sem rede"} · IP {a.last_seen_ip || "—"}</span>
                 </div>
-                <span style={{ fontWeight: 600, fontSize: 10.5, lineHeight: "14px" }}>{a.status}</span>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+                  <span style={{ fontWeight: 600, fontSize: 10.5, lineHeight: "14px" }}>{a.status}</span>
+                  {isAdmin && (
+                    <button className="btn" style={{ padding: "4px 8px", fontSize: 11, background: "transparent", border: "1px solid #d64545", color: "#d64545" }} onClick={() => deleteAgent(a)}>Excluir</button>
+                  )}
+                </div>
               </div>
             ))}
             <div style={{ marginTop: 6, paddingTop: 12, borderTop: `1px solid ${TV.border}`, display: "flex", flexDirection: "column", gap: 8 }}>

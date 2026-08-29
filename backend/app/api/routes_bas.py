@@ -158,44 +158,103 @@ class AgentEnrollRequest(BaseModel):
     capabilities: dict[str, Any] = Field(default_factory=dict)
 
 
+def _client_host(request: Request) -> str:
+    if request is None or request.client is None:
+        return ""
+    return str(request.client.host or "").strip()
+
+
+def _same_agent_enrollment(existing: BasAgent, payload: AgentEnrollRequest, token: BasEnrollmentToken) -> bool:
+    hostname = str(payload.hostname or "").strip().lower()
+    existing_hostname = str(existing.hostname or "").strip().lower()
+    if hostname and existing_hostname and hostname != existing_hostname:
+        return False
+    os_name = str(payload.os or "").strip().lower()
+    existing_os = str(existing.os or "").strip().lower()
+    arch = str(payload.arch or "").strip().lower()
+    existing_arch = str(existing.arch or "").strip().lower()
+    if os_name and existing_os and os_name != existing_os:
+        return False
+    if arch and existing_arch and arch != existing_arch:
+        return False
+    if token.max_uses <= 1:
+        return True
+    if hostname and hostname == existing_hostname:
+        return True
+    return (
+        bool(payload.os or payload.arch)
+        and os_name == existing_os
+        and arch == existing_arch
+    )
+
+
+def _reusable_agent_for_enrollment(db: Session, token: BasEnrollmentToken, payload: AgentEnrollRequest) -> BasAgent | None:
+    agents = (
+        db.query(BasAgent)
+        .filter(BasAgent.enrollment_token_id == token.id, BasAgent.status != "revoked")
+        .order_by(BasAgent.created_at.desc())
+        .all()
+    )
+    for agent in agents:
+        if _same_agent_enrollment(agent, payload, token):
+            return agent
+    return None
+
+
+def _apply_enrollment_to_agent(
+    agent: BasAgent,
+    payload: AgentEnrollRequest,
+    token: BasEnrollmentToken,
+    *,
+    request: Request,
+) -> None:
+    agent.owner_id = token.owner_id
+    agent.access_group_id = token.access_group_id
+    agent.enrollment_token_id = token.id
+    agent.hostname = payload.hostname
+    agent.os = payload.os
+    agent.os_version = payload.os_version
+    agent.arch = payload.arch
+    agent.agent_version = payload.agent_version
+    agent.status = "online"
+    agent.tunnel_host = payload.tunnel_host
+    agent.tunnel_port = payload.tunnel_port
+    agent.last_heartbeat_at = datetime.now()
+    agent.last_seen_ip = _client_host(request) or agent.last_seen_ip
+    agent.enrolled_via_host = payload.reported_host
+    agent.enrolled_via_port = payload.reported_port
+    agent.local_network_cidr = payload.local_network_cidr.strip() or agent.local_network_cidr
+    if payload.capabilities:
+        meta = merged_metadata(agent)
+        meta["capabilities"] = payload.capabilities
+        agent.agent_metadata = meta
+
+
 @router.post("/agents/enroll")
-def enroll_agent(payload: AgentEnrollRequest, db: Session = Depends(get_db)):
+def enroll_agent(payload: AgentEnrollRequest, request: Request = None, db: Session = Depends(get_db)):
     token = db.query(BasEnrollmentToken).filter(BasEnrollmentToken.code == payload.code).first()
     if not token:
         raise HTTPException(status_code=401, detail="Token de enrollment inválido")
-    if token.status != "active":
+    if token.status not in {"active", "exhausted"}:
         raise HTTPException(status_code=401, detail=f"Token de enrollment {token.status}")
     if token.expires_at and token.expires_at < datetime.now():
         token.status = "expired"
         db.commit()
         raise HTTPException(status_code=401, detail="Token de enrollment expirado")
-    if token.used_count >= token.max_uses:
-        token.status = "exhausted"
-        db.commit()
-        raise HTTPException(status_code=401, detail="Token de enrollment já utilizado o número máximo de vezes")
     if token.username != payload.username or not verify_password(payload.password, token.secret_hash):
         raise HTTPException(status_code=401, detail="Credenciais de enrollment inválidas")
 
-    agent = BasAgent(
-        owner_id=token.owner_id,
-        access_group_id=token.access_group_id,
-        enrollment_token_id=token.id,
-        hostname=payload.hostname,
-        os=payload.os,
-        os_version=payload.os_version,
-        arch=payload.arch,
-        agent_version=payload.agent_version,
-        status="online",
-        tunnel_host=payload.tunnel_host,
-        tunnel_port=payload.tunnel_port,
-        last_heartbeat_at=datetime.now(),
-        enrolled_via_host=payload.reported_host,
-        enrolled_via_port=payload.reported_port,
-        local_network_cidr=payload.local_network_cidr.strip() or None,
-        agent_metadata={"capabilities": payload.capabilities} if payload.capabilities else {},
-    )
-    db.add(agent)
-    token.used_count += 1
+    agent = _reusable_agent_for_enrollment(db, token, payload)
+    reused_agent = agent is not None
+    if agent is None:
+        if token.used_count >= token.max_uses:
+            token.status = "exhausted"
+            db.commit()
+            raise HTTPException(status_code=401, detail="Token de enrollment já utilizado o número máximo de vezes")
+        agent = BasAgent(agent_metadata={})
+        db.add(agent)
+        token.used_count += 1
+    _apply_enrollment_to_agent(agent, payload, token, request=request)
     token.last_used_at = datetime.now()
     if token.used_count >= token.max_uses:
         token.status = "exhausted"
@@ -203,7 +262,7 @@ def enroll_agent(payload: AgentEnrollRequest, db: Session = Depends(get_db)):
     db.refresh(agent)
 
     agent_jwt = create_bas_agent_token(agent.id)
-    response: dict[str, Any] = {"agent_id": agent.id, "agent_jwt": agent_jwt}
+    response: dict[str, Any] = {"agent_id": agent.id, "agent_jwt": agent_jwt, "reused_agent": reused_agent}
 
     if payload.csr_pem.strip():
         from app.services import bas_ca
@@ -241,11 +300,13 @@ class AgentHeartbeatRequest(BaseModel):
 @router.post("/agents/heartbeat")
 def agent_heartbeat(
     payload: AgentHeartbeatRequest | None = Body(default=None),
+    request: Request = None,
     db: Session = Depends(get_db),
     agent: BasAgent = Depends(get_current_bas_agent),
 ):
     agent.last_heartbeat_at = datetime.now()
     agent.status = "online"
+    agent.last_seen_ip = _client_host(request) or getattr(agent, "last_seen_ip", None)
     if payload is not None and payload.local_network_cidr.strip():
         agent.local_network_cidr = payload.local_network_cidr.strip()
     apply_heartbeat(agent, payload)
