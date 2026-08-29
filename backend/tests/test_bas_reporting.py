@@ -282,6 +282,66 @@ def test_bas_findings_view_expands_portscan_range_findings_by_host():
     assert rows[0]["observation_summary"] == "Host 10.99.0.0 testado no range 10.99.0.0/30; portas 22,80; nenhuma porta TCP BAS aberta observada."
 
 
+def test_bas_findings_view_includes_agent_and_test_context():
+    from datetime import datetime
+
+    result = {
+        "target": "10.99.0.10",
+        "command": "nmap -Pn -sT -T4 -p 445 10.99.0.10",
+        "open_ports": [{"host": "10.99.0.10", "port": 445, "protocol": "tcp", "service": "microsoft-ds"}],
+        "bas_proof": _proof(True),
+        "defensive_status": "detected",
+    }
+    job = SimpleNamespace(
+        id=111, agent_id=19, schedule_id=12, scan_job_id=301, target="10.99.0.10",
+        technique_key="port_service_scan", status="completed", result=result, created_at=datetime(2026, 8, 28, 12, 0),
+        finished_at=datetime(2026, 8, 28, 12, 1),
+    )
+    agent = SimpleNamespace(
+        id=19, label="sensor-sp", hostname="kali-agent", os="linux", arch="arm64", kind="real",
+        status="online", last_seen_ip="203.0.113.10", local_network_cidr="10.99.0.10/24",
+    )
+    schedule = SimpleNamespace(id=12, name="BAS semanal")
+    finding = SimpleNamespace(
+        id=9, title="BAS: Port & Service Scanning", created_at=datetime(2026, 8, 28, 12, 1), severity="low", cve=None, cvss=None,
+        details={
+            "technique_key": "port_service_scan",
+            "category": "network",
+            "risk_tier": "safe",
+            "target": "10.99.0.10",
+            "bas_job_id": 111,
+            "key_findings": ["10.99.0.10: 445/tcp open microsoft-ds"],
+            "proof": {"valid": True, "target": "10.99.0.10"},
+            "simulated": False,
+        },
+    )
+    db = MagicMock()
+
+    def query_side_effect(*args):
+        if args and args[0] is bas_reporting.Finding:
+            return _query_chain([finding])
+        if args and args[0] is bas_reporting.BasJob:
+            return _query_chain([job])
+        if args and args[0] is bas_reporting.BasAgent:
+            return _query_chain([agent])
+        if args and args[0] is bas_reporting.BasSchedule:
+            return _query_chain([schedule])
+        return _query_chain([])
+
+    db.query.side_effect = query_side_effect
+
+    rows = bas_reporting.bas_findings_view(db)
+
+    assert rows[0]["agent"]["label"] == "sensor-sp"
+    assert rows[0]["agent"]["local_network_cidr"] == "10.99.0.10/24"
+    assert rows[0]["test"]["job_id"] == 111
+    assert rows[0]["test"]["scan_job_id"] == 301
+    assert rows[0]["test"]["schedule_name"] == "BAS semanal"
+    assert rows[0]["test"]["technique_name"] == "Port & Service Scanning"
+    assert rows[0]["test"]["defensive_status"] == "detected"
+    assert rows[0]["test"]["command"] == "nmap -Pn -sT -T4 -p 445 10.99.0.10"
+
+
 def test_asset_refs_ignore_proxychains_infrastructure_ips():
     refs = bas_reporting._asset_refs_from_text(
         "\n".join([
@@ -717,6 +777,9 @@ def test_attack_path_inventory_includes_all_portscan_range_hosts_with_network_me
     assert assets["10.99.0.2"]["hostname_resolution_status"] == "resolved_from_nmap"
     assert assets["10.99.0.2"]["mac_address"] == "AA:BB:CC:11:22:33"
     assert assets["10.99.0.2"]["mac_vendor"] == "Example Vendor"
+    assert assets["10.99.0.2"]["observed_by_agents"][0]["label"] == "agente #19"
+    assert assets["10.99.0.2"]["tests_observed"][0]["technique_name"] == "Port & Service Scanning"
+    assert assets["10.99.0.2"]["tests_observed"][0]["job_id"] == 102
 
 
 def test_chain_attack_path_groups_steps_by_the_shadow_scan_job_in_order():

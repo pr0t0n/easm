@@ -1426,23 +1426,26 @@ function CmdbTab({ cc, segments, reload }) {
           </select>
           <button className="btn" onClick={() => setFilters({ port: "", host: "", ip: "", os: "", status: "" })} style={{ background: "transparent", border: `1px solid ${TV.border}`, color: TV.text }}>Limpar</button>
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "110px minmax(0,1fr) minmax(0,1fr) 82px 96px 90px 110px 100px 80px", gap: 12, padding: "0 12px 8px", borderBottom: `1px solid ${TV.border}` }}>
-          {["IP", "Hostname", "ARP/MAC", "Mask", "Status", "Porta", "Business unit", "Risco", "Achados"].map((h) => (
+        <div style={{ display: "grid", gridTemplateColumns: "110px minmax(0,1fr) minmax(0,1fr) 82px 96px 90px minmax(0,1fr) minmax(0,1fr) 80px", gap: 12, padding: "0 12px 8px", borderBottom: `1px solid ${TV.border}` }}>
+          {["IP", "Hostname", "ARP/MAC", "Mask", "Status", "Porta", "Agente", "Teste", "Achados"].map((h) => (
             <span key={h} style={{ fontWeight: 600, fontSize: 10, lineHeight: "13px", color: TV.label, textTransform: "uppercase", letterSpacing: ".6px" }}>{h}</span>
           ))}
         </div>
         {rows.length === 0 && <Empty>Nenhum host com essa porta/serviço no CMDB atual.</Empty>}
         <div style={{ maxHeight: 620, overflowY: "auto" }}>
           {rows.map(({ asset, svc }, idx) => (
-            <div key={`${asset.ip}:${svc.port}:${idx}`} style={{ display: "grid", gridTemplateColumns: "110px minmax(0,1fr) minmax(0,1fr) 82px 96px 90px 110px 100px 80px", gap: 12, alignItems: "center", padding: "10px 12px", borderBottom: `1px solid ${TV.border}` }}>
+            <div key={`${asset.ip}:${svc.port}:${idx}`} style={{ display: "grid", gridTemplateColumns: "110px minmax(0,1fr) minmax(0,1fr) 82px 96px 90px minmax(0,1fr) minmax(0,1fr) 80px", gap: 12, alignItems: "center", padding: "10px 12px", borderBottom: `1px solid ${TV.border}` }}>
               <span style={{ fontWeight: 600, fontSize: 12, lineHeight: "16px", fontFamily: "var(--font-mono,monospace)" }}>{asset.ip}</span>
-              <span title={asset.hostname_resolution_status === "not_observed" ? "Hostname não observado na saída das ferramentas" : ""} style={{ fontWeight: 400, fontSize: 12, lineHeight: "16px", color: TV.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{asset.hostname}</span>
+              <span style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
+                <span title={asset.hostname_resolution_status === "not_observed" ? "Hostname não observado na saída das ferramentas" : ""} style={{ fontWeight: 400, fontSize: 12, lineHeight: "16px", color: TV.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{asset.hostname}</span>
+                <span style={{ fontWeight: 400, fontSize: 10, lineHeight: "13px", color: TV.label, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{asset.business_unit || "sem BU"} · {asset.criticality || "sem criticidade"} · risco {asset.risk_level}</span>
+              </span>
               <span title={asset.mac_vendor || asset.arp_status || ""} style={{ fontWeight: 400, fontSize: 11, lineHeight: "15px", color: asset.mac_address ? TV.text : TV.label, fontFamily: "var(--font-mono,monospace)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{asset.mac_address || "não observado"}</span>
               <span style={{ fontWeight: 600, fontSize: 11, lineHeight: "15px", color: TV.text, fontFamily: "var(--font-mono,monospace)" }}>{asset.mask ? `/${asset.mask}` : "—"}</span>
               <Pill color={assetStatus(asset).color}>{assetStatus(asset).label}</Pill>
               <span style={{ fontWeight: 600, fontSize: 12, lineHeight: "16px", fontFamily: "var(--font-mono,monospace)" }}>{svc.port}/{svc.protocol}</span>
-              <span style={{ fontWeight: 400, fontSize: 11.5, lineHeight: "16px", color: asset.classified ? TV.text : TV.label }}>{asset.business_unit || "—"}</span>
-              <Pill color={RISK_COLOR[asset.risk_level] || TV.muted}>{asset.risk_level}</Pill>
+              <span style={{ fontWeight: 400, fontSize: 11, lineHeight: "15px", color: TV.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{asset.observed_by_agents?.map((agent) => agent.label).join(", ") || "—"}</span>
+              <span style={{ fontWeight: 400, fontSize: 11, lineHeight: "15px", color: TV.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{asset.tests_observed?.map((test) => test.technique_name || test.technique_key).slice(0, 2).join(", ") || "—"}</span>
               <div style={{ display: "flex", alignItems: "center", gap: 8, justifyContent: "flex-end" }}>
                 <span style={{ fontWeight: 400, fontSize: 11, lineHeight: "16px", color: TV.muted }}>{asset.vulnerabilities?.length || 0}</span>
                 <button className="btn" style={{ padding: "2px 8px", fontSize: 11, background: "transparent", border: `1px solid ${TV.border}`, color: TV.text }} onClick={() => openTagForm(asset)}>
@@ -1551,19 +1554,27 @@ function VulnsTab({ cc }) {
 
       <Card>
         <CardTitle sub={`${cmdbAssets.length} ativo(s) derivados de evidência/logs no CMDB BAS`}>Achados BAS · evidência observada</CardTitle>
-        <div style={{ display: "grid", gridTemplateColumns: "88px minmax(0,1.1fr) minmax(0,0.9fr) minmax(0,1.6fr) 112px", gap: 12, padding: "0 12px 8px", borderBottom: `1px solid ${TV.border}` }}>
-          {["Severidade", "Achado", "Alvo", "Observado", "Prova"].map((h) => (
+        <div style={{ display: "grid", gridTemplateColumns: "88px minmax(0,1.15fr) minmax(0,0.9fr) minmax(0,0.9fr) minmax(0,0.8fr) minmax(0,1.45fr) 104px", gap: 12, padding: "0 12px 8px", borderBottom: `1px solid ${TV.border}` }}>
+          {["Severidade", "Achado", "Teste", "Agente", "Alvo", "Observado", "Prova"].map((h) => (
             <span key={h} style={{ fontWeight: 600, fontSize: 10, lineHeight: "13px", color: TV.label, textTransform: "uppercase", letterSpacing: ".6px" }}>{h}</span>
           ))}
         </div>
         {filtered.length === 0 && <Empty>Nenhum achado BAS neste filtro.</Empty>}
         {filtered.map((f) => (
-          <div key={f.id} style={{ display: "grid", gridTemplateColumns: "88px minmax(0,1.1fr) minmax(0,0.9fr) minmax(0,1.6fr) 112px", gap: 12, alignItems: "center", padding: "10px 12px", borderBottom: `1px solid ${TV.border}` }}>
+          <div key={f.id} style={{ display: "grid", gridTemplateColumns: "88px minmax(0,1.15fr) minmax(0,0.9fr) minmax(0,0.9fr) minmax(0,0.8fr) minmax(0,1.45fr) 104px", gap: 12, alignItems: "center", padding: "10px 12px", borderBottom: `1px solid ${TV.border}` }}>
             <Pill color={SEVERITY_COLOR[f.severity] || TV.muted}>{f.severity}</Pill>
             <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
               <span style={{ fontWeight: 600, fontSize: 12, lineHeight: "16px" }}>{f.title}{f.simulated ? " (simulado)" : ""}</span>
               <span style={{ fontWeight: 400, fontSize: 10.5, lineHeight: "13px", color: TV.label }}>{f.category}</span>
             </div>
+            <span style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
+              <span style={{ fontWeight: 600, fontSize: 11.5, lineHeight: "16px", color: TV.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.test?.technique_name || f.technique_key || "—"}</span>
+              <span style={{ fontWeight: 400, fontSize: 10, lineHeight: "13px", color: TV.label, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.test?.schedule_name || (f.test?.job_id ? `job #${f.test.job_id}` : "sem execução")}</span>
+            </span>
+            <span style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
+              <span style={{ fontWeight: 600, fontSize: 11.5, lineHeight: "16px", color: TV.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.agent?.label || "—"}</span>
+              <span style={{ fontWeight: 400, fontSize: 10, lineHeight: "13px", color: TV.label, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.agent?.local_network_cidr || f.agent?.last_seen_ip || "sem telemetria"}</span>
+            </span>
             <span style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
               <span style={{ fontWeight: 600, fontSize: 11.5, lineHeight: "16px", color: TV.text, fontFamily: "var(--font-mono,monospace)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.affected_assets?.map((asset) => asset.ip).join(", ") || f.target || "—"}</span>
               <span style={{ fontWeight: 400, fontSize: 10, lineHeight: "13px", color: TV.label, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.raw_target && f.raw_target !== f.target ? `origem: ${f.raw_target}` : f.target || "sem alvo bruto"}</span>
@@ -1616,8 +1627,12 @@ function VulnsTab({ cc }) {
             </div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0,1fr))", gap: 8 }}>
               <MiniStat label="Verificação" value={f.proof_valid ? "Confirmado" : (f.proof_status || "pendente")} />
-              <MiniStat label="Referência" value={f.cve || "não aplicável"} />
-              <MiniStat label="Score externo" value={f.epss != null ? `${Math.round(f.epss * 100)}% EPSS` : "não aplicável"} />
+              <MiniStat label="Agente" value={f.agent?.label || "não informado"} />
+              <MiniStat label="Teste" value={f.test?.technique_name || f.technique_key || "não informado"} />
+              <MiniStat label="Job" value={f.test?.job_id ? `#${f.test.job_id}` : "não informado"} />
+              <MiniStat label="Status defensivo" value={f.test?.defensive_status || "tested"} />
+              <MiniStat label="MITRE" value={(f.test?.mitre_refs || f.mitre_refs || []).join(", ") || "não aplicável"} />
+              <MiniStat label="Comando" value={f.test?.command || "não registrado"} />
               <MiniStat label="Exploit público" value={f.exploit_available == null ? "não aplicável" : f.exploit_available ? "sim" : "nenhum conhecido"} color={f.exploit_available ? "#d64545" : undefined} />
             </div>
           </div>
@@ -1629,9 +1644,9 @@ function VulnsTab({ cc }) {
 
 function MiniStat({ label, value, color }) {
   return (
-    <div>
+    <div style={{ minWidth: 0 }}>
       <span style={{ fontWeight: 600, fontSize: 10, lineHeight: "13px", color: TV.label, textTransform: "uppercase", letterSpacing: ".5px" }}>{label}</span>
-      <div style={{ fontWeight: 600, fontSize: 12, lineHeight: "16px", color: color || TV.text }}>{value}</div>
+      <div title={String(value || "")} style={{ fontWeight: 600, fontSize: 12, lineHeight: "16px", color: color || TV.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{value}</div>
     </div>
   );
 }

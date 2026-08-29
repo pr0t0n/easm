@@ -25,7 +25,7 @@ from sqlalchemy.orm import Session
 from app.models.models import BasAgent, BasJob, BasNetworkSegmentTag, BasSchedule, Finding, ScanJob, ScanLog
 from app.services.bas_exclusion import BAS_FINDING_TOOL
 from app.services.bas_scheduler import _split_targets
-from app.services.bas_technique_catalog import list_techniques
+from app.services.bas_technique_catalog import get_technique, list_techniques
 from app.services.crown_jewel_analyzer import identify_crown_jewels
 
 # Compliance-framework relevance per BAS category. This is a coarse, static,
@@ -878,9 +878,19 @@ def bas_findings_view(
         if str((f.details or {}).get("bas_job_id") or "").isdigit()
     })
     jobs_by_id: dict[int, BasJob] = {}
+    agents_by_id: dict[int, BasAgent] = {}
+    schedules_by_id: dict[int, BasSchedule] = {}
     if bas_job_ids:
         for job in db.query(BasJob).filter(BasJob.id.in_(bas_job_ids)).all():
             jobs_by_id[job.id] = job
+        agent_ids = sorted({getattr(job, "agent_id", None) for job in jobs_by_id.values() if getattr(job, "agent_id", None)})
+        schedule_ids = sorted({getattr(job, "schedule_id", None) for job in jobs_by_id.values() if getattr(job, "schedule_id", None)})
+        if agent_ids:
+            for agent in db.query(BasAgent).filter(BasAgent.id.in_(agent_ids)).all():
+                agents_by_id[agent.id] = agent
+        if schedule_ids:
+            for schedule in db.query(BasSchedule).filter(BasSchedule.id.in_(schedule_ids)).all():
+                schedules_by_id[schedule.id] = schedule
 
     def observation_summary(key_findings: list[Any]) -> str:
         lines = [str(item).strip() for item in key_findings or [] if str(item).strip()]
@@ -945,6 +955,43 @@ def bas_findings_view(
         range_hint = f" no range {target}" if target else ""
         return f"Host {host_ref['ip']} testado{range_hint}; {ports}; nenhuma porta TCP BAS aberta observada."[:1000]
 
+    def agent_view(agent: BasAgent | None) -> dict[str, Any] | None:
+        if agent is None:
+            return None
+        return {
+            "id": getattr(agent, "id", None),
+            "label": getattr(agent, "label", "") or getattr(agent, "hostname", "") or f"agente #{getattr(agent, 'id', '')}",
+            "hostname": getattr(agent, "hostname", ""),
+            "os": getattr(agent, "os", ""),
+            "arch": getattr(agent, "arch", ""),
+            "kind": getattr(agent, "kind", ""),
+            "status": getattr(agent, "status", ""),
+            "last_seen_ip": getattr(agent, "last_seen_ip", None),
+            "local_network_cidr": getattr(agent, "local_network_cidr", None),
+        }
+
+    def test_view(job: BasJob | None, details: dict[str, Any]) -> dict[str, Any]:
+        technique_key = str(details.get("technique_key") or getattr(job, "technique_key", "") or "")
+        technique = get_technique(technique_key) if technique_key else None
+        schedule = schedules_by_id.get(getattr(job, "schedule_id", None)) if job is not None else None
+        result = getattr(job, "result", None) or {}
+        return {
+            "job_id": getattr(job, "id", None),
+            "scan_job_id": getattr(job, "scan_job_id", None),
+            "schedule_id": getattr(job, "schedule_id", None),
+            "schedule_name": getattr(schedule, "name", "") or "",
+            "technique_key": technique_key,
+            "technique_name": (technique or {}).get("display_name") or technique_key or details.get("category") or "",
+            "category": (technique or {}).get("category") or details.get("category") or "",
+            "risk_tier": (technique or {}).get("risk_tier") or details.get("risk_tier") or "",
+            "mitre_refs": (technique or {}).get("mitre_refs") or details.get("mitre_refs", []),
+            "status": getattr(job, "status", None),
+            "started_at": getattr(job, "created_at", None),
+            "finished_at": getattr(job, "finished_at", None),
+            "command": result.get("command") or "",
+            "defensive_status": _defensive_status_from_result(result) or "tested",
+        }
+
     results = []
     for f in rows:
         cve = f.cve
@@ -963,6 +1010,8 @@ def bas_findings_view(
             {"ip": ref["ip"], "hostname": ref["hostname"], "domain": ref["domain"], "source": ref["source"], "evidence": ref["evidence"]}
             for ref in _asset_refs_from_text(finding_text)
         ]
+        job = jobs_by_id.get(int(details.get("bas_job_id") or 0)) if str(details.get("bas_job_id") or "").isdigit() else None
+        agent = agents_by_id.get(getattr(job, "agent_id", None)) if job is not None else None
         base_row = {
             "id": f.id, "title": f.title, "created_at": f.created_at,
             "finding_id": f.id,
@@ -977,6 +1026,8 @@ def bas_findings_view(
             "key_findings": key_findings,
             "observation_summary": observation_summary(key_findings),
             "affected_assets": affected_assets,
+            "agent": agent_view(agent),
+            "test": test_view(job, details),
             "simulated": bool(details.get("simulated", True)),
             "proof": proof,
             "proof_status": details.get("proof_status") or proof.get("status"),
@@ -991,7 +1042,6 @@ def bas_findings_view(
             "exploit_available": exploit_row.get("available") if exploit_row else None,
             "exploit_refs": exploit_row.get("refs", []) if exploit_row else [],
         }
-        job = jobs_by_id.get(int(details.get("bas_job_id") or 0)) if str(details.get("bas_job_id") or "").isdigit() else None
         if (
             job is not None
             and details.get("technique_key") in {"port_service_scan", "firewall_segmentation_test"}
@@ -1292,6 +1342,8 @@ def attack_path_inventory(
                 "source_job_ids": [],
                 "agent_ids": [],
                 "schedule_ids": [],
+                "observed_by_agents": [],
+                "tests_observed": [],
                 "services": [],
                 "vulnerabilities": [],
                 "observations": [],
@@ -1307,6 +1359,32 @@ def attack_path_inventory(
         schedule_ref = getattr(schedule, "id", None) or getattr(job, "schedule_id", None)
         if schedule_ref and schedule_ref not in asset["schedule_ids"]:
             asset["schedule_ids"].append(schedule_ref)
+        agent_row = {
+            "id": getattr(agent, "id", None),
+            "label": getattr(agent, "label", "") or getattr(agent, "hostname", "") or f"agente #{getattr(agent, 'id', '')}",
+            "hostname": getattr(agent, "hostname", ""),
+            "os": getattr(agent, "os", ""),
+            "arch": getattr(agent, "arch", ""),
+            "kind": getattr(agent, "kind", ""),
+            "last_seen_ip": getattr(agent, "last_seen_ip", None),
+            "local_network_cidr": getattr(agent, "local_network_cidr", None),
+        }
+        if not any(row["id"] == agent_row["id"] for row in asset["observed_by_agents"]):
+            asset["observed_by_agents"].append(agent_row)
+        technique = get_technique(job.technique_key) if job.technique_key else None
+        test_row = {
+            "job_id": job.id,
+            "scan_job_id": getattr(job, "scan_job_id", None),
+            "schedule_id": schedule_ref,
+            "schedule_name": getattr(schedule, "name", "") or "",
+            "technique_key": job.technique_key,
+            "technique_name": (technique or {}).get("display_name") or job.technique_key,
+            "category": (technique or {}).get("category") or "",
+            "status": job.status,
+            "created_at": job.created_at,
+        }
+        if not any(row["job_id"] == test_row["job_id"] for row in asset["tests_observed"]):
+            asset["tests_observed"].append(test_row)
         return asset
 
     def enrich_asset(asset: dict[str, Any], ref: dict[str, Any]) -> None:
