@@ -613,7 +613,7 @@ def execute_schedule_run(
                     port_job.kali_job_id = str(result.get("dispatch_task_id") or "")
                     port_job.result = result
                     port_job.status = "completed" if result.get("status") == "executed" else "failed"
-                    port_job.last_error = None if port_job.status == "completed" else str(result.get("stderr") or result.get("error") or "")[:2000]
+                    port_job.last_error = None if port_job.status == "completed" else str(result.get("stderr") or result.get("error") or result.get("dispatch_error") or "")[:2000]
                     port_job.finished_at = datetime.now()
                     db.flush()
 
@@ -761,7 +761,7 @@ def execute_schedule_run(
                     job.kali_job_id = str(result.get("dispatch_task_id") or "")
                     job.result = result
                     job.status = "completed" if result.get("status") == "executed" else "failed"
-                    job.last_error = None if job.status == "completed" else str(result.get("stderr") or result.get("error") or "")[:2000]
+                    job.last_error = None if job.status == "completed" else str(result.get("stderr") or result.get("error") or result.get("dispatch_error") or "")[:2000]
                     job.finished_at = datetime.now()
                     db.flush()
 
