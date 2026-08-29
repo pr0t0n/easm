@@ -124,7 +124,7 @@ export default function BasOperationsCenterPage() {
         ? `o histórico do agendamento #${scopeId}`
         : `o histórico do agente #${scopeId}`;
     if (!window.confirm(
-      `Apagar ${scopeLabel}? Isso remove os jobs disparados e as vulnerabilidades/achados que eles geraram. Score, exposição e heatmap voltam a refletir apenas os dados restantes. Agentes e agendamentos configurados NÃO são apagados. Não pode ser desfeito.`
+      `Apagar ${scopeLabel}? Isso remove os jobs disparados e os achados que eles geraram. Score, exposição e heatmap voltam a refletir apenas os dados restantes. Agentes e agendamentos configurados NÃO são apagados. Não pode ser desfeito.`
     )) return;
     try {
       const { data } = await client.delete("/api/bas/jobs", { params });
@@ -271,7 +271,7 @@ export default function BasOperationsCenterPage() {
             </div>
 
             <div style={{ background: TV.surface2, borderRadius: 8, padding: "10px 12px" }}>
-              <div style={{ fontSize: 11, color: TV.text, fontWeight: 700, marginBottom: 8 }}>Vulnerabilidades encontradas</div>
+                  <div style={{ fontSize: 11, color: TV.text, fontWeight: 700, marginBottom: 8 }}>Achados encontrados</div>
               <div style={{ display: "grid", gap: 6 }}>
                 {observedVulnerabilities.length === 0 && <div style={{ fontSize: 11, color: TV.muted }}>Nenhuma vulnerabilidade real consolidada.</div>}
                 {observedVulnerabilities.slice(0, 5).map((vuln) => (
@@ -527,7 +527,7 @@ export default function BasOperationsCenterPage() {
           </div>
         </TvPanel>
 
-        <TvPanel title="Vulnerabilidades (BAS)" right={`${findings.length} · validado, sem prova ou simulado`} span={2}>
+        <TvPanel title="Achados (BAS)" right={`${findings.length} · validado, sem prova ou simulado`} span={2}>
           <div style={{ display: "grid", gap: 6, maxHeight: 220, overflowY: "auto" }}>
             {findings.length === 0 && <div style={{ fontSize: 11, color: TV.muted }}>Nenhuma finding do BAS ainda.</div>}
             {findings.map((f) => (

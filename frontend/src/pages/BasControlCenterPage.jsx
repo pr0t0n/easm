@@ -1,5 +1,4 @@
 // BAS Control Center — replaces BasDashboardPage + BasTestMenuPage with a
-// single 4-tab page (Painel / Implantação / CMDB / Vulnerabilidades),
 // following the "Central de controle BAS" design (Claude Design project
 // dab3e9b1-36e0-4c52-b227-a6a78d392f5e). Re-skinned onto this platform's real
 // graphite/brand-red dark palette (frontend/src/theme/basDark.js, already
@@ -198,7 +197,7 @@ export default function BasControlCenterPage() {
           <div style={{ fontWeight: 400, fontSize: 11, lineHeight: "14px", color: TV.muted }}>Breach &amp; Attack Simulation</div>
         </div>
         <div style={{ display: "flex", gap: 2, padding: 3, background: TV.surface2, border: `1px solid ${TV.border}`, borderRadius: 8 }}>
-          {[["panel", "Painel"], ["runs", "Execuções"], ["deploy", "Implantação & agendamento"], ["cmdb", "CMDB"], ["vulns", "Vulnerabilidades"]].map(([key, label]) => (
+          {[["panel", "Painel"], ["runs", "Execuções"], ["deploy", "Implantação & agendamento"], ["cmdb", "CMDB"], ["vulns", "Achados"]].map(([key, label]) => (
             <button key={key} onClick={() => setTab(key)} style={{
               border: 0, cursor: "pointer", fontWeight: 600, fontSize: 12, lineHeight: "16px", padding: "8px 14px", borderRadius: 6,
               background: tab === key ? "#e96363" : "transparent", color: tab === key ? "#fff" : TV.muted,
@@ -1487,8 +1486,6 @@ function CmdbTab({ cc, segments, reload }) {
   );
 }
 
-// ── Vulnerabilidades ──────────────────────────────────────────────────────
-
 function VulnsTab({ cc }) {
   const [sevFilter, setSevFilter] = useState("todas");
   const cmdbAssets = cc?.cmdb?.cmdb_assets || [];
@@ -1516,7 +1513,7 @@ function VulnsTab({ cc }) {
       return { ...finding, affected_assets: affectedAssets };
     });
   }, [cc?.findings, cmdbAssets]);
-  const sevCounts = { critical: 0, high: 0, medium: 0, low: 0 };
+  const sevCounts = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
   findings.forEach((f) => { if (sevCounts[f.severity] != null) sevCounts[f.severity]++; });
   const filtered = sevFilter === "todas" ? findings : findings.filter((f) => f.severity === sevFilter);
 
@@ -1535,15 +1532,15 @@ function VulnsTab({ cc }) {
       </section>
 
       <Card>
-        <CardTitle sub={`${cmdbAssets.length} ativo(s) derivados de evidência/logs no CMDB BAS`}>Achados · CVE &amp; CVSS</CardTitle>
-        <div style={{ display: "grid", gridTemplateColumns: "88px minmax(0,1.3fr) minmax(0,0.9fr) 100px 60px 90px 130px", gap: 12, padding: "0 12px 8px", borderBottom: `1px solid ${TV.border}` }}>
-          {["Severidade", "Achado", "Alvo", "CVE", "CVSS", "EPSS", "Exploit"].map((h) => (
+        <CardTitle sub={`${cmdbAssets.length} ativo(s) derivados de evidência/logs no CMDB BAS`}>Achados BAS · evidência observada</CardTitle>
+        <div style={{ display: "grid", gridTemplateColumns: "88px minmax(0,1.1fr) minmax(0,0.9fr) minmax(0,1.6fr) 112px", gap: 12, padding: "0 12px 8px", borderBottom: `1px solid ${TV.border}` }}>
+          {["Severidade", "Achado", "Alvo", "Observado", "Prova"].map((h) => (
             <span key={h} style={{ fontWeight: 600, fontSize: 10, lineHeight: "13px", color: TV.label, textTransform: "uppercase", letterSpacing: ".6px" }}>{h}</span>
           ))}
         </div>
         {filtered.length === 0 && <Empty>Nenhum achado BAS neste filtro.</Empty>}
         {filtered.map((f) => (
-          <div key={f.id} style={{ display: "grid", gridTemplateColumns: "88px minmax(0,1.3fr) minmax(0,0.9fr) 100px 60px 90px 130px", gap: 12, alignItems: "center", padding: "10px 12px", borderBottom: `1px solid ${TV.border}` }}>
+          <div key={f.id} style={{ display: "grid", gridTemplateColumns: "88px minmax(0,1.1fr) minmax(0,0.9fr) minmax(0,1.6fr) 112px", gap: 12, alignItems: "center", padding: "10px 12px", borderBottom: `1px solid ${TV.border}` }}>
             <Pill color={SEVERITY_COLOR[f.severity] || TV.muted}>{f.severity}</Pill>
             <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
               <span style={{ fontWeight: 600, fontSize: 12, lineHeight: "16px" }}>{f.title}{f.simulated ? " (simulado)" : ""}</span>
@@ -1553,11 +1550,9 @@ function VulnsTab({ cc }) {
               <span style={{ fontWeight: 600, fontSize: 11.5, lineHeight: "16px", color: TV.text, fontFamily: "var(--font-mono,monospace)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.affected_assets?.map((asset) => asset.ip).join(", ") || f.target || "—"}</span>
               <span style={{ fontWeight: 400, fontSize: 10, lineHeight: "13px", color: TV.label, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.target || "sem alvo bruto"}</span>
             </span>
-            <span style={{ fontWeight: 400, fontSize: 11.5, lineHeight: "16px", color: TV.text, fontFamily: "var(--font-mono,monospace)" }}>{f.cve || "n/a"}</span>
-            <span style={{ fontWeight: 600, fontSize: 12, lineHeight: "16px", color: f.cvss >= 9 ? "#d64545" : f.cvss >= 7 ? "#fe7b02" : f.cvss >= 4 ? "#d4a500" : TV.muted }}>{f.cvss ?? "n/a"}</span>
-            <span style={{ fontWeight: 400, fontSize: 11, lineHeight: "16px", color: TV.muted }}>{f.epss != null ? `${Math.round(f.epss * 100)}%` : "n/a"}</span>
-            <span style={{ fontWeight: 600, fontSize: 10.5, lineHeight: "14px", color: f.exploit_available ? "#d64545" : f.exploit_available === false ? "#1f8a59" : TV.muted }}>
-              {f.exploit_available == null ? "n/a" : f.exploit_available ? "público" : "nenhum conhecido"}
+            <span style={{ fontWeight: 400, fontSize: 11, lineHeight: "15px", color: TV.text, fontFamily: "var(--font-mono,monospace)", overflow: "hidden", textOverflow: "ellipsis" }}>{f.observation_summary || f.key_findings?.[0] || "sem evidência parseada"}</span>
+            <span style={{ fontWeight: 600, fontSize: 10.5, lineHeight: "14px", color: f.proof_valid ? "#1f8a59" : TV.muted }}>
+              {f.simulated ? "simulado" : f.proof_valid ? "validado" : f.proof_status || "sem prova"}
             </span>
           </div>
         ))}
@@ -1603,9 +1598,9 @@ function VulnsTab({ cc }) {
             </div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0,1fr))", gap: 8 }}>
               <MiniStat label="Verificação" value={f.proof_valid ? "Confirmado" : (f.proof_status || "pendente")} />
-              <MiniStat label="Exploit público" value={f.exploit_available == null ? "não verificado" : f.exploit_available ? "sim" : "nenhum conhecido"} color={f.exploit_available ? "#d64545" : undefined} />
-              <MiniStat label="CVE" value={f.cve || "n/a"} />
-              <MiniStat label="EPSS" value={f.epss != null ? `${Math.round(f.epss * 100)}%` : "n/a"} />
+              <MiniStat label="Referência" value={f.cve || "não aplicável"} />
+              <MiniStat label="Score externo" value={f.epss != null ? `${Math.round(f.epss * 100)}% EPSS` : "não aplicável"} />
+              <MiniStat label="Exploit público" value={f.exploit_available == null ? "não aplicável" : f.exploit_available ? "sim" : "nenhum conhecido"} color={f.exploit_available ? "#d64545" : undefined} />
             </div>
           </div>
         ))}

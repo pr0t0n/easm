@@ -5,11 +5,9 @@ import ScanSelect from "../components/ScanSelect";
 import DomainsPage from "./DomainsPage";
 import "../styles/dashboard.css";
 
-/* Vulnerabilidades — lista → detalhe (dado REAL de /api/findings/page).
-   Sem dado fabricado: campos ausentes aparecem como "—". */
-
 const SEV_LABEL = { critical: "Crítico", high: "Alto", medium: "Médio", low: "Baixo", info: "Info" };
 const SEV_ORDER = ["critical", "high", "medium", "low", "info"];
+const PAGE_SIZE = 100;
 const VSTATUS_LABEL = {
   confirmed: "Confirmado", candidate: "Candidato", hypothesis: "Hipótese", refuted: "Refutado",
   inconclusive: "Inconclusivo", blocked: "Bloqueado", not_applicable: "Não aplicável",
@@ -35,6 +33,8 @@ export default function VulnerabilitiesPage() {
   const [activeTab, setActiveTab] = useState("achados");
   const [items, setItems] = useState([]);
   const [counts, setCounts] = useState({});
+  const [totalRows, setTotalRows] = useState(0);
+  const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [sevFilter, setSevFilter] = useState("todas");
@@ -50,7 +50,7 @@ export default function VulnerabilitiesPage() {
 
   useEffect(() => {
     setLoading(true);
-    const params = { limit: 500, sort: "severity" };
+    const params = { limit: PAGE_SIZE, offset: (page - 1) * PAGE_SIZE, sort: "severity" };
     if (sevFilter !== "todas") params.severity = sevFilter;
     if (scanId) params.scan_id = scanId;
     if (accessGroupId) params.access_group_id = accessGroupId;
@@ -59,13 +59,20 @@ export default function VulnerabilitiesPage() {
       .then(({ data }) => {
         setItems(Array.isArray(data?.items) ? data.items : []);
         setCounts(data?.severity_counts || {});
+        setTotalRows(Number(data?.total || 0));
       })
-      .catch(() => setError("Falha ao carregar vulnerabilidades."))
+      .catch(() => setError("Falha ao carregar achados."))
       .finally(() => setLoading(false));
-  }, [sevFilter, scanId, accessGroupId]);
+  }, [sevFilter, scanId, accessGroupId, page]);
 
   const total = useMemo(() => SEV_ORDER.reduce((a, k) => a + Number(counts[k] || 0), 0), [counts]);
+  const pageCount = Math.max(1, Math.ceil(totalRows / PAGE_SIZE));
+  const safePage = Math.min(page, pageCount);
   const canAdjudicate = useMemo(() => currentUserIsAdmin(), []);
+
+  useEffect(() => {
+    setPage(1);
+  }, [sevFilter, scanId, accessGroupId]);
 
   useEffect(() => {
     if (!selected?.id) {
@@ -113,7 +120,7 @@ export default function VulnerabilitiesPage() {
   }
 
   if (loading) {
-    return <main className="dash"><div className="content" style={{ padding: "32px 40px" }}><div className="dash-state"><div><div className="spin" /><p className="st-title">Carregando vulnerabilidades…</p></div></div></div></main>;
+    return <main className="dash"><div className="content" style={{ padding: "32px 40px" }}><div className="dash-state"><div><div className="spin" /><p className="st-title">Carregando achados…</p></div></div></div></main>;
   }
   if (error) {
     return <main className="dash"><div className="content" style={{ padding: "32px 40px" }}><div className="dash-err">{error}</div></div></main>;
@@ -339,7 +346,7 @@ export default function VulnerabilitiesPage() {
     return (
       <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
         <div style={{ padding: "24px 40px 0", background: "var(--surface)", borderBottom: "1px solid var(--line)" }}>
-          <div className="sk-eyebrow" style={{ marginBottom: 4 }}>Vulnerabilidades</div>
+          <div className="sk-eyebrow" style={{ marginBottom: 4 }}>Finds / Achados</div>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
             <div className="vuln-tabs">
               <button type="button" className="vuln-tab" onClick={() => setActiveTab("achados")}>Lista de achados</button>
@@ -364,9 +371,9 @@ export default function VulnerabilitiesPage() {
       <div className="content cockpit-shell">
         <section className="cockpit-page-head" style={{ paddingBottom: 0 }}>
           <div>
-            <div className="sk-eyebrow">Vulnerabilidades</div>
+            <div className="sk-eyebrow">Finds / Achados</div>
             <h1>Achados do ambiente</h1>
-            <p className="cockpit-sub">{total} achado(s) · clique para ver evidência e recomendação</p>
+            <p className="cockpit-sub">{total} achado(s) · {totalRows} no filtro atual · clique para ver evidência e recomendação</p>
           </div>
           <div className="cockpit-actions">
             <CompanyScopeSelect value={accessGroupId} onChange={(value) => { setAccessGroupId(value); setScanId(""); }} />
@@ -386,14 +393,14 @@ export default function VulnerabilitiesPage() {
               <span className={`sk-dot sk-dot--${s}`} style={{ marginRight: 6 }} />{SEV_LABEL[s]} {Number(counts[s] || 0)}
             </button>
           ))}
-          <span className="surface-count-note">{items.length} no filtro atual</span>
+          <span className="surface-count-note">{items.length} de {totalRows} no filtro atual</span>
         </section>
 
         <section className="sk-panel surface-table-panel">
           <div className="attack-table-wrap">
             <table className="attack-table">
               <thead>
-                <tr><th>Severidade</th><th>Vulnerabilidade</th><th>Alvo</th><th>CVE</th><th>CVSS</th><th>MITRE</th><th>Evidência</th></tr>
+                <tr><th>Severidade</th><th>Achado</th><th>Alvo</th><th>CVE</th><th>CVSS</th><th>MITRE</th><th>Evidência</th></tr>
               </thead>
               <tbody>
                 {items.length === 0 && <tr><td colSpan={7}>Nenhum achado no filtro atual.</td></tr>}
@@ -414,6 +421,15 @@ export default function VulnerabilitiesPage() {
               </tbody>
             </table>
           </div>
+          {totalRows > PAGE_SIZE && (
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "12px 14px", borderTop: "1px solid var(--line)" }}>
+              <span className="sk-mono" style={{ fontSize: 12, color: "var(--ink-muted)" }}>Página {safePage} de {pageCount}</span>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button className="sk-btn-ghost" type="button" disabled={safePage <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>Anterior</button>
+                <button className="sk-btn-ghost" type="button" disabled={safePage >= pageCount} onClick={() => setPage((p) => Math.min(pageCount, p + 1))}>Próxima</button>
+              </div>
+            </div>
+          )}
         </section>
       </div>
     </main>

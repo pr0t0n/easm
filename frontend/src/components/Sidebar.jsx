@@ -38,7 +38,7 @@ const NAV_GROUPS = [
       { to: "/superficie", label: "Superfície de ataque", icon: "superficie" },
       { to: "/attack-graph", label: "Attack Graph", icon: "attackGraph" },
       { to: "/joias",      label: "Joias da Coroa",       icon: "joias" },
-      { to: "/vulnerabilidades", label: "Vulnerabilidades", icon: "vulns" },
+      { to: "/achados", label: "Finds / Achados", icon: "vulns" },
     ],
   },
   {

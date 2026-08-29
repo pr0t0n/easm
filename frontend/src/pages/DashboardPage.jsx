@@ -1149,7 +1149,7 @@ export default function DashboardPage() {
               <thead>
                 <tr>
                   <th>Severidade</th>
-                  <th>Vulnerabilidade</th>
+                  <th>Achado</th>
                   <th>Alvo</th>
                   <th>CVE</th>
                   <th>CVSS</th>
@@ -1160,7 +1160,7 @@ export default function DashboardPage() {
               </thead>
               <tbody>
                 {attackQueue.length === 0 && (
-                  <tr><td colSpan={8}>Sem vulnerabilidades priorizadas no escopo atual.</td></tr>
+                  <tr><td colSpan={8}>Sem achados priorizados no escopo atual.</td></tr>
                 )}
                 {attackQueue.map((item, idx) => (
                   <tr key={`${item.id}-${idx}`}>

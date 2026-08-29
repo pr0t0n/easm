@@ -145,7 +145,7 @@ export default function BasReportPage() {
         </section>
 
         <section className="report-section">
-          <div className="sk-eyebrow">03 · Vulnerabilidades por severidade</div>
+          <div className="sk-eyebrow">03 · Achados por severidade</div>
           <span className="report-sub">severidade derivada do conteúdo real observado por técnica — nunca um valor fixo</span>
           <div style={{ display: "grid", gap: 8, marginTop: 12 }}>
             {SEV_ORDER.filter((s) => s !== "info").map((sev) => {
@@ -287,7 +287,7 @@ export default function BasReportPage() {
         </section>
 
         <section className="report-section">
-          <div className="sk-eyebrow">09 · Achados, vulnerabilidades e recomendações</div>
+          <div className="sk-eyebrow">09 · Achados, evidências e recomendações</div>
           <span className="report-sub">clique num achado validado para ver o que foi observado de fato e como corrigir</span>
           <div className="attack-table-wrap">
             <table className="attack-table report-plan">

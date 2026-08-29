@@ -4,14 +4,15 @@ import client from "../api/client";
 import { authStore } from "../store/auth";
 
 const PAGE_META = {
-  "/":               { eyebrow: "Overview · Dashboard", title: "Postura de risco, em tempo real.", sub: "Pipeline LangGraph · Kali Runner · análise contínua de vulnerabilidades" },
+  "/":               { eyebrow: "Overview · Dashboard", title: "Postura de risco, em tempo real.", sub: "Pipeline LangGraph · Kali Runner · análise contínua de achados" },
   "/targets":        { eyebrow: "Vulnerability Ops · Targets", title: "Alvos Autorizados",       sub: "Inventário de domínios e ativos sob escopo" },
   "/scan":           { eyebrow: "Vulnerability Ops · Scans",   title: "Scans e Agendamentos",    sub: "Execução unitária e recorrente em uma única operação" },
   "/phase-monitor":  { eyebrow: "Vulnerability Ops · Phases",  title: "Monitor de Fases",        sub: "Cobertura de tools por fase do pipeline 22-step" },
   "/agendamento":    { eyebrow: "Vulnerability Ops · Schedules", title: "Agendamentos",          sub: "Janelas e cadência de scans recorrentes" },
   "/operacional":    { eyebrow: "Operations · Runtime",       title: "Centro Operacional",       sub: "Fases, agentes, jobs, workers, logs e evolução de ataque" },
-  "/vulnerabilidades": { eyebrow: "Security · Vulns",        title: "Vulnerabilidades",          sub: "Achados priorizados por severidade, FAIR e AGE" },
-  "/dominios":       { eyebrow: "Security · Domains",      title: "Domínios",                  sub: "Domínios, subdomínios e vulnerabilidades por scan" },
+  "/achados":        { eyebrow: "Security · Findings",     title: "Finds / Achados",           sub: "Achados priorizados por severidade, FAIR e AGE" },
+  "/vulnerabilidades": { eyebrow: "Security · Findings",   title: "Finds / Achados",           sub: "Achados priorizados por severidade, FAIR e AGE" },
+  "/dominios":       { eyebrow: "Security · Domains",      title: "Domínios",                  sub: "Domínios, subdomínios e achados por scan" },
   "/evolucao":       { eyebrow: "Security · Evolution",      title: "Attack Evolution",          sub: "Trajetória da postura de segurança ao longo do tempo" },
   "/aprendizado":    { eyebrow: "Security · Learning",        title: "Aprendizado de Vulnerabilidades", sub: "Técnicas revisadas antes de entrar na missão dos agentes" },
   "/relatorios":     { eyebrow: "Security · Report",         title: "Relatório Único",           sub: "Executivo, técnico, escopo, revisão, BAS e evidências em uma única visão" },

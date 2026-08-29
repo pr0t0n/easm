@@ -97,10 +97,11 @@ export default function App() {
                     <Route path="/relatorios/bas" element={<BasReportPage />} />
                     <Route path="/evolucao" element={<AttackEvolutionPage />} />
                     <Route path="/targets" element={<Navigate to="/scan" replace />} />
-                    <Route path="/vulnerabilidades" element={<VulnerabilitiesPage />} />
+                    <Route path="/achados" element={<VulnerabilitiesPage />} />
+                    <Route path="/vulnerabilidades" element={<Navigate to="/achados" replace />} />
                     <Route path="/superficie" element={<AttackSurfacePage />} />
                     <Route path="/attack-graph" element={<AttackGraphPage />} />
-                    <Route path="/dominios" element={<Navigate to="/vulnerabilidades" replace />} />
+                    <Route path="/dominios" element={<Navigate to="/achados" replace />} />
                     <Route path="/joias" element={<CrownJewelsPage />} />
                     <Route path="/agendamento" element={<AdminOnly><SchedulingPage /></AdminOnly>} />
                     <Route path="/usuarios" element={<AdminOnly><UserManagementPage /></AdminOnly>} />

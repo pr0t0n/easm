@@ -1057,7 +1057,7 @@ def control_center(
         "attack_heatmap": bas_reporting.attack_heatmap(db, **kwargs),
         "protection_layers": bas_reporting.protection_layers(db, **kwargs),
         "cmdb": bas_reporting.attack_path_inventory(db, **kwargs),
-        "findings": bas_reporting.bas_findings_view(db, **kwargs, limit=200),
+        "findings": bas_reporting.bas_findings_view(db, **kwargs, limit=500),
     }
 
 
@@ -1202,7 +1202,7 @@ def operations_center(db: Session = Depends(get_db), current_user: User = Depend
         "framework_coverage": bas_reporting.framework_coverage(db, group_ids=group_ids),
         "control_matrix": bas_reporting.control_matrix(db, group_ids=group_ids),
         "exposure": bas_reporting.exposure_summary(db, group_ids=group_ids),
-        "findings": bas_reporting.bas_findings_view(db, group_ids=group_ids),
+        "findings": bas_reporting.bas_findings_view(db, group_ids=group_ids, limit=500),
         "action_priorities": bas_reporting.action_priorities(db, group_ids=group_ids),
         "attack_path_inventory": bas_reporting.attack_path_inventory(db, group_ids=group_ids),
         "port_scan_observability": bas_reporting.port_scan_observability(db, group_ids=group_ids),
