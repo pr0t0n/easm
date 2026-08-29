@@ -26,7 +26,11 @@ def _control_observed(technique: dict[str, Any], result: dict[str, Any], key_fin
         return True
     if result.get("open_ports"):
         return True
-    if key_findings and any(str(item).startswith("Nmap concluiu sem portas abertas") for item in key_findings):
+    if key_findings and any(
+        str(item).startswith("Nmap concluiu sem portas abertas")
+        or str(item).startswith("Nenhuma das portas TCP BAS foi observada aberta")
+        for item in key_findings
+    ):
         return True
     if key_findings and technique.get("category") in {"cloud", "cloud_identity", "saas", "identity"}:
         return True

@@ -758,6 +758,27 @@ def test_extract_key_findings_pulls_open_ports_from_nmap():
     assert findings == ["3000/tcp open  http"]
 
 
+def test_extract_key_findings_describes_nmap_no_open_ports_observation():
+    result = {
+        "target": "10.125.143.240/28",
+        "command": "proxychains4 -f /tmp/proxy.conf nmap -Pn -sT -T4 --max-retries 1 --host-timeout 5s --open -p 22,80,88,389,443,445,464,636,3389,3268,3269 10.125.143.240/28",
+        "nmap_summary": {"ip_addresses": 16, "hosts_up": 16, "duration_seconds": 1.07},
+        "open_ports": [],
+        "stdout": "Starting Nmap 7.99\nNmap done: 16 IP addresses (16 hosts up) scanned in 1.07 seconds\n",
+        "stderr": "[proxychains] Dynamic chain  ...  172.20.0.27:20021  ...  10.125.143.241:22\n",
+    }
+
+    findings = _extract_key_findings("port_service_scan", "network", result)
+
+    assert "Alvo varrido: 10.125.143.240/28" in findings
+    assert "Portas TCP testadas: 22,80,88,389,443,445,464,636,3389,3268,3269" in findings
+    assert "Resumo nmap: 16 IP(s) varrido(s), 16 host(s) tratados como ativos pelo -Pn, duração 1.07s." in findings
+    assert "Nenhuma das portas TCP BAS foi observada aberta no alvo." in findings
+    assert "Saída nmap: Nmap done: 16 IP addresses (16 hosts up) scanned in 1.07 seconds" in findings
+    assert "Túnel BAS/proxychains: 1 tentativa(s) TCP via relay; amostras: 10.125.143.241:22." in findings
+    assert _derive_severity("port_service_scan", findings) == "info"
+
+
 def test_smb_cme_findings_and_severity_reflect_signing_and_smbv1():
     stdout = "\n".join([
         "SMB                      10.125.133.225  445    BR-SEN1-PC0214   [*] Windows 11 / Server 2025 Build 26100 x64 (name:BR-SEN1-PC0214) (domain:falconcorp.net) (signing:False) (SMBv1:False)",

@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 import re
 import ipaddress
+import shlex
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -109,6 +110,94 @@ def _is_failure_only_output(lines: list[str]) -> bool:
     return all(any(marker in ln.lower() for marker in _FAILURE_ONLY_MARKERS) for ln in lines)
 
 
+def _extract_nmap_command_ports(command: str) -> str:
+    try:
+        parts = shlex.split(str(command or ""))
+    except ValueError:
+        parts = str(command or "").split()
+    for idx, part in enumerate(parts):
+        if part == "-p" and idx + 1 < len(parts):
+            return parts[idx + 1].strip()
+        if part.startswith("-p") and len(part) > 2:
+            return part[2:].strip()
+    return ""
+
+
+def _extract_nmap_done_line(stdout: str) -> str:
+    for line in str(stdout or "").splitlines():
+        clean = line.strip()
+        if clean.startswith("Nmap done:"):
+            return clean
+    return ""
+
+
+def _extract_proxychains_summary(stderr: str) -> str:
+    attempts = 0
+    samples: list[str] = []
+    for line in str(stderr or "").splitlines():
+        if "Dynamic chain" not in line:
+            continue
+        endpoints = re.findall(r"(?:\d{1,3}\.){3}\d{1,3}:\d+", line)
+        if not endpoints:
+            continue
+        attempts += 1
+        endpoint = endpoints[-1]
+        if endpoint not in samples and len(samples) < 8:
+            samples.append(endpoint)
+    if not attempts:
+        return ""
+    sample_text = f"; amostras: {', '.join(samples)}" if samples else ""
+    return f"Túnel BAS/proxychains: {attempts} tentativa(s) TCP via relay{sample_text}."
+
+
+def _port_scan_observation_lines(result: dict[str, Any]) -> list[str]:
+    findings: list[str] = []
+    target = str(result.get("target") or "").strip()
+    command = str(result.get("command") or "").strip()
+    if target:
+        findings.append(f"Alvo varrido: {target}")
+    ports = _extract_nmap_command_ports(command)
+    if ports:
+        findings.append(f"Portas TCP testadas: {ports}")
+    summary = result.get("nmap_summary") or {}
+    if isinstance(summary, dict) and summary:
+        scanned = summary.get("ip_addresses") or summary.get("reported_hosts") or 0
+        hosts_up = summary.get("hosts_up") or summary.get("reported_hosts") or 0
+        duration = summary.get("duration_seconds")
+        duration_text = f", duração {duration}s" if duration not in (None, "") else ""
+        findings.append(f"Resumo nmap: {scanned} IP(s) varrido(s), {hosts_up} host(s) tratados como ativos pelo -Pn{duration_text}.")
+    open_ports = result.get("open_ports") or []
+    if isinstance(open_ports, list) and open_ports:
+        for item in open_ports[:50]:
+            if not isinstance(item, dict):
+                continue
+            host = str(item.get("host") or item.get("ip") or item.get("target") or "").strip()
+            port = str(item.get("port") or "").strip()
+            protocol = str(item.get("protocol") or "tcp").strip()
+            service = str(item.get("service") or item.get("name") or "").strip()
+            if host and port:
+                findings.append(f"{host}: {port}/{protocol} open {service}".strip())
+    elif summary:
+        findings.append("Nenhuma das portas TCP BAS foi observada aberta no alvo.")
+    done_line = _extract_nmap_done_line(str(result.get("stdout") or ""))
+    if done_line:
+        findings.append(f"Saída nmap: {done_line}")
+    proxy_summary = _extract_proxychains_summary(str(result.get("stderr") or ""))
+    if proxy_summary:
+        findings.append(proxy_summary)
+    if command:
+        findings.append(f"Comando executado: {command}")
+    return findings[:60]
+
+
+def _is_port_scan_no_open_observation(key_findings: list[str]) -> bool:
+    return bool(key_findings) and any(
+        str(ln).startswith("Nenhuma das portas TCP BAS foi observada aberta")
+        or str(ln).startswith("Nmap concluiu sem portas abertas")
+        for ln in key_findings
+    )
+
+
 def _extract_key_findings(technique_key: str, category: str, result: dict[str, Any]) -> list[str]:
     """Pulls the actually meaningful lines out of a real tool's raw stdout
     instead of leaving the report to show just a title/status -- this is
@@ -118,25 +207,9 @@ def _extract_key_findings(technique_key: str, category: str, result: dict[str, A
     rather than guessing when a tool's output doesn't match any known
     pattern here."""
     if technique_key in ("port_service_scan", "firewall_segmentation_test"):
-        open_ports = result.get("open_ports") or []
-        if isinstance(open_ports, list) and open_ports:
-            findings = []
-            for item in open_ports[:50]:
-                if not isinstance(item, dict):
-                    continue
-                host = str(item.get("host") or item.get("ip") or item.get("target") or "").strip()
-                port = str(item.get("port") or "").strip()
-                protocol = str(item.get("protocol") or "tcp").strip()
-                service = str(item.get("service") or item.get("name") or "").strip()
-                if host and port:
-                    findings.append(f"{host}: {port}/{protocol} open {service}".strip())
-            if findings:
-                return findings
-        summary = result.get("nmap_summary") or {}
-        if isinstance(summary, dict) and summary:
-            scanned = summary.get("ip_addresses") or summary.get("reported_hosts") or 0
-            hosts_up = summary.get("hosts_up") or summary.get("reported_hosts") or 0
-            return [f"Nmap concluiu sem portas abertas: {scanned} IP(s) varrido(s), {hosts_up} host(s) tratado(s) como ativo(s)."]
+        findings = _port_scan_observation_lines(result)
+        if findings:
+            return findings
 
     stdout = str(result.get("stdout") or "")
     lines = [ln.strip() for ln in stdout.splitlines() if ln.strip()]
@@ -220,7 +293,7 @@ def _derive_severity(technique_key: str, key_findings: list[str]) -> str:
     if technique_key == "owasp_web_app_scan":
         return "medium"  # real misconfiguration-class findings (headers, CORS, etc.)
     if technique_key in ("port_service_scan", "firewall_segmentation_test", "network_share_discovery", "lateral_movement_simulation_safe"):
-        if all(str(ln).startswith("Nmap concluiu sem portas abertas") for ln in key_findings):
+        if _is_port_scan_no_open_observation(key_findings):
             return "info"
         return "low"  # real reachability/exposure, not itself a vulnerability
     if technique_key == "safe_credential_checks":

@@ -77,3 +77,25 @@ def test_bas_proof_accepts_cloud_identity_posture_evidence_with_info_severity():
 
     assert proof["valid"] is True
     assert proof["requirements"]["impact_or_control_observed"] is True
+
+
+def test_bas_proof_accepts_no_open_ports_nmap_observation():
+    proof = build_bas_proof(
+        technique=get_technique("port_service_scan"),
+        job=_job(target="10.125.143.240/28"),
+        agent=SimpleNamespace(id=5, kind="real"),
+        result={
+            "status": "executed",
+            "command": "nmap -Pn -sT -T4 --open -p 22,80 10.125.143.240/28",
+            "stdout": "Nmap done: 16 IP addresses (16 hosts up) scanned in 1.07 seconds\n",
+        },
+        key_findings=[
+            "Alvo varrido: 10.125.143.240/28",
+            "Portas TCP testadas: 22,80",
+            "Nenhuma das portas TCP BAS foi observada aberta no alvo.",
+        ],
+        severity="info",
+    )
+
+    assert proof["valid"] is True
+    assert proof["requirements"]["impact_or_control_observed"] is True
