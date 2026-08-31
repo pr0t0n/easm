@@ -7,7 +7,14 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from app.services.bas_exclusion import BAS_FINDING_TOOL, exclude_simulated, is_bas_finding, is_simulated_bas_finding
+from app.services.bas_exclusion import (
+    BAS_FINDING_TOOL,
+    BAS_QUARANTINE_FLAG,
+    exclude_simulated,
+    is_bas_finding,
+    is_quarantined_bas_finding,
+    is_simulated_bas_finding,
+)
 
 
 class _FakeQuery:
@@ -25,6 +32,7 @@ def test_exclude_simulated_filters_on_both_tool_and_the_simulated_flag():
     compiled = str(query.filters[0].compile(compile_kwargs={"literal_binds": True}))
     assert "tool" in compiled
     assert "simulated" in compiled
+    assert BAS_QUARANTINE_FLAG in compiled
 
 
 def test_is_bas_finding_true_for_bas_tool():
@@ -61,3 +69,13 @@ def test_is_simulated_bas_finding_defaults_true_when_details_missing():
     fail toward exclusion, never toward silently counting an ambiguous row."""
     finding = SimpleNamespace(tool=BAS_FINDING_TOOL, details=None)
     assert is_simulated_bas_finding(finding) is True
+
+
+def test_is_quarantined_bas_finding_true_for_legacy_targeting():
+    finding = SimpleNamespace(tool=BAS_FINDING_TOOL, details={BAS_QUARANTINE_FLAG: True, "simulated": False})
+    assert is_quarantined_bas_finding(finding) is True
+
+
+def test_is_quarantined_bas_finding_false_for_non_bas_finding():
+    finding = SimpleNamespace(tool="nuclei", details={BAS_QUARANTINE_FLAG: True})
+    assert is_quarantined_bas_finding(finding) is False

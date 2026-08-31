@@ -1165,6 +1165,7 @@ def dashboard_summary(db: Session = Depends(get_db), current_user: User = Depend
 def operations_center(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     from app.api.deps import user_company_group_ids
     from app.services import bas_reporting
+    from app.services.bas_exclusion import exclude_quarantined_bas_jobs
     from app.services.bas_technique_catalog import list_techniques
 
     agents = apply_company_scope(db.query(BasAgent), current_user, BasAgent).all()
@@ -1173,15 +1174,16 @@ def operations_center(db: Session = Depends(get_db), current_user: User = Depend
     # Full history (uncapped) feeds technique_stats -- capping this would
     # under-count older techniques. "Jobs recentes" below is a separate,
     # explicitly-capped query so the two don't fight over one limit.
-    all_jobs = apply_company_scope(db.query(BasJob), current_user, BasJob).all()
-    recent_jobs = apply_company_scope(db.query(BasJob), current_user, BasJob) \
+    all_jobs_query = exclude_quarantined_bas_jobs(apply_company_scope(db.query(BasJob), current_user, BasJob))
+    all_jobs = all_jobs_query.all()
+    recent_jobs = exclude_quarantined_bas_jobs(apply_company_scope(db.query(BasJob), current_user, BasJob)) \
         .order_by(BasJob.created_at.desc()).limit(50).all()
     # A job now becomes visible here the instant it's dispatched (bas_scheduler
     # commits before the blocking kali_runner call, not just after it returns)
     # -- these are the ones actually in flight right now, separate from the
     # already-resolved "recent_jobs" list above so the UI can show a live
     # "running now" section instead of only ever showing final outcomes.
-    active_jobs = apply_company_scope(db.query(BasJob), current_user, BasJob) \
+    active_jobs = exclude_quarantined_bas_jobs(apply_company_scope(db.query(BasJob), current_user, BasJob)) \
         .filter(BasJob.status.in_(["queued", "dispatched_to_kali", "running"])) \
         .order_by(BasJob.dispatched_at.desc()).all()
     group_ids = None if current_user.is_admin else user_company_group_ids(current_user)

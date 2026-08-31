@@ -23,7 +23,7 @@ from urllib.parse import urlparse
 from sqlalchemy.orm import Session
 
 from app.models.models import BasAgent, BasJob, BasNetworkSegmentTag, BasSchedule, Finding, ScanJob, ScanLog
-from app.services.bas_exclusion import BAS_FINDING_TOOL
+from app.services.bas_exclusion import BAS_FINDING_TOOL, exclude_quarantined_bas_jobs, exclude_simulated
 from app.services.bas_scheduler import _split_targets
 from app.services.bas_technique_catalog import get_technique, list_techniques
 from app.services.crown_jewel_analyzer import identify_crown_jewels
@@ -510,6 +510,7 @@ def _real_agent_technique_keys(
         .filter(BasAgent.kind == "real")
         .distinct()
     )
+    query = exclude_quarantined_bas_jobs(query)
     if group_ids is not None:
         query = query.filter(BasJob.access_group_id.in_(group_ids))
     if schedule_id is not None:
@@ -654,6 +655,7 @@ def control_matrix(
 ) -> dict[str, Any]:
     tags = _segment_tags(db, group_ids=group_ids)
     query = db.query(BasJob, BasAgent).join(BasAgent, BasAgent.id == BasJob.agent_id).filter(BasAgent.kind == "real")
+    query = exclude_quarantined_bas_jobs(query)
     if group_ids is not None:
         query = query.filter(BasJob.access_group_id.in_(group_ids))
     if schedule_id is not None:
@@ -769,7 +771,7 @@ def exposure_summary(
     """Raw dispatch ACTIVITY (including stub-agent smoke-test traffic) --
     unlike framework_coverage/risk_score, this never claims coverage was
     proven, so blending stub + real dispatches here is fine."""
-    query = db.query(BasJob)
+    query = exclude_quarantined_bas_jobs(db.query(BasJob))
     if group_ids is not None:
         query = query.filter(BasJob.access_group_id.in_(group_ids))
     if schedule_id is not None:
@@ -809,6 +811,7 @@ def port_scan_observability(
             BasJob.status == "completed",
         )
     )
+    query = exclude_quarantined_bas_jobs(query)
     if group_ids is not None:
         query = query.filter(BasJob.access_group_id.in_(group_ids))
     if schedule_id is not None:
@@ -854,7 +857,7 @@ def port_scan_observability(
 def bas_findings_view(
     db: Session, *, group_ids: list[int] | None = None, schedule_id: int | None = None, limit: int = 100
 ) -> list[dict[str, Any]]:
-    query = db.query(Finding).filter(Finding.tool == BAS_FINDING_TOOL).order_by(Finding.created_at.desc())
+    query = exclude_simulated(db.query(Finding)).filter(Finding.tool == BAS_FINDING_TOOL).order_by(Finding.created_at.desc())
     if group_ids is not None or schedule_id is not None:
         query = query.join(BasJob, BasJob.finding_id == Finding.id)
         if group_ids is not None:
@@ -1200,6 +1203,7 @@ def action_priorities(
         .join(BasSchedule, BasSchedule.id == BasJob.schedule_id)
         .filter(BasAgent.kind == "real", BasJob.status == "completed")
     )
+    query = exclude_quarantined_bas_jobs(query)
     if group_ids is not None:
         query = query.filter(BasJob.access_group_id.in_(group_ids))
     if schedule_id is not None:
@@ -1358,6 +1362,7 @@ def attack_path_inventory(
         .outerjoin(BasSchedule, BasSchedule.id == BasJob.schedule_id)
         .filter(BasAgent.kind == "real", BasJob.status == "completed")
     )
+    query = exclude_quarantined_bas_jobs(query)
     if group_ids is not None:
         query = query.filter(BasJob.access_group_id.in_(group_ids))
     if schedule_id is not None:
@@ -1771,6 +1776,7 @@ def protection_layers(
         .join(BasAgent, BasAgent.id == BasJob.agent_id)
         .filter(BasAgent.kind == "real", BasJob.status.in_(["completed", "failed"]))
     )
+    query = exclude_quarantined_bas_jobs(query)
     if group_ids is not None:
         query = query.filter(BasJob.access_group_id.in_(group_ids))
     if schedule_id is not None:
@@ -1842,7 +1848,7 @@ def crown_jewels_view(
     # BasJob.target (the actual per-dispatch target) is the accurate count
     # now -- a schedule's raw target_hint is no longer 1:1 with what a single
     # job ran against.
-    job_count_query = db.query(BasJob)
+    job_count_query = exclude_quarantined_bas_jobs(db.query(BasJob))
     if schedule_id is not None:
         job_count_query = job_count_query.filter(BasJob.schedule_id == schedule_id)
     job_counts = Counter(row.target for row in job_count_query.all() if row.target)
@@ -1867,6 +1873,7 @@ def risk_score(
     vulnerability was proven. Jobs still queued/running/skipped are excluded
     from the ratio -- they have no resolved outcome yet."""
     query = db.query(BasJob).join(BasAgent, BasAgent.id == BasJob.agent_id).filter(BasAgent.kind == "real")
+    query = exclude_quarantined_bas_jobs(query)
     if group_ids is not None:
         query = query.filter(BasJob.access_group_id.in_(group_ids))
     if schedule_id is not None:
@@ -1904,6 +1911,7 @@ def attack_heatmap(
         db.query(BasJob.technique_key, BasJob.status, BasJob.result, BasAgent.kind)
         .join(BasAgent, BasAgent.id == BasJob.agent_id)
     )
+    query = exclude_quarantined_bas_jobs(query)
     if group_ids is not None:
         query = query.filter(BasJob.access_group_id.in_(group_ids))
     if schedule_id is not None:
@@ -2053,6 +2061,7 @@ def resilience_score(
         query = db.query(BasJob).join(BasAgent, BasAgent.id == BasJob.agent_id).filter(
             BasAgent.kind == "real", BasJob.created_at >= start, BasJob.created_at < end,
         )
+        query = exclude_quarantined_bas_jobs(query)
         if group_ids is not None:
             query = query.filter(BasJob.access_group_id.in_(group_ids))
         if schedule_id is not None:
@@ -2087,6 +2096,7 @@ def score_trend(
         query = db.query(BasJob).join(BasAgent, BasAgent.id == BasJob.agent_id).filter(
             BasAgent.kind == "real", BasJob.created_at >= start, BasJob.created_at < end,
         )
+        query = exclude_quarantined_bas_jobs(query)
         if group_ids is not None:
             query = query.filter(BasJob.access_group_id.in_(group_ids))
         if schedule_id is not None:
@@ -2124,6 +2134,7 @@ def chain_attack_path(
         .join(BasAgent, BasAgent.id == BasSchedule.agent_id)
         .filter(BasSchedule.chain_key.isnot(None))
     )
+    query = exclude_quarantined_bas_jobs(query)
     if group_ids is not None:
         query = query.filter(BasJob.access_group_id.in_(group_ids))
     if schedule_id is not None:

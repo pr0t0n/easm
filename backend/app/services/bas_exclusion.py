@@ -23,11 +23,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import and_, not_
+from sqlalchemy import and_, func, not_, or_
 
-from app.models.models import Finding
+from app.models.models import BasJob, Finding
 
 BAS_FINDING_TOOL = "bas-agent"
+BAS_QUARANTINE_FLAG = "bas_legacy_targeting_quarantined"
 
 
 def exclude_simulated(query):
@@ -38,9 +39,16 @@ def exclude_simulated(query):
     return query.filter(
         not_(and_(
             Finding.tool == BAS_FINDING_TOOL,
-            Finding.details["simulated"].astext == "true",
+            or_(
+                func.coalesce(Finding.details["simulated"].astext, "false") == "true",
+                func.coalesce(Finding.details[BAS_QUARANTINE_FLAG].astext, "false") == "true",
+            ),
         ))
     )
+
+
+def exclude_quarantined_bas_jobs(query):
+    return query.filter(func.coalesce(BasJob.result[BAS_QUARANTINE_FLAG].astext, "false") != "true")
 
 
 def is_bas_finding(finding: Any) -> bool:
@@ -52,3 +60,10 @@ def is_simulated_bas_finding(finding: Any) -> bool:
         return False
     details = getattr(finding, "details", None) or {}
     return bool(details.get("simulated", True))
+
+
+def is_quarantined_bas_finding(finding: Any) -> bool:
+    if not is_bas_finding(finding):
+        return False
+    details = getattr(finding, "details", None) or {}
+    return bool(details.get(BAS_QUARANTINE_FLAG))
