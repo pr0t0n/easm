@@ -96,6 +96,9 @@ export default function BasOperationsCenterPage() {
   const exposure = center?.exposure || {};
   const findings = center?.findings || [];
   const actionPriorities = center?.action_priorities || [];
+  const completionActivity = center?.completion_activity || {};
+  const completionSummary = completionActivity.summary || {};
+  const completionItems = completionActivity.items || [];
   const attackInventory = center?.attack_path_inventory || {};
   const attackSummary = attackInventory.summary || {};
   const attackSteps = attackInventory.attack_steps || [];
@@ -359,6 +362,50 @@ export default function BasOperationsCenterPage() {
               </div>
             );
           })}
+        </div>
+      </TvPanel>
+
+      <TvPanel title="Completude operacional" right={`${completionSummary.open || 0} pendência(s)`} span={3} style={{ marginBottom: 12 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8, marginBottom: 10 }}>
+          <div style={{ background: TV.surface2, borderRadius: 8, padding: "9px 10px" }}>
+            <div style={{ fontSize: 9.5, color: TV.muted, textTransform: "uppercase" }}>Abertas</div>
+            <div style={{ fontFamily: "var(--font-mono)", color: TV.text, fontSize: 20, fontWeight: 700 }}>{completionSummary.open || 0}</div>
+          </div>
+          <div style={{ background: TV.surface2, borderRadius: 8, padding: "9px 10px" }}>
+            <div style={{ fontSize: 9.5, color: TV.muted, textTransform: "uppercase" }}>Achados</div>
+            <div style={{ fontFamily: "var(--font-mono)", color: TV.text, fontSize: 20, fontWeight: 700 }}>{completionSummary.findings || 0}</div>
+          </div>
+          <div style={{ background: TV.surface2, borderRadius: 8, padding: "9px 10px" }}>
+            <div style={{ fontSize: 9.5, color: TV.muted, textTransform: "uppercase" }}>Ativos</div>
+            <div style={{ fontFamily: "var(--font-mono)", color: TV.text, fontSize: 20, fontWeight: 700 }}>{completionSummary.assets || 0}</div>
+          </div>
+          <div style={{ background: TV.surface2, borderRadius: 8, padding: "9px 10px" }}>
+            <div style={{ fontSize: 9.5, color: TV.muted, textTransform: "uppercase" }}>Completos</div>
+            <div style={{ fontFamily: "var(--font-mono)", color: "#7fe0b0", fontSize: 20, fontWeight: 700 }}>{(completionSummary.complete_findings || 0) + (completionSummary.complete_assets || 0)}</div>
+          </div>
+        </div>
+        <div style={{ display: "grid", gap: 8, maxHeight: 260, overflowY: "auto" }}>
+          {completionItems.length === 0 && <div style={{ fontSize: 11, color: TV.muted }}>Achados e ativos sem pendências de contexto operacional.</div>}
+          {completionItems.slice(0, 12).map((item) => (
+            <div key={item.id} style={{ background: TV.surface2, borderRadius: 8, padding: "9px 11px", border: `1px solid ${TV.border}` }}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+                    <span style={{ fontSize: 9, fontWeight: 800, color: item.type === "finding" ? "#d4a500" : "#72b7ff", border: `1px solid ${item.type === "finding" ? "rgba(212,165,0,0.45)" : "rgba(114,183,255,0.45)"}`, borderRadius: 4, padding: "1px 5px" }}>{item.type === "finding" ? "ACHADO" : "ATIVO"}</span>
+                    <span style={{ fontSize: 11.5, fontWeight: 700, color: TV.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.title}</span>
+                  </div>
+                  <div style={{ fontSize: 10, color: TV.muted, marginTop: 4 }}>
+                    {item.target || "sem alvo"}{item.agent ? ` · ${item.agent}` : ""}{item.test ? ` · ${item.test}` : ""}
+                  </div>
+                  <div style={{ fontSize: 10.5, color: TV.text, marginTop: 5 }}>{item.next_action}</div>
+                </div>
+                <div style={{ textAlign: "right", minWidth: 92 }}>
+                  <div style={{ fontFamily: "var(--font-mono)", color: item.score >= 80 ? "#7fe0b0" : item.score >= 50 ? "#d4a500" : "#e96363", fontSize: 18, fontWeight: 800 }}>{item.score || 0}%</div>
+                  <div style={{ fontSize: 9.5, color: TV.muted }}>{item.missing_count || 0} campo(s)</div>
+                </div>
+              </div>
+            </div>
+          ))}
         </div>
       </TvPanel>
 

@@ -1107,6 +1107,9 @@ def control_center(
         group = db.query(AccessGroup).filter(AccessGroup.id == group_ids[0]).first()
         sector_key = group.industry_sector if group else None
 
+    cmdb = bas_reporting.attack_path_inventory(db, **kwargs)
+    findings = bas_reporting.bas_findings_view(db, **kwargs, limit=500)
+
     return {
         "resilience_score": bas_reporting.resilience_score(db, **kwargs),
         "industry_benchmark": resolve_industry_benchmark(sector_key),
@@ -1117,8 +1120,9 @@ def control_center(
         "kill_chain_stages": bas_reporting.kill_chain_stages(db, **kwargs),
         "attack_heatmap": bas_reporting.attack_heatmap(db, **kwargs),
         "protection_layers": bas_reporting.protection_layers(db, **kwargs),
-        "cmdb": bas_reporting.attack_path_inventory(db, **kwargs),
-        "findings": bas_reporting.bas_findings_view(db, **kwargs, limit=500),
+        "cmdb": cmdb,
+        "findings": findings,
+        "completion_activity": bas_reporting.completion_activity_queue(findings, cmdb),
     }
 
 
@@ -1207,6 +1211,9 @@ def operations_center(db: Session = Depends(get_db), current_user: User = Depend
         proof = result.get("bas_proof") or {}
         return proof if isinstance(proof, dict) else {}
 
+    findings = bas_reporting.bas_findings_view(db, group_ids=group_ids, limit=500)
+    attack_path_inventory = bas_reporting.attack_path_inventory(db, group_ids=group_ids)
+
     return {
         "agents": [
             {"id": a.id, "label": a.label or a.hostname, "os": a.os, "status": a.status,
@@ -1263,9 +1270,10 @@ def operations_center(db: Session = Depends(get_db), current_user: User = Depend
         "framework_coverage": bas_reporting.framework_coverage(db, group_ids=group_ids),
         "control_matrix": bas_reporting.control_matrix(db, group_ids=group_ids),
         "exposure": bas_reporting.exposure_summary(db, group_ids=group_ids),
-        "findings": bas_reporting.bas_findings_view(db, group_ids=group_ids, limit=500),
+        "findings": findings,
         "action_priorities": bas_reporting.action_priorities(db, group_ids=group_ids),
-        "attack_path_inventory": bas_reporting.attack_path_inventory(db, group_ids=group_ids),
+        "attack_path_inventory": attack_path_inventory,
+        "completion_activity": bas_reporting.completion_activity_queue(findings, attack_path_inventory),
         "port_scan_observability": bas_reporting.port_scan_observability(db, group_ids=group_ids),
         "crown_jewels": bas_reporting.crown_jewels_view(db, group_ids=group_ids),
         "attack_heatmap": bas_reporting.attack_heatmap(db, group_ids=group_ids),

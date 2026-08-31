@@ -469,6 +469,18 @@ def _proof_valid_from_finding(finding: Finding) -> bool:
     return bool(isinstance(proof, dict) and proof.get("valid"))
 
 
+def _completion_view(checks: dict[str, bool], labels: dict[str, str], actions: dict[str, str]) -> dict[str, Any]:
+    missing = [key for key, ok in checks.items() if not ok]
+    total = max(1, len(checks))
+    score = round(100 * (total - len(missing)) / total)
+    return {
+        "score": score,
+        "status": "complete" if score == 100 else "partial" if score >= 60 else "incomplete",
+        "missing_fields": [{"key": key, "label": labels.get(key, key), "action": actions.get(key, "")} for key in missing],
+        "next_actions": [actions[key] for key in missing if actions.get(key)],
+    }
+
+
 def _status_from_risk_row(row: Any) -> str:
     if isinstance(row, tuple):
         return str(row[0] or "")
@@ -992,6 +1004,47 @@ def bas_findings_view(
             "defensive_status": _defensive_status_from_result(result) or "tested",
         }
 
+    def finding_completion(row: dict[str, Any]) -> dict[str, Any]:
+        test = row.get("test") or {}
+        agent = row.get("agent") or {}
+        checks = {
+            "agent": bool(agent.get("id")),
+            "test": bool(test.get("job_id") and test.get("technique_key")),
+            "target": bool(row.get("target")),
+            "asset": bool(row.get("affected_assets")),
+            "observation": bool(row.get("observation_summary") or row.get("key_findings")),
+            "proof": bool(row.get("proof_valid")),
+            "command": bool(test.get("command") or (row.get("proof") or {}).get("command")),
+            "defensive_status": bool(test.get("defensive_status") and test.get("defensive_status") != "tested"),
+            "mitre": bool(test.get("mitre_refs") or row.get("mitre_refs")),
+            "recommendation": bool(row.get("recommendation")),
+        }
+        labels = {
+            "agent": "Agente executor",
+            "test": "Job/técnica BAS",
+            "target": "Alvo unitário",
+            "asset": "Ativo correlacionado",
+            "observation": "Observação parseada",
+            "proof": "Prova BAS validada",
+            "command": "Comando executado",
+            "defensive_status": "Resultado defensivo",
+            "mitre": "Mapeamento MITRE",
+            "recommendation": "Recomendação",
+        }
+        actions = {
+            "agent": "Reexecutar por agente real ou corrigir vínculo do job.",
+            "test": "Completar atividade de execução BAS com job/técnica.",
+            "target": "Completar alvo unitário a partir da evidência.",
+            "asset": "Correlacionar achado com CMDB por IP/hostname.",
+            "observation": "Reprocessar saída da ferramenta para extrair observações.",
+            "proof": "Reexecutar/retestar para gerar prova BAS validada.",
+            "command": "Persistir comando executado no resultado BAS.",
+            "defensive_status": "Classificar controle como prevented/detected/missed.",
+            "mitre": "Mapear técnica ao catálogo MITRE ATT&CK.",
+            "recommendation": "Adicionar recomendação técnica de correção.",
+        }
+        return _completion_view(checks, labels, actions)
+
     results = []
     for f in rows:
         cve = f.cve
@@ -1042,6 +1095,7 @@ def bas_findings_view(
             "exploit_available": exploit_row.get("available") if exploit_row else None,
             "exploit_refs": exploit_row.get("refs", []) if exploit_row else [],
         }
+        base_row["completion"] = finding_completion(base_row)
         if (
             job is not None
             and details.get("technique_key") in {"port_service_scan", "firewall_segmentation_test"}
@@ -1063,7 +1117,7 @@ def bas_findings_view(
                         "netmask": ref.get("netmask") or "",
                         "cidr": ref.get("cidr") or "",
                     }
-                    results.append({
+                    host_row = {
                         **base_row,
                         "id": f"{f.id}:{ref['ip']}",
                         "target": ref["ip"],
@@ -1073,7 +1127,9 @@ def bas_findings_view(
                         "key_findings": host_key_findings(key_findings, ref, job),
                         "observation_summary": host_observation_summary(ref, job),
                         "affected_assets": [host_asset],
-                    })
+                    }
+                    host_row["completion"] = finding_completion(host_row)
+                    results.append(host_row)
                 continue
         results.append(base_row)
     return results
@@ -1513,6 +1569,34 @@ def attack_path_inventory(
     for asset in sorted_assets:
         tag = _resolve_segment_tag(asset["ip"], asset.get("domain", ""), segment_tags)
         asset.update(_segment_tag_view(tag))
+        checks = {
+            "hostname": bool(asset.get("hostname") and asset.get("hostname") != asset.get("ip")),
+            "network": bool(asset.get("cidr") and asset.get("mask")),
+            "arp_mac": bool(asset.get("mac_address")),
+            "agent": bool(asset.get("observed_by_agents")),
+            "test": bool(asset.get("tests_observed")),
+            "evidence": bool(asset.get("observations")),
+            "classification": bool(asset.get("classified")),
+        }
+        labels = {
+            "hostname": "Hostname resolvido",
+            "network": "Máscara/CIDR",
+            "arp_mac": "ARP/MAC",
+            "agent": "Agente observador",
+            "test": "Teste BAS de origem",
+            "evidence": "Evidência observada",
+            "classification": "Classificação de negócio",
+        }
+        actions = {
+            "hostname": "Executar resolução DNS/NetBIOS/AD para o host.",
+            "network": "Completar rede a partir do heartbeat do agente ou do alvo do teste.",
+            "arp_mac": "Executar descoberta L2/ARP a partir do agente no mesmo segmento.",
+            "agent": "Vincular ativo ao agente que observou a evidência.",
+            "test": "Vincular ativo ao job/técnica BAS que produziu a observação.",
+            "evidence": "Reprocessar logs/stdout para gerar evidência objetiva.",
+            "classification": "Classificar BU, criticidade e controles do segmento.",
+        }
+        asset["completion"] = _completion_view(checks, labels, actions)
 
     applications: dict[tuple[str, str], dict[str, Any]] = {}
     vulnerability_summary: dict[str, dict[str, Any]] = {}
@@ -1589,6 +1673,57 @@ def attack_path_inventory(
             key=lambda item: ({"critical": 0, "high": 1, "medium": 2, "low": 3}.get(item["severity"], 9), -len(item["affected_assets"])),
         ),
         "recommended_tests": recommended_tests,
+    }
+
+
+def completion_activity_queue(findings: list[dict[str, Any]], cmdb: dict[str, Any], limit: int = 20) -> dict[str, Any]:
+    items = []
+    for finding in findings:
+        completion = finding.get("completion") or {}
+        missing = completion.get("missing_fields") or []
+        if not missing:
+            continue
+        items.append({
+            "id": f"finding:{finding.get('id')}",
+            "type": "finding",
+            "title": finding.get("title") or "Achado BAS",
+            "target": finding.get("target") or "",
+            "agent": (finding.get("agent") or {}).get("label") or "",
+            "test": (finding.get("test") or {}).get("technique_name") or finding.get("technique_key") or "",
+            "score": completion.get("score") or 0,
+            "missing_count": len(missing),
+            "missing_fields": missing[:5],
+            "next_action": (completion.get("next_actions") or ["Completar contexto do achado BAS."])[0],
+            "created_at": finding.get("created_at"),
+        })
+    for asset in (cmdb or {}).get("cmdb_assets") or []:
+        completion = asset.get("completion") or {}
+        missing = completion.get("missing_fields") or []
+        if not missing:
+            continue
+        items.append({
+            "id": f"asset:{asset.get('ip')}",
+            "type": "asset",
+            "title": asset.get("hostname") or asset.get("ip") or "Ativo BAS",
+            "target": asset.get("ip") or "",
+            "agent": ", ".join(row.get("label") or "" for row in asset.get("observed_by_agents") or [] if row.get("label")),
+            "test": ", ".join((row.get("technique_name") or row.get("technique_key") or "") for row in (asset.get("tests_observed") or [])[:2]),
+            "score": completion.get("score") or 0,
+            "missing_count": len(missing),
+            "missing_fields": missing[:5],
+            "next_action": (completion.get("next_actions") or ["Completar contexto do ativo no CMDB."])[0],
+            "created_at": asset.get("last_seen"),
+        })
+    ordered = sorted(items, key=lambda item: (item["score"], -item["missing_count"], str(item.get("created_at") or "")))
+    return {
+        "summary": {
+            "open": len(items),
+            "findings": sum(1 for item in items if item["type"] == "finding"),
+            "assets": sum(1 for item in items if item["type"] == "asset"),
+            "complete_findings": sum(1 for finding in findings if (finding.get("completion") or {}).get("status") == "complete"),
+            "complete_assets": sum(1 for asset in (cmdb or {}).get("cmdb_assets") or [] if (asset.get("completion") or {}).get("status") == "complete"),
+        },
+        "items": ordered[:limit],
     }
 
 

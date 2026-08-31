@@ -18,6 +18,7 @@ from app.models.models import BasAgent, BasJob, BasSchedule, Finding, ScanJob
 from app.services.bas_dispatcher import dispatch_bas_technique
 from app.services.bas_guardrail_policy import check_bas_authorization
 from app.services.bas_proof import build_bas_proof
+from app.services.bas_service_targeting import filter_targets_for_capability
 from app.services.bas_technique_catalog import get_technique
 
 logger = logging.getLogger(__name__)
@@ -73,7 +74,7 @@ def _cidr_hosts(value: str) -> tuple[list[str] | None, str | None]:
 
 
 def _targets_for_technique(base_target: str, technique: dict[str, Any], *, target_was_defaulted: bool) -> tuple[list[str], str | None]:
-    if technique.get("accepts_range"):
+    if technique.get("accepts_range") and not technique.get("required_ports") and not technique.get("required_capabilities"):
         return [base_target], None
     target_format = str(technique.get("target_format") or "host")
     if target_format not in {"host", "host_port"}:
@@ -761,25 +762,10 @@ def execute_schedule_run(
                     completed_units += 1
                     continue
 
-                required_ports = technique.get("required_ports")
-                if required_ports:
-                    # CMDB gate: a host whose port-scan chunk genuinely
-                    # completed (known_hosts) only gets tested when one of
-                    # the required ports actually showed up open there. A
-                    # host whose chunk failed/timed out (not in known_hosts)
-                    # is unknown, not confirmed closed -- falls back to
-                    # being tested anyway, same as before this gate existed.
-                    gated_targets = [
-                        h for h in dispatch_targets
-                        if h not in known_hosts or (open_ports_by_host.get(h) and any(p in open_ports_by_host[h] for p in required_ports))
-                    ]
-                    for h in dispatch_targets:
-                        if h not in gated_targets:
-                            skipped.append({
-                                "technique_key": technique_key, "target": h,
-                                "reason": f"port_not_open_per_port_scan:{required_ports}",
-                            })
-                    dispatch_targets = gated_targets
+                dispatch_targets, gate_skipped = filter_targets_for_capability(
+                    dispatch_targets, technique, open_ports_by_host, known_hosts,
+                )
+                skipped.extend(gate_skipped)
 
                 stop_current_target = False
                 for dispatch_target in dispatch_targets:

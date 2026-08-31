@@ -95,6 +95,7 @@ def _technique(
     # port_service_scan is why it always runs first now, unconditionally,
     # regardless of what's in a schedule's technique_keys.
     required_ports: list[int] | None = None,
+    required_capabilities: list[str] | None = None,
 ) -> dict[str, Any]:
     return {
         "technique_key": technique_key,
@@ -119,6 +120,7 @@ def _technique(
         "accepts_range": accepts_range,
         "recommendation": recommendation,
         "required_ports": required_ports,
+        "required_capabilities": required_capabilities or [],
     }
 
 
@@ -140,6 +142,8 @@ BAS_TECHNIQUE_CATALOG: list[dict[str, Any]] = [
         requires_tcp=True, is_simulated_in_phase_1=True,
         target_format="host", accepts_range=True,
         recommendation="Restrinja acesso a compartilhamentos SMB anonimo/autenticado; desative SMBv1; segmente hosts com dados sensiveis do acesso geral da rede.",
+        required_ports=[445],
+        required_capabilities=["smb"],
     ),
     _technique(
         "smb_enum_enum4linux",
@@ -152,6 +156,7 @@ BAS_TECHNIQUE_CATALOG: list[dict[str, Any]] = [
         requires_tcp=True, is_simulated_in_phase_1=True,
         target_format="host", recommendation="Desative null sessions RPC/SMB; restrinja enumeracao anonima de usuarios/RIDs; audite ACLs de compartilhamentos expostos.",
         required_ports=[445],
+        required_capabilities=["smb"],
     ),
     _technique(
         "ad_bloodhound_collect",
@@ -164,6 +169,7 @@ BAS_TECHNIQUE_CATALOG: list[dict[str, Any]] = [
         requires_tcp=True, is_simulated_in_phase_1=True,
         target_format="host", recommendation="Revise ACLs de Active Directory alcancaveis via LDAP anonimo/autenticado; monitore volumes anormais de consultas LDAP vindos de contas de baixo privilegio.",
         required_ports=[389, 636],
+        required_capabilities=["ad_dc"],
     ),
     _technique(
         "ad_kerberoast",
@@ -176,6 +182,7 @@ BAS_TECHNIQUE_CATALOG: list[dict[str, Any]] = [
         requires_tcp=True, is_simulated_in_phase_1=True,
         target_format="host", recommendation="Use senhas longas e aleatorias para contas de servico; habilite criptografia AES para tickets Kerberos; monitore requisicoes de TGS em massa (indicativo de kerberoasting).",
         required_ports=[88],
+        required_capabilities=["kerberos"],
     ),
     _technique(
         "ntlm_relay_smb",
@@ -188,6 +195,7 @@ BAS_TECHNIQUE_CATALOG: list[dict[str, Any]] = [
         requires_tcp=True, is_simulated_in_phase_1=True,
         target_format="host", recommendation="Habilite SMB signing em todos os hosts; desative NTLM quando possivel em favor de Kerberos; segmente a rede para reduzir superficie de relay.",
         required_ports=[445],
+        required_capabilities=["smb"],
     ),
 
     # ── Requires a real agent on the customer's L2 segment -- never run as
@@ -264,6 +272,8 @@ BAS_TECHNIQUE_CATALOG: list[dict[str, Any]] = [
         availability="simulated", execution_backend="kali_proxychains",
         requires_tcp=True, is_simulated_in_phase_1=True,
         target_format="host", recommendation="Troque credenciais padrao de root/vmware imediatamente; force troca de senha no primeiro login; restrinja acesso a API REST do vCenter/ESXi por IP.",
+        required_ports=[5480, 902, 9443],
+        required_capabilities=["vmware"],
     ),
     _technique(
         "firewall_segmentation_test",
@@ -292,6 +302,7 @@ BAS_TECHNIQUE_CATALOG: list[dict[str, Any]] = [
         requires_tcp=True, is_simulated_in_phase_1=True,
         target_format="host", recommendation="Restrinja permissoes de compartilhamentos SMB ao minimo necessario; remova acesso 'Everyone'/anonimo; audite compartilhamentos com dados sensiveis.",
         required_ports=[445],
+        required_capabilities=["smb"],
     ),
     _technique(
         "ad_scouting_ldap",
@@ -304,6 +315,7 @@ BAS_TECHNIQUE_CATALOG: list[dict[str, Any]] = [
         requires_tcp=True, is_simulated_in_phase_1=True,
         target_format="host", recommendation="Desative bind anonimo LDAP no controlador de dominio; restrinja consultas LDAP nao autenticadas; monitore volumes de consulta anomalos.",
         required_ports=[389, 636],
+        required_capabilities=["ad_dc"],
     ),
     _technique(
         "cloud_directory_scouting",
@@ -451,6 +463,7 @@ BAS_TECHNIQUE_CATALOG: list[dict[str, Any]] = [
         requires_tcp=True, is_simulated_in_phase_1=True,
         target_format="host", recommendation="Aplique a correcao do CVE-2020-1472 (Zerologon); force 'FullSecureChannelProtection' no controlador de dominio; monitore falhas de autenticacao Netlogon.",
         required_ports=[445],
+        required_capabilities=["ad_dc", "smb"],
     ),
     _technique(
         "owasp_web_app_scan",
@@ -462,6 +475,7 @@ BAS_TECHNIQUE_CATALOG: list[dict[str, Any]] = [
         availability="simulated", execution_backend="kali_proxychains",
         requires_tcp=True, is_simulated_in_phase_1=True,
         target_format="host_port", recommendation="Corrija os achados especificos listados no resultado real (ex: headers de seguranca ausentes, CORS permissivo); rode o scan completo (nuclei/zap) para cobertura OWASP Top 10 completa.",
+        required_capabilities=["web"],
     ),
     _technique(
         "safe_credential_checks",
@@ -474,6 +488,8 @@ BAS_TECHNIQUE_CATALOG: list[dict[str, Any]] = [
         requires_tcp=True, is_simulated_in_phase_1=True,
         target_format="host", accepts_range=True,
         recommendation="Bloqueie acesso guest/null session; aplique lockout e MFA onde aplicavel; restrinja autenticação SMB/NTLM a origens autorizadas.",
+        required_ports=[445],
+        required_capabilities=["smb"],
     ),
     _technique(
         "lateral_movement_simulation_safe",
@@ -498,6 +514,7 @@ BAS_TECHNIQUE_CATALOG: list[dict[str, Any]] = [
         requires_tcp=True, is_simulated_in_phase_1=True,
         target_format="host_port",
         recommendation="Corrija a vulnerabilidade validada, preserve o comando de replay do BAS e rode o reteste controlado após mitigação.",
+        required_capabilities=["web"],
     ),
     _technique(
         "pipeline_secrets_harvesting",
