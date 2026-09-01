@@ -2726,7 +2726,11 @@ def create_scan(
         current_step=(
             "Aguardando captura de credencial para iniciar G1 interno"
             if compliance_status == "approved" and execution_plan == "internal_then_external"
-            else "1. Amass Subdomain Recon"
+            else (
+                "P02 · Qualificação DNS/portas/HTTP"
+                if explicit_target_inventory
+                else "P01 · Enumeração de subdomínios"
+            )
         ),
         state_data=initial_state,
     )

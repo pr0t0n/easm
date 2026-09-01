@@ -3829,6 +3829,57 @@ def _run_scan_with_retry(
         _release_scan_chain_lock(_lock_r, scan_id, _lock_token)
 
 
+def _recover_capacity_work_queue_after_scan_error(
+    db: Session,
+    job: ScanJob,
+    error: str,
+) -> dict[str, Any]:
+    from app.models.models import ScanWorkItem
+
+    state = dict(job.state_data or {})
+    if state.get("parallel_engine") != "capacity_work_queue":
+        return {"handled": False}
+    counts = dict(
+        db.query(ScanWorkItem.status, func.count(ScanWorkItem.id))
+        .filter(ScanWorkItem.scan_job_id == int(job.id))
+        .group_by(ScanWorkItem.status)
+        .all()
+    )
+    total = sum(int(value or 0) for value in counts.values())
+    if total <= 0:
+        return {"handled": False}
+    active = sum(
+        int(value or 0)
+        for status, value in counts.items()
+        if str(status or "") in {"queued", "retry", "dispatched", "running", "submitted", "blocked"}
+    )
+    state["work_queue_counts"] = counts
+    recovery = dict(state.get("recovery") or {})
+    recovery["last_scan_task_error_recovered_at"] = datetime.now().isoformat()
+    recovery["last_scan_task_error"] = str(error or "")[:500]
+    recovery["last_scan_task_error_work_queue_counts"] = counts
+    state["recovery"] = recovery
+    job.status = "running"
+    job.last_error = None
+    job.next_retry_at = None
+    job.current_step = (
+        "Finalizacao automatica: fila terminal enviada ao Quality Gate"
+        if active == 0
+        else "Recuperacao automatica: retomando fila persistida"
+    )
+    job.state_data = state
+    db.add(ScanLog(
+        scan_job_id=job.id,
+        source="worker.retry",
+        level="WARNING",
+        message=(
+            "scan_task_error_recovered_by_capacity_work_queue "
+            f"active={active} total={total} error={str(error or '')[:300]}"
+        )[:2000],
+    ))
+    return {"handled": True, "capacity_work_queue_recovered": True, "counts": counts}
+
+
 def _run_scan_with_retry_locked(task_ctx, scan_id: int, scan_mode: ScanMode) -> dict:
     db: Session = SessionLocal()
     try:
@@ -3897,6 +3948,22 @@ def _run_scan_with_retry_locked(task_ctx, scan_id: int, scan_mode: ScanMode) -> 
 
         if str(job.status or "").lower() in HALTED_SCAN_STATUSES:
             return _halted_scan_result(job.status)
+
+        capacity_recovery = _recover_capacity_work_queue_after_scan_error(
+            db,
+            job,
+            str(result.get("error") or ""),
+        )
+        if capacity_recovery.get("handled"):
+            db.commit()
+            _schedule_scan_work_dispatch(scan_id, countdown=1)
+            return {
+                "ok": True,
+                "scan_id": scan_id,
+                "scan_mode": scan_mode,
+                "retryable": False,
+                **capacity_recovery,
+            }
 
         retry_enabled, max_attempts, delay_seconds = _get_scan_retry_policy(db, job.owner_id)
         if not retry_enabled:
@@ -5258,7 +5325,14 @@ def dispatch_scan_work_items(
                     _score = _quality_gate.get("quality", {}).get("score")
                     _gap_count = _quality_gate.get("gap_count")
                     _futile = quality_gate_hard_block_is_futile(_final_state, _quality_gate)
-                    if hard_retry_count < QUALITY_GATE_HARD_BLOCK_MAX_RETRIES and not _futile:
+                    _operator_action_only = bool(_quality_gate.get("requires_operator_action")) and not list(
+                        _quality_gate.get("actions") or []
+                    )
+                    if (
+                        hard_retry_count < QUALITY_GATE_HARD_BLOCK_MAX_RETRIES
+                        and not _futile
+                        and not _operator_action_only
+                    ):
                         hard_retry_count += 1
                         backoff = min(3600, 300 * (2 ** (hard_retry_count - 1)))  # 5min, 10min, 20min, capped 1h
                         _final_state["quality_gate_hard_retry_count"] = hard_retry_count

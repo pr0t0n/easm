@@ -4793,7 +4793,14 @@ def run_offensive_operator_scan(
         _gap_count = _quality_gate.get("gap_count")
         hard_retry_count = int(state.get("quality_gate_hard_retry_count") or 0)
         _futile = quality_gate_hard_block_is_futile(state, _quality_gate)
-        if hard_retry_count < QUALITY_GATE_HARD_BLOCK_MAX_RETRIES and not _futile:
+        _operator_action_only = bool(_quality_gate.get("requires_operator_action")) and not list(
+            _quality_gate.get("actions") or []
+        )
+        if (
+            hard_retry_count < QUALITY_GATE_HARD_BLOCK_MAX_RETRIES
+            and not _futile
+            and not _operator_action_only
+        ):
             from datetime import datetime as _dt
             from datetime import timedelta as _timedelta
 
