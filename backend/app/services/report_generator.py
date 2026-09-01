@@ -486,7 +486,15 @@ def _render_quality_gate_html(quality: dict[str, Any]) -> str:
     )
 
     _blocking_ids = list((dict(quality.get("depth_requirements") or {})).get("blocking_requirement_ids") or [])
-    _reason_counts = list((dict(quality.get("preflight_summary") or {})).get("non_success_reason_counts") or [])[:6]
+    _preflight_summary = dict(quality.get("preflight_summary") or {})
+    _reason_buckets = dict(_preflight_summary.get("non_success_reason_buckets") or {})
+    _legacy_reasons = list(_preflight_summary.get("non_success_reason_counts") or [])
+    _actionable_reasons = list(_reason_buckets.get("actionable_pending") or [])
+    _precondition_reasons = list(_reason_buckets.get("precondition_absent") or [])
+    _tool_failure_reasons = list(_reason_buckets.get("tool_failures") or [])
+    _other_reasons = list(_reason_buckets.get("other") or [])
+    if not _reason_buckets:
+        _actionable_reasons = _legacy_reasons
     _operator_messages = [
         text for text in (
             (dict(quality.get("auth_precondition_summary") or {})).get("operator_message")
@@ -497,10 +505,16 @@ def _render_quality_gate_html(quality: dict[str, Any]) -> str:
         if text
     ]
 
-    _explain_rows = "".join(
-        f'<li><strong>{_html.escape(str(item.get("reason") or ""))}</strong>: {int(item.get("count") or 0)} alvo(s)</li>'
-        for item in _reason_counts
-    )
+    def _reason_rows(items: list[dict[str, Any]]) -> str:
+        return "".join(
+            f'<li><strong>{_html.escape(str(item.get("reason") or ""))}</strong>: {int(item.get("count") or 0)} ocorrência(s)</li>'
+            for item in items[:6]
+        )
+
+    _actionable_rows = _reason_rows(_actionable_reasons)
+    _precondition_rows = _reason_rows(_precondition_reasons)
+    _tool_failure_rows = _reason_rows(_tool_failure_reasons)
+    _other_rows = _reason_rows(_other_reasons)
     _explain_parts: list[str] = []
     if _blocking_ids:
         _explain_parts.append(
@@ -509,10 +523,25 @@ def _render_quality_gate_html(quality: dict[str, Any]) -> str:
         )
     for msg in _operator_messages:
         _explain_parts.append(f'<p style="font-size:11px;color:#555;margin-bottom:4px">{_html.escape(msg)}</p>')
-    if _explain_rows:
+    if _actionable_rows:
         _explain_parts.append(
             '<p style="font-size:11px;color:#555;margin-bottom:2px">Alvos não totalmente escaneados por motivo:</p>'
-            f'<ul style="font-size:11px;color:#555;margin-left:18px">{_explain_rows}</ul>'
+            f'<ul style="font-size:11px;color:#555;margin-left:18px">{_actionable_rows}</ul>'
+        )
+    if _precondition_rows:
+        _explain_parts.append(
+            '<p style="font-size:11px;color:#555;margin-bottom:2px">Testes não aplicáveis por falta de superfície/precondição:</p>'
+            f'<ul style="font-size:11px;color:#555;margin-left:18px">{_precondition_rows}</ul>'
+        )
+    if _tool_failure_rows:
+        _explain_parts.append(
+            '<p style="font-size:11px;color:#555;margin-bottom:2px">Falhas de ferramenta ou perfil:</p>'
+            f'<ul style="font-size:11px;color:#555;margin-left:18px">{_tool_failure_rows}</ul>'
+        )
+    if _other_rows:
+        _explain_parts.append(
+            '<p style="font-size:11px;color:#555;margin-bottom:2px">Outros motivos preservados para auditoria:</p>'
+            f'<ul style="font-size:11px;color:#555;margin-left:18px">{_other_rows}</ul>'
         )
     _explain_html = (
         '<div style="margin-top:10px;padding-top:8px;border-top:1px solid rgba(0,0,0,0.08)">'

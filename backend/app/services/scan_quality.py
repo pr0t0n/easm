@@ -2022,12 +2022,43 @@ def _build_preflight_summary(
     open_port_targets = sum(bool(row.get("open_ports")) for row in profile_rows)
     dead_targets = list(state.get("dead_targets") or [])
     dns_inconclusive = list(state.get("dns_inconclusive_targets") or [])
-    blocked_reasons = Counter(
-        str((item.item_metadata or {}).get("gate_reason") or item.last_error or "reason_not_recorded")
-        for item in db.query(ScanWorkItem)
+    blocked_reasons = Counter()
+    for item in (
+        db.query(ScanWorkItem)
         .filter(ScanWorkItem.scan_job_id == job.id, ScanWorkItem.status.in_(["blocked", "skipped", "timeout", "failed"]))
         .all()
-    )
+    ):
+        status = str(item.status or "").lower()
+        reason = (
+            str((item.item_metadata or {}).get("gate_reason") or "")
+            if status == "blocked"
+            else str(item.last_error or "")
+        )
+        if reason:
+            blocked_reasons[reason] += 1
+        else:
+            blocked_reasons["reason_not_recorded"] += 1
+    actionable_reasons = Counter()
+    precondition_reasons = Counter()
+    failure_reasons = Counter()
+    other_reasons = Counter()
+    for reason, count in blocked_reasons.items():
+        reason_text = str(reason or "")
+        if reason_text.startswith("waiting_for:"):
+            actionable_reasons[reason_text] += count
+        elif "required_evidence_absent:" in reason_text or "required_technology_absent:" in reason_text or reason_text.startswith("skipped:applicability:no_http_surface:"):
+            precondition_reasons[reason_text] += count
+        elif reason_text.startswith("tool_or_profile_not_found:") or reason_text.startswith("runner_failed") or reason_text.startswith("timeout"):
+            failure_reasons[reason_text] += count
+        else:
+            other_reasons[reason_text] += count
+
+    def _reason_rows(counter: Counter[str]) -> list[dict[str, Any]]:
+        return [
+            {"reason": reason, "count": count}
+            for reason, count in counter.most_common(12)
+        ]
+
     return {
         "version": "preflight-summary-v2",
         "target": job.target_query,
@@ -2081,6 +2112,12 @@ def _build_preflight_summary(
             {"reason": reason, "count": count}
             for reason, count in blocked_reasons.most_common(12)
         ],
+        "non_success_reason_buckets": {
+            "actionable_pending": _reason_rows(actionable_reasons),
+            "precondition_absent": _reason_rows(precondition_reasons),
+            "tool_failures": _reason_rows(failure_reasons),
+            "other": _reason_rows(other_reasons),
+        },
     }
 
 

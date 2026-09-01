@@ -636,7 +636,12 @@ function QualityPanel({ quality, scan }) {
   const depthRequirements = quality.depth_requirements || {};
   const blockingRequirementIds = Array.isArray(depthRequirements.blocking_requirement_ids) ? depthRequirements.blocking_requirement_ids : [];
   const preflightSummary = quality.preflight_summary || {};
-  const nonSuccessReasons = Array.isArray(preflightSummary.non_success_reason_counts) ? preflightSummary.non_success_reason_counts : [];
+  const reasonBuckets = preflightSummary.non_success_reason_buckets || {};
+  const legacyNonSuccessReasons = Array.isArray(preflightSummary.non_success_reason_counts) ? preflightSummary.non_success_reason_counts : [];
+  const actionableReasons = Array.isArray(reasonBuckets.actionable_pending) ? reasonBuckets.actionable_pending : legacyNonSuccessReasons;
+  const preconditionReasons = Array.isArray(reasonBuckets.precondition_absent) ? reasonBuckets.precondition_absent : [];
+  const toolFailureReasons = Array.isArray(reasonBuckets.tool_failures) ? reasonBuckets.tool_failures : [];
+  const otherReasons = Array.isArray(reasonBuckets.other) ? reasonBuckets.other : [];
   const authPrecondition = quality.auth_precondition_summary || {};
   const businessLogicPrecondition = quality.business_logic_precondition_summary || {};
   const operatorMessages = [
@@ -863,7 +868,7 @@ function QualityPanel({ quality, scan }) {
         </div>
       )}
 
-      {(blockingRequirementIds.length > 0 || operatorMessages.length > 0 || nonSuccessReasons.length > 0) && (
+      {(blockingRequirementIds.length > 0 || operatorMessages.length > 0 || actionableReasons.length > 0 || preconditionReasons.length > 0 || toolFailureReasons.length > 0 || otherReasons.length > 0) && (
         <div style={{ marginTop: 12, paddingTop: 10, borderTop: "1px solid var(--line-soft)" }}>
           <div style={{ fontSize: 11, fontWeight: 700, color: "var(--ink-soft)", marginBottom: 6 }}>Por que a cobertura está incompleta</div>
           {blockingRequirementIds.length > 0 && (
@@ -874,10 +879,28 @@ function QualityPanel({ quality, scan }) {
           {operatorMessages.map((msg, idx) => (
             <div key={idx} style={{ fontSize: 11, color: "var(--ink-muted)", marginBottom: 4, lineHeight: 1.45 }}>{msg}</div>
           ))}
-          {nonSuccessReasons.length > 0 && (
-            <div style={{ fontSize: 11, color: "var(--ink-muted)", lineHeight: 1.45 }}>
+          {actionableReasons.length > 0 && (
+            <div style={{ fontSize: 11, color: "var(--ink-muted)", lineHeight: 1.45, marginBottom: 4 }}>
               <strong>Alvos não totalmente escaneados:</strong>{" "}
-              {nonSuccessReasons.slice(0, 6).map((row) => `${row.reason} (${row.count})`).join(", ")}
+              {actionableReasons.slice(0, 6).map((row) => `${row.reason} (${row.count})`).join(", ")}
+            </div>
+          )}
+          {preconditionReasons.length > 0 && (
+            <div style={{ fontSize: 11, color: "var(--ink-muted)", lineHeight: 1.45, marginBottom: 4 }}>
+              <strong>Testes não aplicáveis por falta de superfície/precondição:</strong>{" "}
+              {preconditionReasons.slice(0, 6).map((row) => `${row.reason} (${row.count})`).join(", ")}
+            </div>
+          )}
+          {toolFailureReasons.length > 0 && (
+            <div style={{ fontSize: 11, color: "var(--ink-muted)", lineHeight: 1.45, marginBottom: 4 }}>
+              <strong>Falhas de ferramenta ou perfil:</strong>{" "}
+              {toolFailureReasons.slice(0, 6).map((row) => `${row.reason} (${row.count})`).join(", ")}
+            </div>
+          )}
+          {otherReasons.length > 0 && (
+            <div style={{ fontSize: 11, color: "var(--ink-muted)", lineHeight: 1.45 }}>
+              <strong>Outros motivos preservados para auditoria:</strong>{" "}
+              {otherReasons.slice(0, 6).map((row) => `${row.reason} (${row.count})`).join(", ")}
             </div>
           )}
         </div>

@@ -51,6 +51,28 @@ def test_includes_non_success_reason_counts_when_present():
     assert "4" in html
 
 
+def test_separates_absent_preconditions_from_unscanned_targets():
+    html = _render_quality_gate_html(_base_quality(
+        preflight_summary={
+            "non_success_reason_buckets": {
+                "actionable_pending": [],
+                "precondition_absent": [
+                    {
+                        "reason": "skipped:applicability:required_evidence_absent:known_parameters",
+                        "count": 2,
+                    }
+                ],
+                "tool_failures": [],
+                "other": [],
+            },
+        },
+    ))
+
+    assert "Alvos não totalmente escaneados" not in html
+    assert "Testes não aplicáveis por falta de superfície/precondição" in html
+    assert "required_evidence_absent:known_parameters" in html
+
+
 def test_includes_auth_operator_message_only_when_blocked():
     blocked_html = _render_quality_gate_html(_base_quality(
         auth_precondition_summary={"blocked": True, "operator_message": "Precisa de duas identidades reais."},
