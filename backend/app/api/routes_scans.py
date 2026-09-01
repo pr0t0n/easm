@@ -338,16 +338,37 @@ def _reconcile_orphan_running_scans(db: Session) -> int:
         _total_items = db.query(_SWI).filter(_SWI.scan_job_id == row.id).count()
 
         if _total_items > 0 and _non_terminal == 0:
-            # All work items terminal → scan completed, not orphaned
-            row.status = "completed"
+            _state = dict(row.state_data or {})
+            _gate = dict(_state.get("quality_gate") or {})
+            _gate_status = str(_gate.get("status") or "").lower()
+            _gate_completion = str(_gate.get("completion_status") or "").lower()
+            _gate_retry_until = str(_state.get("quality_gate_retry_scheduled_until") or "")
+            _gate_terminal = _gate_status in {"completed_with_gaps", "exhausted", "passed"}
+            _gate_pending = (
+                not _gate_terminal
+                and (
+                    bool(_state.get("quality_gate_active"))
+                    or bool(_state.get("quality_gate_blocked"))
+                    or bool(_gate_retry_until)
+                    or _gate_status == "remediation_scheduled"
+                )
+            )
+            _gate_with_gaps = _gate_status in {"completed_with_gaps", "exhausted"} and not _gate_pending
+            if _gate_pending:
+                _orphan_ids.append(row.id)
+                continue
+            row.status = "completed_with_gaps" if _gate_with_gaps else (
+                _gate_completion if _gate_completion in {"completed", "completed_with_gaps"} else "completed"
+            )
             row.mission_progress = 100
+            row.current_step = "P21 Quality Gate · concluído com gaps" if row.status == "completed_with_gaps" else "P22 Campaign Report"
             row.last_error = None
             row.next_retry_at = None
             db.add(ScanLog(
                 scan_job_id=row.id,
                 source="reconciler",
                 level="INFO",
-                message=f"Scan completed via reconciliador — todos os {_total_items} work items terminais",
+                message=f"Scan {row.status} via reconciliador — todos os {_total_items} work items terminais",
             ))
             fixed += 1
         else:

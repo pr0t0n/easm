@@ -4846,6 +4846,7 @@ def run_offensive_operator_scan(
         state["quality_gate_blocked"] = False
         state["completion_source"] = "quality_gate_exhausted"
         state.pop("quality_gate_hard_block_fingerprint", None)
+        state.pop("quality_gate_retry_scheduled_until", None)
         job.state_data = state
         job.status = "completed_with_gaps"
         job.mission_progress = 100

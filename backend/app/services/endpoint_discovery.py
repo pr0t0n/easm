@@ -22,6 +22,7 @@ import time
 from datetime import datetime
 from urllib.parse import urlparse
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.models.models import ScanJob
@@ -105,6 +106,17 @@ def _emit_surface_progress(scan_id: int, message: str) -> None:
             progress_db.close()
     except Exception:
         pass
+
+
+def _acquire_expansion_lock(db: Session, scan_id: int) -> bool:
+    try:
+        row = db.execute(
+            text("SELECT pg_try_advisory_xact_lock(:lock_key)"),
+            {"lock_key": 734200000 + int(scan_id)},
+        ).first()
+        return bool(row and row[0])
+    except Exception:
+        return True
 
 
 def _host_of(url: str) -> str:
@@ -349,15 +361,8 @@ def expand_attack_surface(db: Session, scan_id: int, source_target: str,
     execution_context = normalize_execution_context(execution_context)
     if str(tool_name or "").lower() not in _DISCOVERY_TOOLS:
         return {"skipped": "not_discovery_tool"}
-
-    locked_job = (
-        db.query(ScanJob)
-        .filter(ScanJob.id == scan_id)
-        .with_for_update()
-        .first()
-    )
-    if locked_job is not None:
-        job = locked_job
+    if not _acquire_expansion_lock(db, scan_id):
+        return {"skipped": "surface_expansion_already_running"}
 
     state = dict(job.state_data or {})
     seen: set[str] = set(state.get("discovered_endpoints") or [])
@@ -510,11 +515,6 @@ def expand_attack_surface(db: Session, scan_id: int, source_target: str,
     for u in new_eps:
         seen.add(u)
 
-    # From here on, expansion may do slow network I/O (page fetches) and
-    # per-endpoint analysis. Release the scan_jobs FOR UPDATE lock acquired at
-    # function entry before that work. Holding it here blocked scan_logs inserts
-    # through their FK on scan_jobs, which chained into watchdog/worker locks and
-    # made healthy scans look frozen under endpoint-heavy inventories.
     state["discovered_endpoints"] = list(seen)[:5000]
     if execution_context == "internal":
         state["internal_discovered_endpoints"] = sorted(
@@ -522,10 +522,7 @@ def expand_attack_surface(db: Session, scan_id: int, source_target: str,
         )[:5000]
     state["endpoint_test_targets"] = list(seen)[:10000]
     job.state_data = _preserve_runtime_execution_state(db, job, state)
-    try:
-        db.commit()
-    except Exception:
-        db.rollback()
+    db.flush()
 
     findings: list[dict] = []
     reseeded = 0
@@ -543,14 +540,7 @@ def expand_attack_surface(db: Session, scan_id: int, source_target: str,
         except Exception:
             logger.warning("internal page analysis has no valid auth material scan=%d", scan_id)
         finally:
-            # Auth material is a short DB read. Do not keep the implicit
-            # SQLAlchemy transaction open while the page analyzer performs
-            # network fetches; that exact pattern left workers idle-in-tx and
-            # blocked scan_jobs/scan_logs during authenticated G1 expansion.
-            try:
-                db.commit()
-            except Exception:
-                db.rollback()
+            db.flush()
 
     for url_index, url in enumerate(new_eps, start=1):
         hv = bool(_HIGH_VALUE.search(url))
@@ -633,10 +623,7 @@ def expand_attack_surface(db: Session, scan_id: int, source_target: str,
                 if reseeded >= _MAX_PER_EVENT_RESEED:
                     break
             if seeded_this_url:
-                try:
-                    db.commit()
-                except Exception:
-                    db.rollback()
+                db.flush()
 
         _surface_now = time.monotonic()
         if _surface_now - _surface_last_progress >= 30:
@@ -686,10 +673,7 @@ def expand_attack_surface(db: Session, scan_id: int, source_target: str,
         except Exception as exc:
             logger.warning("internal endpoint analysis fan-out failed scan=%d: %s", scan_id, exc)
 
-    try:
-        db.commit()
-    except Exception:
-        db.rollback()
+    db.flush()
 
     logger.info(
         "surface_expansion scan=%d tool=%s novos=%d novos_hosts=%d host_items=%d abertos=%d reinjetados=%d segredos+scripts=%d fora_do_escopo=%d",

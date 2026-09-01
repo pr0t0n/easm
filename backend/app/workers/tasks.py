@@ -429,6 +429,9 @@ def _merge_runtime_scan_state(
     if explicit_inventory_pending:
         result["work_producers_sealed"] = False
         result["work_producer_stage"] = "explicit_inventory_window"
+    elif explicit_total > 0 and explicit_cursor >= explicit_total:
+        result["work_producers_sealed"] = True
+        result["work_producer_stage"] = "sealed"
     elif current.get("work_producers_sealed") is True and result.get("work_producers_sealed") is not True:
         result["work_producers_sealed"] = True
     if (
@@ -751,7 +754,8 @@ def _first_active_work_queue_phase_for_scan(db: Session, scan_id: int) -> str:
             if str(phase) in active:
                 return str(phase)
     except Exception:
-        pass
+        if not db.is_active:
+            db.rollback()
     return ""
 
 
@@ -1183,6 +1187,68 @@ def _run_surface_expansion_postprocessor(db: Session, job: ScanJob, item: Any) -
 
     db.commit()
     return summary
+
+
+def _reconcile_orphaned_postprocessors(
+    db: Session,
+    scan_id: int,
+    state: dict[str, Any],
+) -> tuple[dict[str, Any], int]:
+    ledger = dict((state or {}).get("postprocessor_ledger") or {})
+    item_ids = sorted({
+        int(row.get("item_id") or 0)
+        for row in ledger.values()
+        if str((row or {}).get("status") or "") in {"pending", "running"}
+        and int((row or {}).get("item_id") or 0) > 0
+    })
+    if not item_ids:
+        return state, 0
+    from app.models.models import ScanWorkItem
+
+    terminal_items = {
+        int(row[0])
+        for row in (
+            db.query(ScanWorkItem.id)
+            .filter(
+                ScanWorkItem.scan_job_id == int(scan_id),
+                ScanWorkItem.id.in_(item_ids),
+                ScanWorkItem.status.in_(["completed", "failed", "skipped", "timeout", "done"]),
+            )
+            .all()
+        )
+    }
+    if not terminal_items:
+        return state, 0
+    updates = 0
+    now_iso = datetime.now().isoformat()
+    for key, entry in list(ledger.items()):
+        row = dict(entry or {})
+        if str(row.get("status") or "") not in {"pending", "running"}:
+            continue
+        item_id = int(row.get("item_id") or 0)
+        if item_id not in terminal_items:
+            continue
+        row["status"] = "skipped"
+        row["error"] = "source_item_terminal_without_postprocessor"
+        row["updated_at"] = now_iso
+        ledger[key] = row
+        state[f"postprocessor_done:{key}"] = True
+        updates += 1
+    if updates:
+        state["postprocessor_ledger"] = ledger
+        state["postprocessor_ledger_reconciled_at"] = now_iso
+        job = db.query(ScanJob).filter(ScanJob.id == int(scan_id)).first()
+        if job:
+            job.state_data = state
+            flag_modified(job, "state_data")
+            db.add(ScanLog(
+                scan_job_id=int(scan_id),
+                source="postprocessor",
+                level="WARNING",
+                message=f"postprocessor_orphaned_ledger_reconciled updates={updates} source=terminal_work_items",
+            ))
+            db.flush()
+    return state, updates
 
 
 def _scan_postprocessors_pending(scan_id: int, state: dict[str, Any] | None = None) -> bool:
@@ -4818,12 +4884,23 @@ def dispatch_scan_work_items(
         except Exception as _release_err:
             import logging as _release_log
             _release_log.getLogger(__name__).debug("internal_then_external release check failed: %s", _release_err)
+            if not db.is_active:
+                db.rollback()
+                job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+                if not job:
+                    return {"claimed": len(item_ids), "counts": counts, "error": "scan_missing_after_release_rollback"}
+                state = dict(job.state_data or {})
         try:
             from app.services.scan_work_queue import enrich_phase_ledgers_from_work_items
             enrich_phase_ledgers_from_work_items(db, job)
             state = dict(job.state_data or {})
         except Exception:
-            pass
+            if not db.is_active:
+                db.rollback()
+                job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+                if not job:
+                    return {"claimed": len(item_ids), "counts": counts, "error": "scan_missing_after_phase_ledger_rollback"}
+                state = dict(job.state_data or {})
         try:
             from app.services.execution_context_service import reconcile_execution_plan_state
             state = reconcile_execution_plan_state(db, job)
@@ -4833,6 +4910,12 @@ def dispatch_scan_work_items(
             _exec_plan_reconcile_log.getLogger(__name__).debug(
                 "execution_plan_reconcile failed: %s", _exec_plan_reconcile_exc
             )
+            if not db.is_active:
+                db.rollback()
+                job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+                if not job:
+                    return {"claimed": len(item_ids), "counts": counts, "error": "scan_missing_after_reconcile_rollback"}
+                state = dict(job.state_data or {})
         _prev_dispatch = dict(state.get("work_queue_last_dispatch") or {})
         _prev_counts = dict(_prev_dispatch.get("counts") or {})
         _should_log_dispatch = bool(item_ids) or counts != _prev_counts or int(_prev_dispatch.get("claimed") or 0) != len(item_ids)
@@ -4847,6 +4930,12 @@ def dispatch_scan_work_items(
             _pp_reconcile_log.getLogger(__name__).debug(
                 "postprocessor_ledger_reconcile failed: %s", _pp_reconcile_exc
             )
+            if not db.is_active:
+                db.rollback()
+                job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+                if not job:
+                    return {"claimed": len(item_ids), "counts": counts, "error": "scan_missing_after_postprocessor_reconcile_rollback"}
+                state = dict(job.state_data or {})
         # Once the queue has active work again, completion is no longer waiting
         # on a producer/postprocessor barrier.  Leaving this marker stale made
         # the UI claim "waiting for next batch" while the next explicit
@@ -4986,6 +5075,18 @@ def dispatch_scan_work_items(
             try:
                 _reconciled_postprocessors = _reconcile_postprocessor_ledger_from_logs(db, scan_id)
                 if _reconciled_postprocessors:
+                    db.flush()
+                    db.refresh(job)
+            except Exception:
+                pass
+            try:
+                _orphaned_postprocessors = 0
+                _postprocessor_state, _orphaned_postprocessors = _reconcile_orphaned_postprocessors(
+                    db,
+                    scan_id,
+                    dict(job.state_data or {}),
+                )
+                if _orphaned_postprocessors:
                     db.flush()
                     db.refresh(job)
             except Exception:
@@ -5207,6 +5308,7 @@ def dispatch_scan_work_items(
                     _final_state["quality_gate_blocked"] = False
                     _final_state["completion_source"] = "quality_gate_exhausted"
                     _final_state.pop("quality_gate_hard_block_fingerprint", None)
+                    _final_state.pop("quality_gate_retry_scheduled_until", None)
                     _final_state = _assign_scan_state(db, job, _final_state)
                     job.status = "completed_with_gaps"
                     job.mission_progress = 100

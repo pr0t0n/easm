@@ -3,9 +3,13 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.models.models import CoverageItem, OffensiveEndpoint, OffensiveHypothesis, ScanJob, ScanLog, ScanWorkItem
+
+
+_ACTIVE_SCAN_STATUSES = {"pending", "queued", "running", "in_progress", "dispatching"}
 
 
 def _count_rows(db: Session, model: Any, scan_id: int) -> int:
@@ -24,6 +28,17 @@ def _snapshot(db: Session, job: ScanJob) -> dict[str, int]:
     }
 
 
+def _acquire_reanalysis_lock(db: Session, scan_id: int) -> bool:
+    try:
+        row = db.execute(
+            text("SELECT pg_try_advisory_xact_lock(:lock_key)"),
+            {"lock_key": 734100000 + int(scan_id)},
+        ).first()
+        return bool(row and row[0])
+    except Exception:
+        return True
+
+
 def run_surface_reanalysis(
     db: Session,
     job: ScanJob,
@@ -33,7 +48,17 @@ def run_surface_reanalysis(
     source_item_id: int | None = None,
     expansion_summary: dict[str, Any] | None = None,
     drain_batch_size: int = 80,
+    validate_findings: bool | None = None,
 ) -> dict[str, Any]:
+    if not _acquire_reanalysis_lock(db, job.id):
+        return {
+            "trigger": str(trigger or "unknown")[:120],
+            "execution_context": execution_context,
+            "source_item_id": source_item_id,
+            "skipped": "surface_reanalysis_already_running",
+            "created_at": datetime.now().isoformat(),
+        }
+
     before = _snapshot(db, job)
 
     from app.services.endpoint_analysis_pipeline import analyze_endpoints_for_scan
@@ -53,8 +78,16 @@ def run_surface_reanalysis(
     planner = plan_hypotheses(db, job)
     drain = ensure_hypothesis_drain_work_item(db, job, batch_size=drain_batch_size)
     coverage = refresh_coverage(db, job)
-    with db.begin_nested():
-        validation_lifecycle = enforce_high_risk_lifecycle(db, job, limit=50)
+    should_validate_findings = (
+        bool(validate_findings)
+        if validate_findings is not None
+        else str(getattr(job, "status", "") or "").lower() not in _ACTIVE_SCAN_STATUSES
+    )
+    if should_validate_findings:
+        with db.begin_nested():
+            validation_lifecycle = enforce_high_risk_lifecycle(db, job, limit=50)
+    else:
+        validation_lifecycle = {"skipped": "scan_active"}
 
     internal_result: dict[str, Any] = {}
     if context == "internal":
