@@ -78,6 +78,20 @@ def test_schedule_poc_validation_never_calls_bare_commit_on_success():
     db.begin_nested.assert_called_once()
 
 
+def test_schedule_poc_validation_accepts_medium_candidate_with_validator():
+    from app.services import poc_validator
+
+    db = _fake_session()
+    job = SimpleNamespace(id=7, status="running")
+    finding = _finding()
+    finding.severity = "medium"
+
+    result = poc_validator.schedule_poc_validation(db, finding, job)
+
+    assert result is True
+    db.begin_nested.assert_called_once()
+
+
 def test_schedule_poc_validation_rejected_for_terminal_scan_never_commits():
     """The scan-not-running early exit also must not touch the shared
     session's transaction directly -- it only queues a ScanLog row."""

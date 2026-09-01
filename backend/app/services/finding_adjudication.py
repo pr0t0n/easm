@@ -584,6 +584,19 @@ def create_validation_wire(
     existing = db.query(ValidationWire).filter(ValidationWire.idempotency_key == key).first()
     if existing is not None:
         return existing
+    reusable = (
+        db.query(ValidationWire)
+        .filter(
+            ValidationWire.finding_id == finding.id,
+            ValidationWire.action_id == action_id,
+            ValidationWire.target_ref == target,
+            ValidationWire.status.in_(["planned", "queued", "blocked", "failed", "awaiting_evidence"]),
+        )
+        .order_by(ValidationWire.id.desc())
+        .first()
+    )
+    if reusable is not None:
+        return reusable
     host = host_from_scope_reference(target)
     prerequisite_errors: list[str] = []
     if action_id == "compare_two_identities" and not (identity_key and secondary):
@@ -863,7 +876,10 @@ def adjudicate_finding(db: Session, job: Any, finding: Any, *, force: bool = Fal
             latest.final_verdict = "needs_human_review"
             latest.reason_code = "adjudication_budget_exhausted"
             latest.completed_at = datetime.now()
+            project_adjudication_to_finding(db, finding, latest)
+            record_adjudication_feedback(db, job, finding, latest)
             db.add(latest)
+            db.add(finding)
             db.flush()
             return adjudication_to_dict(latest, wires=_wires_for_adjudication(db, latest.id))
         raise RuntimeError("adjudication_budget_exhausted")

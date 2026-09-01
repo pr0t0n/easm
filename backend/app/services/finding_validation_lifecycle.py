@@ -13,18 +13,37 @@ from app.services.poc_validator import _select_validation_tool, schedule_poc_val
 from app.services.retest_service import create_retest, run_retest
 
 
+_SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+_FINAL_VERIFICATION_STATUSES = {"confirmed", "refuted", "not_applicable"}
+
+
+def _finding_sort_key(finding: Finding) -> tuple[int, int, float, int]:
+    severity = str(finding.severity or "").lower()
+    return (
+        _SEVERITY_ORDER.get(severity, 5),
+        -int(finding.risk_score or 0),
+        -float(finding.cvss or 0.0),
+        int(finding.id or 0),
+    )
+
+
 def enforce_high_risk_lifecycle(db: Session, job: ScanJob, *, limit: int = 50) -> dict[str, Any]:
-    findings = (
+    rows = (
         db.query(Finding)
         .filter(
             Finding.scan_job_id == job.id,
-            Finding.severity.in_(["critical", "high"]),
             Finding.is_false_positive.is_(False),
         )
         .order_by(Finding.risk_score.desc(), Finding.cvss.desc().nullslast(), Finding.id.asc())
-        .limit(max(1, int(limit)))
+        .limit(max(1, int(limit)) * 4)
         .all()
     )
+    findings = [
+        finding for finding in rows
+        if str(finding.verification_status or "candidate").lower() not in _FINAL_VERIFICATION_STATUSES
+        or str(finding.retest_status or "").lower() == "pending_retest"
+    ]
+    findings = sorted(findings, key=_finding_sort_key)[:max(1, int(limit))]
     result = {
         "seen": len(findings),
         "ready": 0,

@@ -1030,6 +1030,22 @@ def _run_surface_expansion_postprocessor(db: Session, job: ScanJob, item: Any) -
         except Exception:
             db.rollback()
             raise
+        try:
+            from app.services.surface_reanalysis_orchestrator import run_surface_reanalysis
+
+            summary["surface_reanalysis"] = run_surface_reanalysis(
+                db,
+                job,
+                trigger=f"surface_expansion:{tool_lower}",
+                execution_context=execution_context,
+                source_item_id=int(item.id),
+                expansion_summary=dict(summary.get("surface_expansion") or {}),
+                drain_batch_size=80,
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
 
     # Análise estática de JS (endpoints/params/sinks/segredos).
     if item.phase_id in ("P03", "P08", "P09") and item.status == "completed":
@@ -4028,20 +4044,23 @@ def refresh_pentest_inventory(scan_id: int, _inventory_token: str | None = None)
         if not job or _scan_is_terminal(job.status):
             return {"scan_id": scan_id, "skipped": "scan_missing_or_terminal"}
 
-        from app.services.hypothesis_planner import ensure_hypothesis_drain_work_item
-        from app.services.hypothesis_rules import generate_hypotheses_for_scan
-        from app.services.pentest_coverage_service import refresh_coverage
+        from app.services.surface_reanalysis_orchestrator import run_surface_reanalysis
 
-        hypotheses = generate_hypotheses_for_scan(db, job)
-        drain = ensure_hypothesis_drain_work_item(db, job, batch_size=80)
-        coverage = refresh_coverage(db, job)
+        reanalysis = run_surface_reanalysis(
+            db,
+            job,
+            trigger="inventory_refresh",
+            execution_context=str((job.state_data or {}).get("current_surface") or "external"),
+            drain_batch_size=80,
+        )
+        drain = dict(reanalysis.get("drain") or {})
         db.add(ScanLog(
             scan_job_id=job.id,
             source="pentest-inventory",
             level="INFO",
             message=(
-                f"inventory_refresh hypotheses={hypotheses.get('hypotheses_created_or_seen', 0)} "
-                f"coverage={coverage.get('coverage_percent')} drain={drain}"
+                f"inventory_refresh hypotheses={reanalysis.get('hypotheses_created_or_seen', 0)} "
+                f"coverage={(reanalysis.get('coverage') or {}).get('coverage_percent')} drain={drain}"
             )[:2000],
         ))
         db.commit()
@@ -4049,8 +4068,9 @@ def refresh_pentest_inventory(scan_id: int, _inventory_token: str | None = None)
             _schedule_scan_work_dispatch(job.id, countdown=1)
         return {
             "scan_id": job.id,
-            "hypotheses": hypotheses,
-            "coverage": coverage,
+            "reanalysis": reanalysis,
+            "hypotheses": {"hypotheses_created_or_seen": reanalysis.get("hypotheses_created_or_seen", 0)},
+            "coverage": reanalysis.get("coverage") or {},
             "drain": drain,
         }
     except Exception as exc:  # noqa: BLE001

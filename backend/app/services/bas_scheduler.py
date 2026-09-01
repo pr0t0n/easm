@@ -18,6 +18,7 @@ from app.models.models import BasAgent, BasJob, BasSchedule, Finding, ScanJob
 from app.services.bas_dispatcher import dispatch_bas_technique
 from app.services.bas_guardrail_policy import check_bas_authorization
 from app.services.bas_proof import build_bas_proof
+from app.services.bas_reanalysis_orchestrator import run_bas_reanalysis
 from app.services.bas_service_targeting import filter_targets_for_capability
 from app.services.bas_technique_catalog import get_technique
 
@@ -486,6 +487,13 @@ def resume_schedule_run(db: Session, schedule: BasSchedule, scan_job_id: int) ->
 _PORT_SCAN_CHUNK_HOSTS = 16
 
 
+def _maybe_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _all_chunk_addresses(chunk: str) -> list[str]:
     """Every address in a port-scan chunk, including its own network/
     broadcast addresses -- unlike _cidr_hosts (which excludes those as
@@ -694,6 +702,14 @@ def execute_schedule_run(
                     port_finding = _finding_from_job_result(db, port_job, schedule, port_scan_technique, agent)
                     if port_finding:
                         port_job.finding_id = port_finding.id
+                    run_bas_reanalysis(
+                        db,
+                        schedule,
+                        shadow,
+                        trigger="bas_job_completed:port_service_scan",
+                        source_job_id=_maybe_int(port_job.id),
+                        skipped=skipped,
+                    )
                     job_ids.append(port_job.id)
                     db.commit()
 
@@ -827,6 +843,14 @@ def execute_schedule_run(
                     finding = _finding_from_job_result(db, job, schedule, technique, agent)
                     if finding:
                         job.finding_id = finding.id
+                    run_bas_reanalysis(
+                        db,
+                        schedule,
+                        shadow,
+                        trigger=f"bas_job_completed:{technique_key}",
+                        source_job_id=_maybe_int(job.id),
+                        skipped=skipped,
+                    )
                     job_ids.append(job.id)
                     db.commit()
 
@@ -860,6 +884,7 @@ def execute_schedule_run(
     shadow.mission_progress = 100
     shadow.current_step = "Concluído"
     schedule.last_run_at = datetime.now()
+    run_bas_reanalysis(db, schedule, shadow, trigger="bas_run_completed", skipped=skipped)
     db.commit()
 
     return {"scan_job_id": shadow.id, "job_ids": job_ids, "skipped": skipped}

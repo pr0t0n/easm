@@ -236,10 +236,7 @@ def schedule_poc_validation(
             pass
         return False
 
-    # Only HIGH and CRITICAL severity warrant PoC validation cost
     severity = str(getattr(finding, "severity", "") or "").lower()
-    if severity not in ("critical", "high"):
-        return False
 
     # Already confirmed — no need to validate again
     v_status = str(getattr(finding, "verification_status", "") or "candidate")
@@ -445,7 +442,6 @@ def batch_schedule_poc_validations(
         db.query(_Finding)
         .filter(
             _Finding.scan_job_id == scan_job_id,
-            _Finding.severity.in_(["critical", "high"]),
             _or_(_Finding.verification_status.is_(None), _Finding.verification_status != "confirmed"),
             _Finding.is_false_positive.is_(False),
         )

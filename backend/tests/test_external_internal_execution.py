@@ -804,8 +804,18 @@ def test_surface_expansion_postprocessor_preserves_internal_context_and_session(
 
     import app.services.endpoint_discovery as endpoint_discovery
     import app.services.execution_context_service as contexts
+    import app.services.surface_reanalysis_orchestrator as surface_reanalysis
 
     monkeypatch.setattr(endpoint_discovery, "expand_attack_surface", fake_expand_attack_surface)
+    monkeypatch.setattr(
+        surface_reanalysis,
+        "run_surface_reanalysis",
+        lambda *args, **kwargs: {
+            "trigger": kwargs.get("trigger"),
+            "execution_context": kwargs.get("execution_context"),
+            "drain": {"scheduled": 1},
+        },
+    )
     monkeypatch.setattr(contexts, "processor_should_run", lambda *args, **kwargs: (False, None, {}))
     monkeypatch.setattr(contexts, "complete_processor_checkpoint", lambda *args, **kwargs: None)
     monkeypatch.setattr(tasks, "_schedule_pentest_inventory_refresh", lambda *args, **kwargs: calls.setdefault("inventory", True))
@@ -831,6 +841,8 @@ def test_surface_expansion_postprocessor_preserves_internal_context_and_session(
     assert calls["auth_session_id"] == 10
     assert calls["source_target"] == "https://example.test/dashboard"
     assert summary["surface_expansion"] == {"new_endpoints": 2, "reseeded": 1}
+    assert summary["surface_reanalysis"]["trigger"] == "surface_expansion:katana"
+    assert summary["surface_reanalysis"]["execution_context"] == "internal"
     assert calls["inventory"] is True
 
 

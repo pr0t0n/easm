@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from app.models.models import ValidationWire
 from app.services.finding_adjudication import (
     classify_validation_wire_result,
+    create_validation_wire,
     determine_cve_applicability,
     deterministic_verdict,
     estimate_cvss31_for_finding,
@@ -86,10 +87,30 @@ class _Query:
         self.rows = rows
 
     def filter(self, *args, **kwargs):
+        rows = list(self.rows)
+        for criterion in args:
+            left = getattr(criterion, "left", None)
+            key = getattr(left, "key", None)
+            operator_name = getattr(getattr(criterion, "operator", None), "__name__", "")
+            right = getattr(criterion, "right", None)
+            value = getattr(right, "value", None)
+            if key and operator_name == "eq":
+                rows = [row for row in rows if getattr(row, key, None) == value]
+            elif key and operator_name == "in_op":
+                values = set(value or [])
+                rows = [row for row in rows if getattr(row, key, None) in values]
+        self.rows = rows
+        return self
+
+    def order_by(self, *args, **kwargs):
+        self.rows = sorted(self.rows, key=lambda row: int(getattr(row, "id", 0) or 0), reverse=True)
         return self
 
     def first(self):
         return self.rows[0] if self.rows else None
+
+    def all(self):
+        return list(self.rows)
 
 
 class _WireDb:
@@ -152,6 +173,33 @@ def test_existing_work_item_wire_is_idempotent():
 
     first = link_existing_work_item_wire(db, job, finding, item)
     second = link_existing_work_item_wire(db, job, finding, item)
+
+    assert second is first
+    assert len(db.wires) == 1
+
+
+def test_validation_wire_reuses_same_action_target_when_dossier_changes(monkeypatch):
+    monkeypatch.setattr("app.services.finding_adjudication.authorized_scope_for_scan", lambda *_args: ["example.test"])
+
+    db = _WireDb()
+    job = SimpleNamespace(id=9)
+    finding = SimpleNamespace(
+        id=42,
+        details={},
+        url="https://example.test/search?q=1",
+        domain="example.test",
+    )
+    action = {
+        "action_id": "run_family_validator",
+        "target_ref": "https://example.test/search?q=1",
+        "input_bindings": {"method": "GET"},
+    }
+    first_adjudication = SimpleNamespace(id=1, dossier_hash="hash-before", reason_code="missing_evidence")
+    second_adjudication = SimpleNamespace(id=2, dossier_hash="hash-after", reason_code="missing_evidence")
+
+    first = create_validation_wire(db, job, finding, first_adjudication, _dossier(), action)
+    first.status = "failed"
+    second = create_validation_wire(db, job, finding, second_adjudication, _dossier(), action)
 
     assert second is first
     assert len(db.wires) == 1
