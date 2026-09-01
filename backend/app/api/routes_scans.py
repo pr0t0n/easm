@@ -29,7 +29,7 @@ from app.models.models import (
     OffensiveService, OffensiveEndpoint, OffensiveParameter, OffensiveJsAsset, OffensiveApiSpec,
     OffensiveHypothesis, ValidationRun, CoverageItem, RetestRun, PentestOutcomeMetric,
     EndpointObservation, ProcessorCheckpoint, ScanExecutionContext,
-    FindingAdjudication, ValidationWire, FindingIntelligenceSnapshot, BasJob,
+    FindingAdjudication, ValidationWire, FindingIntelligenceSnapshot, BasJob, ObservedRequest,
 )
 from app.schemas.scan import LogResponse, ReportResponse, ScanCreate, ScanResponse, ScanStatusResponse, AutonomyResponse
 from app.services.audit_service import log_audit
@@ -3400,6 +3400,8 @@ def reset_operational_scans(db: Session = Depends(get_db), current_user: User = 
         deleted_offensive_assets = 0
         deleted_offensive_inventory = 0
         deleted_scan_embeddings = 0
+        deleted_bas_jobs = 0
+        deleted_observed_requests = 0
 
         if resettable_scan_ids:
             finding_ids_subquery = (
@@ -3451,6 +3453,16 @@ def reset_operational_scans(db: Session = Depends(get_db), current_user: User = 
             deleted_finding_adjudications = (
                 db.query(FindingAdjudication)
                 .filter(FindingAdjudication.scan_job_id.in_(resettable_scan_ids))
+                .delete(synchronize_session=False)
+            )
+            deleted_bas_jobs = (
+                db.query(BasJob)
+                .filter(BasJob.scan_job_id.in_(resettable_scan_ids))
+                .delete(synchronize_session=False)
+            )
+            deleted_observed_requests = (
+                db.query(ObservedRequest)
+                .filter(ObservedRequest.scan_job_id.in_(resettable_scan_ids))
                 .delete(synchronize_session=False)
             )
             # EndpointObservation references both offensive_endpoints and
@@ -3623,6 +3635,8 @@ def reset_operational_scans(db: Session = Depends(get_db), current_user: User = 
                     "offensive_assets": deleted_offensive_assets,
                     "offensive_inventory": deleted_offensive_inventory,
                     "scan_embeddings": deleted_scan_embeddings,
+                    "bas_jobs": deleted_bas_jobs,
+                    "observed_requests": deleted_observed_requests,
                     "executed_tool_runs": deleted_executed_tool_runs,
                     "scan_audit_logs": deleted_scan_audit_logs,
                     "scan_logs": deleted_scan_logs,
@@ -3652,6 +3666,8 @@ def reset_operational_scans(db: Session = Depends(get_db), current_user: User = 
                 "offensive_assets": deleted_offensive_assets,
                 "offensive_inventory": deleted_offensive_inventory,
                 "scan_embeddings": deleted_scan_embeddings,
+                "bas_jobs": deleted_bas_jobs,
+                "observed_requests": deleted_observed_requests,
                 "executed_tool_runs": deleted_executed_tool_runs,
                 "scan_audit_logs": deleted_scan_audit_logs,
                 "scan_logs": deleted_scan_logs,
