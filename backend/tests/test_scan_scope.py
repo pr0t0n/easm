@@ -1,6 +1,8 @@
 from app.services.scan_scope import (
     authorized_scope_from_target_query,
+    initial_pentest_current_step_for_targets,
     is_already_specific_subdomain,
+    is_explicit_target_inventory,
     is_host_in_scope,
     registrable_domain,
 )
@@ -82,6 +84,27 @@ def test_ip_target_is_not_already_specific_subdomain() -> None:
 def test_url_input_is_normalized_before_checking() -> None:
     assert is_already_specific_subdomain("https://df.si.valid.com.br/path") is True
     assert is_already_specific_subdomain("https://valid.com.br/path") is False
+
+
+def test_single_specific_subdomain_is_explicit_target_inventory() -> None:
+    targets = ["hml-vcivs-icp-brasil.validcertificadora.com.br"]
+
+    assert is_explicit_target_inventory(targets) is True
+    assert initial_pentest_current_step_for_targets(targets) == "P02 · Qualificação DNS/portas/HTTP"
+
+
+def test_single_apex_domain_is_discovery_seed() -> None:
+    targets = ["validcertificadora.com.br"]
+
+    assert is_explicit_target_inventory(targets) is False
+    assert initial_pentest_current_step_for_targets(targets) == "P01 · Enumeração de subdomínios"
+
+
+def test_multiple_targets_are_explicit_target_inventory() -> None:
+    targets = ["validcertificadora.com.br", "api.validcertificadora.com.br"]
+
+    assert is_explicit_target_inventory(targets) is True
+    assert initial_pentest_current_step_for_targets(targets) == "P02 · Qualificação DNS/portas/HTTP"
 
 
 # ── registrable_domain: shares the apex heuristic with is_already_specific_subdomain ──

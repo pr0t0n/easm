@@ -22,6 +22,7 @@ from app.services.policy_service import ensure_default_policy
 from app.services.policy_service import is_target_allowed
 from app.services.strategy_runtime import evaluate_scan_authorization
 from app.services.scan_profiles import normalize_scan_level, scan_profile
+from app.services.scan_scope import initial_pentest_current_step_for_targets, is_explicit_target_inventory
 from app.models.models import ClientPolicy, PolicyAllowlistEntry
 from app.workers.celery_app import celery
 from app.workers.tasks import run_scan_job, run_scan_job_scheduled, run_scan_job_unit, create_vulnerability_learning_task, create_github_hackerone_learning_task
@@ -299,6 +300,7 @@ def _create_scan_from_schedule(
     batch_targets = _parse_targets(target)
     scan_level = normalize_scan_level(scan_level)
     profile = scan_profile(scan_level)
+    explicit_target_inventory = is_explicit_target_inventory(batch_targets)
     if access_group_id is None:
         owner = db.query(User).filter(User.id == owner_id).first()
         if owner and len(owner.groups or []) == 1:
@@ -323,11 +325,15 @@ def _create_scan_from_schedule(
         status="queued" if compliance_status == "approved" else "blocked",
         compliance_status=compliance_status,
         authorization_id=authorization_gate.get("authorization_id"),
-        current_step="1. Amass Subdomain Recon",
+        current_step=initial_pentest_current_step_for_targets(batch_targets),
         state_data={
             "rag_warmup": _warm_skill_rag_for_scan(),
             "scan_level": scan_level,
             "scan_profile": profile,
+            "provided_targets": batch_targets,
+            "target_input_mode": "explicit_target_inventory" if explicit_target_inventory else "discovery_seed",
+            "explicit_target_inventory": explicit_target_inventory,
+            "skip_p01_subdomain_enumeration": explicit_target_inventory,
             "authorization_gate": authorization_gate,
             "strategy_runtime_timeline": [
                 {

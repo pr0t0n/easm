@@ -42,3 +42,12 @@ def test_completed_with_gaps_branch_clears_next_retry_at_and_last_error() -> Non
 
     assert "job.last_error = None" in segment
     assert "job.next_retry_at = None" in segment
+
+
+def test_operator_action_only_quality_gate_does_not_schedule_hard_retry() -> None:
+    source = inspect.getsource(tasks.dispatch_scan_work_items)
+    guard_pos = source.index("_operator_action_only =")
+    retry_pos = source.index("hard_retry_count < QUALITY_GATE_HARD_BLOCK_MAX_RETRIES", guard_pos)
+    retry_segment = source[retry_pos:source.index("hard_retry_count += 1", retry_pos)]
+
+    assert "and not _operator_action_only" in retry_segment

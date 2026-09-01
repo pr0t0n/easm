@@ -115,6 +115,21 @@ def is_already_specific_subdomain(target: str) -> bool:
     return len(host.split(".")) > len(apex)
 
 
+def is_explicit_target_inventory(targets: list[str]) -> bool:
+    normalized = [_normalize_scope_root(target) for target in targets if _normalize_scope_root(target)]
+    return len(normalized) > 1 or (
+        len(normalized) == 1 and is_already_specific_subdomain(normalized[0])
+    )
+
+
+def initial_pentest_current_step_for_targets(targets: list[str]) -> str:
+    return (
+        "P02 · Qualificação DNS/portas/HTTP"
+        if is_explicit_target_inventory(targets)
+        else "P01 · Enumeração de subdomínios"
+    )
+
+
 def registrable_domain(target: str) -> str:
     """Return `target`'s registrable/apex domain (e.g. valid.com.br for
     api-messaging.services-valid.com.br). Falls back to the normalized host

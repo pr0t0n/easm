@@ -40,6 +40,7 @@ from app.services.strategy_runtime import (
     parse_scope_targets,
     resolve_active_exploit_authorization,
 )
+from app.services.scan_scope import initial_pentest_current_step_for_targets, is_explicit_target_inventory
 from app.services.scan_profiles import normalize_scan_level, scan_profile
 from app.services.scan_quality import build_scan_quality
 from app.services.kali_executor import cancel_scan_jobs_in_kali_runner
@@ -2648,10 +2649,7 @@ def create_scan(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="execution_plan invalido")
     profile = scan_profile(scan_level)
     requested_targets = parse_scope_targets(payload.target_query)
-    from app.services.scan_scope import is_already_specific_subdomain
-    explicit_target_inventory = len(requested_targets) > 1 or (
-        len(requested_targets) == 1 and is_already_specific_subdomain(requested_targets[0])
-    )
+    explicit_target_inventory = is_explicit_target_inventory(requested_targets)
     auth_config = payload.auth_config if isinstance(payload.auth_config, dict) else None
     source_config = payload.source_config if isinstance(payload.source_config, dict) else None
     initial_state: dict[str, Any] = {
@@ -2726,11 +2724,7 @@ def create_scan(
         current_step=(
             "Aguardando captura de credencial para iniciar G1 interno"
             if compliance_status == "approved" and execution_plan == "internal_then_external"
-            else (
-                "P02 · Qualificação DNS/portas/HTTP"
-                if explicit_target_inventory
-                else "P01 · Enumeração de subdomínios"
-            )
+            else initial_pentest_current_step_for_targets(requested_targets)
         ),
         state_data=initial_state,
     )

@@ -379,7 +379,9 @@ def _is_explicit_target_inventory(state: dict[str, Any], targets: list[str]) -> 
     mode = str(state.get("target_input_mode") or "").strip().lower()
     if mode in {"explicit_target_inventory", "provided_target_inventory", "provided_targets"}:
         return True
-    return len([target for target in targets if str(target or "").strip()]) > 1
+    from app.services.scan_scope import is_explicit_target_inventory
+
+    return is_explicit_target_inventory(targets)
 
 
 def _is_local_or_lab_target(target: str) -> bool:
