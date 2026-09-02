@@ -30,16 +30,19 @@ class _BackfillDb:
         self.updated = 0
         self.commits = 0
         self.rollbacks = 0
+        self.selected_limit = None
 
     def execute(self, statement, params=None):
         sql = str(statement)
         if "COUNT(*) FROM rag_knowledge_store WHERE embedding IS NULL" in sql:
             return _ScalarResult(self.pending)
         if "SELECT chunk_id, content" in sql:
-            return _MappingResult([
+            self.selected_limit = int((params or {}).get("limit") or 0)
+            rows = [
                 {"chunk_id": "skill:a:0", "content": "first skill"},
                 {"chunk_id": "skill:b:0", "content": "second skill"},
-            ])
+            ]
+            return _MappingResult(rows[: self.selected_limit])
         if "UPDATE rag_knowledge_store" in sql:
             self.updated += 1
             return _ScalarResult(None)
@@ -71,6 +74,22 @@ def test_backfill_missing_embeddings_updates_pending_chunks(monkeypatch):
     assert result["errors"] == 0
     assert db.updated == 2
     assert db.commits == 1
+
+
+def test_backfill_missing_embeddings_clamps_large_batches(monkeypatch):
+    from app.services import rag_repository
+
+    db = _BackfillDb(pending=1000)
+    monkeypatch.setenv("EMBED_BACKFILL_BATCH_LIMIT", "7")
+    monkeypatch.setattr("app.services.embedding_service.is_available", lambda: True)
+    monkeypatch.setattr("app.services.embedding_service.embed_texts", lambda texts: [[0.1] * 384 for _ in texts])
+    monkeypatch.setattr(rag_repository, "rebuild_embedding_index", lambda **kwargs: None)
+
+    result = rag_repository.backfill_missing_embeddings(limit=1000, db=db)
+
+    assert db.selected_limit == 7
+    assert result["updated"] == 2
+    assert result["remaining"] == 998
 
 
 def test_backfill_missing_embeddings_reports_unavailable_model(monkeypatch):

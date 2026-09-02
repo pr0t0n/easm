@@ -1,4 +1,5 @@
 import inspect
+from pathlib import Path
 
 
 def test_embeddings_do_not_download_at_runtime_by_default() -> None:
@@ -8,8 +9,21 @@ def test_embeddings_do_not_download_at_runtime_by_default() -> None:
 
     source = inspect.getsource(embedding_service._get_model)
     assert "if not EMBED_ALLOW_RUNTIME_DOWNLOAD" in source
+    assert '"local_files_only": True' in source
     assert "_load_failed = True" in source
     assert "return None" in source
+
+
+def test_embeddings_allow_preloaded_fastembed_cache_without_runtime_download(tmp_path: Path) -> None:
+    from app.services import embedding_service
+
+    empty_cache = tmp_path / "empty"
+    empty_cache.mkdir()
+    assert embedding_service._has_local_fastembed_cache(str(empty_cache)) is False
+
+    model_cache = tmp_path / "cache"
+    (model_cache / "models--qdrant--bge-small-en-v1.5-onnx-q").mkdir(parents=True)
+    assert embedding_service._has_local_fastembed_cache(str(model_cache)) is True
 
 
 def test_dispatcher_commits_terminal_state_before_pentest_synthesis() -> None:

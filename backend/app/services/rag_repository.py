@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from typing import Any
 
@@ -20,6 +21,7 @@ from sqlalchemy.orm import Session
 from app.db.session import SessionLocal
 
 logger = logging.getLogger(__name__)
+DEFAULT_EMBEDDING_BACKFILL_BATCH = 32
 
 # Mesma regex do mcp_server original para compatibilidade de tokens.
 _TOKEN_RE = re.compile(r"[a-zA-Z0-9_\-]{3,}")
@@ -386,7 +388,8 @@ def backfill_missing_embeddings(
     limit: int = 500,
     db: Session | None = None,
 ) -> dict[str, Any]:
-    limit = max(1, min(int(limit or 500), 5000))
+    max_batch = max(1, min(int(os.getenv("EMBED_BACKFILL_BATCH_LIMIT") or DEFAULT_EMBEDDING_BACKFILL_BATCH), 256))
+    limit = max(1, min(int(limit or max_batch), max_batch))
     own_session = db is None
     if own_session:
         db = SessionLocal()

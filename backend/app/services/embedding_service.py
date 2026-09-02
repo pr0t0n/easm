@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import threading
+from pathlib import Path
 
 EMBED_MODEL = os.getenv("EMBED_MODEL", "BAAI/bge-small-en-v1.5")
 EMBED_DIM = int(os.getenv("EMBED_DIM", "384"))
@@ -36,15 +37,6 @@ def _get_model():
         if _load_failed:
             return None
         try:
-            # Scan completion paths must never block on external model
-            # downloads.  If embeddings were not preloaded by an explicit
-            # maintenance/backfill flow, fail closed here and let callers fall
-            # back to lexical/empty RAG results.  Set
-            # EMBED_ALLOW_RUNTIME_DOWNLOAD=true only in controlled jobs where a
-            # HuggingFace download is acceptable.
-            if not EMBED_ALLOW_RUNTIME_DOWNLOAD:
-                _load_failed = True
-                return None
             from fastembed import TextEmbedding
 
             cache_dir = os.getenv("FASTEMBED_CACHE", "/app/.fastembed_cache")
@@ -55,11 +47,24 @@ def _get_model():
             # threads=1: o onnxruntime, por padrão, cria arenas de memória/threads
             # dimensionadas pelos núcleos da CPU — nos workers (pool=threads) isso
             # inflava a memória e causava OOM. 1 thread mantém o footprint enxuto.
-            _model = TextEmbedding(model_name=EMBED_MODEL, cache_dir=cache_dir, threads=1)
+            kwargs = {"local_files_only": True} if not EMBED_ALLOW_RUNTIME_DOWNLOAD else {}
+            if not EMBED_ALLOW_RUNTIME_DOWNLOAD and not _has_local_fastembed_cache(cache_dir):
+                _load_failed = True
+                return None
+            _model = TextEmbedding(model_name=EMBED_MODEL, cache_dir=cache_dir, threads=1, **kwargs)
             return _model
         except Exception:
             _load_failed = True
             return None
+
+
+def _has_local_fastembed_cache(cache_dir: str | None) -> bool:
+    if not cache_dir:
+        return False
+    root = Path(cache_dir)
+    if not root.exists():
+        return False
+    return any(root.glob("models--*")) or any(root.glob("fast-*"))
 
 
 def embed_text(text: str) -> list[float] | None:
