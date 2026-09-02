@@ -20,3 +20,9 @@ def test_dashboard_control_plane_reuses_cockpit_contract():
     assert "get_cockpit(" in source
     assert '"verification"' in source
     assert '"crown_jewels"' in source
+
+
+def test_dashboard_control_plane_exposes_quality_loop_through_cockpit():
+    source = inspect.getsource(routes_scans.get_cockpit)
+    assert '"quality"' in source
+    assert "build_scan_quality" in source

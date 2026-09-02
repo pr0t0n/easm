@@ -488,6 +488,21 @@ def knowledge_health(*, db: Session | None = None) -> dict[str, Any]:
         accepted_total = int(
             db.execute(text("SELECT COUNT(*) FROM vulnerability_learnings WHERE status = 'accepted'")).scalar() or 0
         )
+        pending_review_total = int(
+            db.execute(text("SELECT COUNT(*) FROM vulnerability_learnings WHERE status = 'pending_review'")).scalar() or 0
+        )
+        pending_ready_for_review = int(
+            db.execute(
+                text(
+                    "SELECT COUNT(*) FROM vulnerability_learnings "
+                    "WHERE status = 'pending_review' "
+                    "AND summary IS NOT NULL "
+                    "AND trim(summary) <> '' "
+                    "AND technique_count > 0"
+                )
+            ).scalar()
+            or 0
+        )
 
         issues: list[str] = []
         if store_total == 0:
@@ -520,6 +535,13 @@ def knowledge_health(*, db: Session | None = None) -> dict[str, Any]:
             "vulnerability_learnings": {
                 "accepted_total": accepted_total,
                 "accepted_without_synthesis": unsynthesized_accepted,
+                "triage": {
+                    "version": "learning-triage-status-v1",
+                    "pending_review": pending_review_total,
+                    "pending_ready_for_review": pending_ready_for_review,
+                    "accepted_without_synthesis": unsynthesized_accepted,
+                    "promotion_policy": "only_accept_synthesized_or_curated_rows",
+                },
             },
         }
     except Exception as exc:

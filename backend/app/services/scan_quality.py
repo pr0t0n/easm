@@ -33,6 +33,7 @@ from app.services.phase_monitor import build_phase_monitor
 from app.services.scan_execution_metrics import summarize_work_items
 from app.services.offensive_operator_core import PHASE_CONTRACTS
 from app.services.scan_profiles import scan_profile
+from app.services.loop_agent_telemetry import build_loop_agent_quality_summary
 
 
 VERIFIED_STATUSES = {"confirmed", "proven", "validated", "verified", "true_positive"}
@@ -1950,6 +1951,13 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
         components=components,
     )
     business_logic_precondition_summary = _build_business_logic_precondition_summary(business_logic)
+    loop_agent = build_loop_agent_quality_summary(
+        state=state,
+        quality_gate=quality_gate,
+        findings=finding_rows,
+        work_items=work_items,
+        job=job,
+    )
 
     return {
         "scan_id": job.id,
@@ -1973,6 +1981,9 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
         "depth_requirements": depth_requirements,
         "operational_sli": dict((job.state_data or {}).get("operational_sli") or {}),
         "runtime_visibility": _runtime_visibility(job, all_validations, artifacts, work_items),
+        "loop_agent": loop_agent,
+        "finding_evidence_lifecycle": loop_agent["finding_evidence_lifecycle"],
+        "operational_observability": loop_agent["operational_observability"],
         "execution_metrics": execution_metrics,
         "components": components,
         "summary": {
@@ -2227,6 +2238,9 @@ def _persist_quality_state(
         "preflight_summary",
         "auth_precondition_summary",
         "business_logic_precondition_summary",
+        "finding_evidence_lifecycle",
+        "operational_observability",
+        "loop_agent",
     ):
         if key in quality:
             state[key] = quality[key]

@@ -27,6 +27,7 @@ from app.services.bas_exclusion import BAS_FINDING_TOOL, exclude_quarantined_bas
 from app.services.bas_scheduler import _split_targets
 from app.services.bas_technique_catalog import get_technique, list_techniques
 from app.services.crown_jewel_analyzer import identify_crown_jewels
+from app.services.loop_agent_telemetry import build_bas_loop_summary
 
 # Compliance-framework relevance per BAS category. This is a coarse, static,
 # code-defined mapping (like the rest of this module's catalogs) -- a full
@@ -2244,6 +2245,15 @@ def executive_report(
     chain_paths = chain_attack_path(db, group_ids=group_ids, schedule_id=schedule_id)
     priorities = action_priorities(db, group_ids=group_ids, schedule_id=schedule_id)
     port_scan = port_scan_observability(db, group_ids=group_ids, schedule_id=schedule_id)
+    loop_agent = build_bas_loop_summary(
+        score=score,
+        coverage=coverage,
+        exposure=exposure,
+        heatmap=heatmap,
+        findings=findings,
+        priorities=priorities,
+        port_scan=port_scan,
+    )
 
     total_techniques = len(list_techniques())
     tested_techniques = sum(1 for row in heatmap if row["times_tested"] > 0)
@@ -2291,6 +2301,7 @@ def executive_report(
         "risk_score": score,
         "severity_counts": severity_counts,
         "framework_coverage": coverage,
+        "loop_agent": loop_agent,
         "exposure": exposure,
         "crown_jewels": jewels,
         "attack_heatmap": heatmap,

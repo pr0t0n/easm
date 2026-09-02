@@ -2867,6 +2867,7 @@ def bulk_review_vulnerability_learnings(
             "ok": True,
             "status": status_value,
             "reviewed_count": result["reviewed_count"],
+            "skipped_count": result.get("skipped_count", 0),
             "missing_ids": [],
             "items": [],
             "summary": vulnerability_learning_summary(db),

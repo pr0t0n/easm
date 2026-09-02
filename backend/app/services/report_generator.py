@@ -468,6 +468,7 @@ def _render_quality_gate_html(quality: dict[str, Any]) -> str:
     _grade = _html.escape(str(quality.get("grade") or "—"))
     _label = _html.escape(str(quality.get("label") or ""))
     _gate = dict(quality.get("quality_gate") or {})
+    _loop = dict((quality.get("loop_agent") or {}).get("quality_gate_loop") or {})
     _gate_status = _html.escape(str(_gate.get("status") or "not_run").replace("_", " "))
     _gate_bg = "#fff3cd" if _gate.get("status") in {"remediation_scheduled", "exhausted"} or _score < 70 else "#eafaf1"
     _gate_border = "#f39c12" if _gate.get("status") in {"remediation_scheduled", "exhausted"} or _score < 70 else "#27ae60"
@@ -484,6 +485,18 @@ def _render_quality_gate_html(quality: dict[str, Any]) -> str:
         f"{_html.escape(name.replace('_', ' '))}: {float(item.get('score') or 0):.0f}%"
         for name, item in _components.items()
     )
+    _loop_bits = []
+    if _loop:
+        _loop_bits.append(f"rodadas={int(_loop.get('rounds') or 0)}")
+        if _loop.get("first_score") is not None and _loop.get("last_score") is not None:
+            _loop_bits.append(f"score {_loop.get('first_score')} -> {_loop.get('last_score')}")
+        if _loop.get("score_delta") is not None:
+            _loop_bits.append(f"delta={_loop.get('score_delta')}")
+        _loop_bits.append(f"ações={int(_loop.get('actions_scheduled') or 0)}")
+    _loop_html = (
+        '<p style="font-size:11px;color:#555;margin-bottom:8px">'
+        f'<strong>Loop Agent:</strong> {_html.escape(" · ".join(_loop_bits))}</p>'
+    ) if _loop_bits else ""
 
     _blocking_ids = list((dict(quality.get("depth_requirements") or {})).get("blocking_requirement_ids") or [])
     _preflight_summary = dict(quality.get("preflight_summary") or {})
@@ -557,6 +570,7 @@ def _render_quality_gate_html(quality: dict[str, Any]) -> str:
         f'{(" · rodada " + str(_gate.get("rounds"))) if _gate.get("rounds") else ""}'
         '</p>'
         f'<p style="font-size:11px;color:#777;margin-bottom:8px">{_html.escape(_component_bits)}</p>'
+        + _loop_html
         + (f'<ul style="font-size:12px;color:#555;margin-left:18px">{_gap_rows}</ul>' if _gap_rows else
            '<p style="font-size:12px;color:#555">Sem gaps automáticos pendentes.</p>')
         + _explain_html

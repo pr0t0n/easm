@@ -15,6 +15,7 @@ from typing import Any
 from app.services.mcp_client import MCPClient
 from app.services.offensive_operator_core import PHASE_ORDER, default_phase_contracts
 from app.services.skill_runtime import resolve_skill_for_phase
+from app.services.loop_agent_telemetry import build_methodology_planner_trace
 
 
 PLAN_VERSION = 1
@@ -74,11 +75,13 @@ def resolve_methodology_plan(job: Any, *, force: bool = False) -> dict[str, Any]
 
     proposal, llm_meta = _llm_select(job, phase_context)
     contracts = _validate_and_compile(base_contracts, phase_context, proposal)
+    planner_trace = build_methodology_planner_trace(phase_context=phase_context, llm_meta=llm_meta)
     plan = {
         "version": PLAN_VERSION,
-        "source": "llm_mcp_rag" if not llm_meta.get("fallback") else "deterministic_mcp_rag_fallback",
+        "source": planner_trace["source"],
         "generated_at": datetime.utcnow().isoformat() + "Z",
         "llm": llm_meta,
+        "trace": planner_trace,
         "contracts": contracts,
         "decision_boundary": {
             "llm_may_select": ["skill_ids", "tool_ids", "rationale"],
@@ -131,9 +134,23 @@ Inclua todas as fases P01-P22. Se nao houver sinal para especializar, escolha o 
         parsed = _extract_json_object(raw or "")
         if not isinstance(parsed, dict) or not isinstance(parsed.get("phases"), dict):
             raise ValueError("invalid_methodology_json")
-        return parsed, {"model": model, "fallback": False, "response_hash": _hash(raw or "")}
+        return parsed, {
+            "model": model,
+            "fallback": False,
+            "response_hash": _hash(raw or ""),
+            "attempted": True,
+            "response_valid": True,
+        }
     except Exception as exc:  # noqa: BLE001
-        return {"phases": {}}, {"model": "unavailable", "fallback": True, "error": f"{type(exc).__name__}:{exc}"[:300]}
+        error = f"{type(exc).__name__}:{exc}"[:300]
+        return {"phases": {}}, {
+            "model": "unavailable",
+            "fallback": True,
+            "attempted": True,
+            "response_valid": False,
+            "fallback_reason": error,
+            "error": error,
+        }
 
 
 def _validate_and_compile(
