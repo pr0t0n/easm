@@ -21,6 +21,7 @@ for this same (very large) function, rather than driving a full execution.
 import inspect
 
 from app.workers import tasks
+from app.services import offensive_operator_runner
 
 
 def test_quality_gate_exhausted_branch_clears_next_retry_at_and_last_error() -> None:
@@ -51,3 +52,11 @@ def test_operator_action_only_quality_gate_does_not_schedule_hard_retry() -> Non
     retry_segment = source[retry_pos:source.index("hard_retry_count += 1", retry_pos)]
 
     assert "and not _operator_action_only" in retry_segment
+
+
+def test_offensive_operator_work_queue_completion_uses_terminal_work_items() -> None:
+    source = inspect.getsource(offensive_operator_runner.run_offensive_operator_scan)
+
+    assert "work_queue_completed_phases = _work_queue_successful_phase_ids(db, job.id) if _wq_all_done else []" in source
+    assert "execution_success_count = completed_count + partial_count + len(work_queue_completed_phases)" in source
+    assert 'job.status = "completed" if execution_success_count > 0 else "failed"' in source

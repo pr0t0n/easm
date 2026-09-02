@@ -74,6 +74,7 @@ def test_blind_sqli_and_quiet_fuzzers_have_explicit_timeout_contracts() -> None:
     sqlmap_body = source.split("sqlmap_body:", 1)[1].split("dalfox_xss:", 1)[0]
     ffuf = source.split("ffuf_dirs:", 1)[1].split("ffuf_files:", 1)[0]
     wfuzz = source.split("wfuzz_param_names:", 1)[1].split("gobuster_dir:", 1)[0]
+    feroxbuster = source.split("feroxbuster_recursive:", 1)[1].split("dirsearch_paths:", 1)[0]
 
     assert "timeout: 3600" in sqlmap_basic
     assert "timeout: 3600" in sqlmap_body
@@ -81,6 +82,7 @@ def test_blind_sqli_and_quiet_fuzzers_have_explicit_timeout_contracts() -> None:
     assert "silence_timeout: 0" in sqlmap_basic
     assert "silence_timeout: 0" in ffuf
     assert "timeout: 600" in wfuzz
+    assert "allowed_return_codes: [0, 1]" in feroxbuster
 
 
 def test_httpx_batch_profile_uses_conservative_waf_safe_concurrency() -> None:

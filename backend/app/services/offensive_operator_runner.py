@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 import requests
 
 from app.core.config import settings
-from app.models.models import Finding, ScanJob, ScanLog
+from app.models.models import Finding, ScanJob, ScanLog, ScanWorkItem
 from app.services.offensive_operator_core import (
     BACKEND_LOCAL_TOOL_NAMES,
     MCPToolExecutor,
@@ -1925,6 +1925,20 @@ def _merge_phase_ledgers(existing: list[dict[str, Any]], additions: list[dict[st
         seen.add(key)
         merged.append(ledger)
     return merged
+
+
+def _work_queue_successful_phase_ids(db: Any, scan_id: int) -> list[str]:
+    rows = (
+        db.query(ScanWorkItem.phase_id)
+        .filter(
+            ScanWorkItem.scan_job_id == int(scan_id),
+            ScanWorkItem.status.in_(["completed", "done"]),
+        )
+        .distinct()
+        .all()
+    )
+    phase_ids = {str(row[0] or "") for row in rows if str(row[0] or "").strip()}
+    return [phase for phase in PHASE_ORDER if phase in phase_ids]
 
 
 # Tools que rodam NO BACKEND (não no kali via MCP). O operator roda no processo
@@ -4541,9 +4555,14 @@ def run_offensive_operator_scan(
     completed_count = len([l for l in phase_ledgers if l.get("status") == "completed"])
     partial_count = len([l for l in phase_ledgers if l.get("status") == "partial"])
     blocked_count = len([l for l in phase_ledgers if l.get("status") == "blocked"])
+    work_queue_completed_phases = _work_queue_successful_phase_ids(db, job.id) if _wq_all_done else []
+    execution_success_count = completed_count + partial_count + len(work_queue_completed_phases)
 
     # ─ Finalize capability ledger: governance + executive_analyst from campaign report ─
-    completed_phases = [l.get("phase_id") for l in phase_ledgers if l.get("status") == "completed"]
+    completed_phases = list(dict.fromkeys(
+        [l.get("phase_id") for l in phase_ledgers if l.get("status") == "completed"]
+        + work_queue_completed_phases
+    ))
     state["easm_rating"] = {
         "campaign_id": offensive_state.get("campaign_id"),
         "phases_completed": completed_phases,
@@ -4558,9 +4577,9 @@ def run_offensive_operator_scan(
     }
     state["executive_summary"] = state.get("executive_summary") or {
         "target": targets[0] if targets else "",
-        "phases_executed": len(phase_ledgers),
+        "phases_executed": max(len(phase_ledgers), len(completed_phases)),
         "phases_completed": len(completed_phases),
-        "campaign_status": "completed" if (completed_count + partial_count) > 0 else "failed",
+        "campaign_status": "completed" if execution_success_count > 0 else "failed",
     }
     mark_capability(state, "governance", source="report_builder", status="completed",
                     evidence={"easm_rating": state["easm_rating"]})
@@ -4664,7 +4683,7 @@ def run_offensive_operator_scan(
 
     try:
         job.state_data = state
-        job.mission_progress = min(100, int(round((len(phase_ledgers) / max(1, len(PHASE_ORDER))) * 100)))
+        job.mission_progress = min(100, int(round((max(len(phase_ledgers), len(completed_phases)) / max(1, len(PHASE_ORDER))) * 100)))
         # A scan is "completed" if at least one phase ran (completed or partial).
         # It is "failed" only when zero phases produced any result at all.
         _dead_targets = list((state or {}).get("dead_targets") or [])
@@ -4683,7 +4702,7 @@ def run_offensive_operator_scan(
                            message=(f"scan_finalizado=Timeout Destination dead_targets={_dead_targets} "
                                     f"findings_preservados=sim phases_completed={completed_count} partial={partial_count}")))
         else:
-            job.status = "completed" if (completed_count + partial_count) > 0 else "failed"
+            job.status = "completed" if execution_success_count > 0 else "failed"
             job.current_step = "P22 Campaign Report"
         if job.status == "completed":
             job.mission_progress = 100

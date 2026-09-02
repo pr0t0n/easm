@@ -1,8 +1,8 @@
 """
-Crawl public GitHub HackerOne report indexes and seed accepted learnings.
+Crawl public GitHub HackerOne report indexes and seed reviewable learnings.
 
 Targets:
-- cap each crawler run at 10,000 accepted knowledge records by default;
+- cap each crawler run at 10,000 pending-review records by default;
 - distribute records across P01-P22 and runtime skills as evenly as the cap allows.
 
 Run inside backend container:
