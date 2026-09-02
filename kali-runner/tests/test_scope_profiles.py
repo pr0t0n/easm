@@ -131,6 +131,18 @@ def test_kali_proxy_is_health_checked_for_httpx_not_global() -> None:
     assert 'HTTPS_PROXY: "${KALI_HTTPS_PROXY:-}"' in kali_section
 
 
+def test_kali_runner_dev_service_mounts_tests() -> None:
+    source = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    kali_section = source.split("\n  kali_runner:", 1)[1].split("\n    cap_add:", 1)[0]
+
+    assert "./kali-runner/tests:/app/tests:ro" in kali_section
+    assert "./kali-runner/scripts:/app/scripts:ro" in kali_section
+    assert "./kali-runner:/kali-runner:ro" in kali_section
+    assert "./backend:/backend:ro" in kali_section
+    assert "./mcp-server:/mcp-server:ro" in kali_section
+    assert "./docker-compose.yml:/docker-compose.yml:ro" in kali_section
+
+
 def test_naabu_batch_profile_avoids_resolver_and_nat_exhaustion() -> None:
     source = (ROOT / "kali-runner" / "profiles" / "reconnaissance.yaml").read_text(encoding="utf-8")
     section = source.split("naabu_top1000_batch:", 1)[1].split("httpx_probe:", 1)[0]

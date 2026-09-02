@@ -1,4 +1,8 @@
 from app.services import skill_rag_indexer
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class _ScalarResult:
@@ -91,3 +95,18 @@ def test_warm_skill_rag_combines_index_backfill_and_health(monkeypatch):
     assert result["ok"] is True
     assert result["index"]["already_ready"] is True
     assert result["embedding_backfill"]["updated"] == 1
+
+
+def test_runtime_learning_requires_synthesis_or_curated_seed() -> None:
+    source = (ROOT / "app" / "services" / "vulnerability_learning_service.py").read_text(encoding="utf-8")
+
+    assert "def _trusted_accepted_learning_clause" in source
+    assert 'VulnerabilityLearning.source_kind == "curated_learning_seed"' in source
+    assert "VulnerabilityLearning.raw_llm_response.isnot(None)" in source
+    assert source.count(".filter(_trusted_accepted_learning_clause())") >= 5
+
+
+def test_rag_health_ignores_curated_seed_without_llm_synthesis() -> None:
+    source = (ROOT / "app" / "services" / "rag_repository.py").read_text(encoding="utf-8")
+
+    assert "COALESCE(source_kind, '') <> 'curated_learning_seed'" in source

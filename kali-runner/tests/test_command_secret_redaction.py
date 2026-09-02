@@ -58,3 +58,30 @@ def test_no_auth_headers_leaves_command_unchanged(monkeypatch, tmp_path):
     command = "nmap -sV valid.com"
     assert runner._redact_secrets_from_command(command, None) == command
     assert runner._redact_secrets_from_command(command, {}) == command
+
+
+def test_wafw00f_gets_healthy_outbound_proxy(monkeypatch, tmp_path):
+    runner = _load_runner(monkeypatch, tmp_path)
+    monkeypatch.setattr(runner, "_proxy_connectable", lambda proxy: True)
+
+    argv = runner._inject_outbound_proxy(
+        ["wafw00f", "https://valid.com"],
+        {"KALI_OUTBOUND_PROXY": "http://proxy.local:3128"},
+        "wafw00f",
+    )
+
+    assert argv == ["wafw00f", "https://valid.com", "--proxy", "http://proxy.local:3128"]
+    assert runner._egress_context(argv, {"KALI_OUTBOUND_PROXY": "http://proxy.local:3128"}, {"tool": "wafw00f"})["egress_mode_declared"] == "proxy"
+
+
+def test_wafw00f_keeps_direct_route_when_proxy_is_unhealthy(monkeypatch, tmp_path):
+    runner = _load_runner(monkeypatch, tmp_path)
+    monkeypatch.setattr(runner, "_proxy_connectable", lambda proxy: False)
+
+    argv = runner._inject_outbound_proxy(
+        ["wafw00f", "https://valid.com"],
+        {"KALI_OUTBOUND_PROXY": "http://proxy.local:3128"},
+        "wafw00f",
+    )
+
+    assert argv == ["wafw00f", "https://valid.com"]

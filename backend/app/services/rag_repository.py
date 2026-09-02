@@ -476,6 +476,7 @@ def knowledge_health(*, db: Session | None = None) -> dict[str, Any]:
                 text(
                     "SELECT COUNT(*) FROM vulnerability_learnings "
                     "WHERE status = 'accepted' "
+                    "AND COALESCE(source_kind, '') <> 'curated_learning_seed' "
                     "AND (raw_llm_response IS NULL OR trim(raw_llm_response) = '')"
                 )
             ).scalar()

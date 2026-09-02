@@ -6,3 +6,5 @@ uvicorn[standard]==0.30.6
 # bumped. >=2.10 has prebuilt wheels for current Python releases.
 pydantic>=2.10
 pyyaml==6.0.2
+pytest==8.3.4
+httpx==0.28.1

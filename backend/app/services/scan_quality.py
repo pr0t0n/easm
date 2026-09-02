@@ -434,6 +434,31 @@ def _item_mapping(value: Any) -> dict[str, Any]:
     return dict(value or {}) if isinstance(value, dict) else {}
 
 
+def _recon_egress_mode_for_quality(phase_id: str, observation: dict[str, Any], context: dict[str, Any]) -> str:
+    mode = str(observation.get("mode") or context.get("egress_mode_declared") or "unknown").strip().lower()
+    if mode in {"", "unknown"} and phase_id == "P02":
+        return "direct"
+    return mode or "unknown"
+
+
+def _recon_egress_consistency(p02_modes: list[str], p06_modes: list[str]) -> dict[str, Any]:
+    phase_conflicts = {
+        phase: modes
+        for phase, modes in {
+            "P02": sorted(set(p02_modes)),
+            "P06": sorted(set(p06_modes)),
+        }.items()
+        if len(modes) > 1
+    }
+    cross_transport_difference = bool(p02_modes and p06_modes and set(p02_modes) != set(p06_modes))
+    return {
+        "consistent": not phase_conflicts,
+        "phase_conflicts": phase_conflicts,
+        "cross_transport_difference": cross_transport_difference,
+        "comparison": "phase_transport_contract",
+    }
+
+
 def _item_text(*values: Any) -> str:
     return " ".join(str(value or "") for value in values).lower()
 
@@ -1272,8 +1297,8 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
         result = dict(item.result or {}) if isinstance(item.result, dict) else {}
         observation = dict(result.get("egress_observation") or {}) if isinstance(result.get("egress_observation"), dict) else {}
         context = dict(result.get("egress_context") or {}) if isinstance(result.get("egress_context"), dict) else {}
-        mode = str(observation.get("mode") or context.get("egress_mode_declared") or "unknown")
         phase = str(item.phase_id or "")
+        mode = _recon_egress_mode_for_quality(phase, observation, context)
         if mode:
             egress_modes[mode] += 1
             if phase:
@@ -1293,7 +1318,8 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
             missing_tool_binary_items.append(item)
     p02_modes = sorted(p02_p06_modes.get("P02") or [])
     p06_modes = sorted(p02_p06_modes.get("P06") or [])
-    mixed_recon_egress = bool(p02_modes and p06_modes and set(p02_modes) != set(p06_modes))
+    recon_egress_consistency = _recon_egress_consistency(p02_modes, p06_modes)
+    mixed_recon_egress = not bool(recon_egress_consistency.get("consistent"))
     p01_zero_output_items = []
     p01_provider_degraded_items = []
     for item in work_items:
@@ -1554,6 +1580,7 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
             "p02_egress_modes": p02_modes,
             "p06_egress_modes": p06_modes,
             "mixed_recon_egress": mixed_recon_egress,
+            "recon_egress_consistency": recon_egress_consistency,
             "missing_tool_binary_items": len(missing_tool_binary_items),
             "p01_zero_output_items": len(p01_zero_output_items),
             "p01_provider_degraded_items": len(p01_provider_degraded_items),

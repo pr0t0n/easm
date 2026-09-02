@@ -699,6 +699,45 @@ def _inject_auth_headers(argv: list[str], auth_headers: dict[str, str], tool: st
     return new_argv
 
 
+def _outbound_proxy_value(env_vars: dict[str, str]) -> str:
+    proxy = (
+        env_vars.get("KALI_OUTBOUND_PROXY")
+        or env_vars.get("HTTPS_PROXY")
+        or env_vars.get("HTTP_PROXY")
+        or env_vars.get("https_proxy")
+        or env_vars.get("http_proxy")
+        or ""
+    ).strip()
+    if proxy.lower() in {"0", "false", "none", "off", "direct", "disabled"}:
+        return ""
+    return proxy
+
+
+def _proxy_connectable(proxy: str) -> bool:
+    parsed = urlparse(proxy)
+    host = parsed.hostname
+    if not host:
+        return False
+    port = parsed.port or (443 if parsed.scheme == "https" else 1080 if parsed.scheme.startswith("socks") else 80)
+    try:
+        with socket.create_connection((host, port), timeout=2):
+            return True
+    except OSError:
+        return False
+
+
+def _inject_outbound_proxy(argv: list[str], env_vars: dict[str, str], tool: str) -> list[str]:
+    tool_lower = tool.lower().strip()
+    if tool_lower not in {"wafw00f"}:
+        return argv
+    if _argv_proxy_value(argv):
+        return argv
+    proxy = _outbound_proxy_value(env_vars)
+    if not proxy or not _proxy_connectable(proxy):
+        return argv
+    return [*argv, "--proxy", proxy]
+
+
 def _redact_secrets_from_command(command: str, auth_headers: dict[str, str] | None) -> str:
     """The rendered command string is written to command.txt and surfaced via
     job-status observability -- it must never carry the raw session
@@ -1141,13 +1180,14 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
         timeout = int(req.timeout or profile.get("timeout") or DEFAULT_TIMEOUT)
         _set_job_fields(job_id, stage="materializing_stdin")
         stdin_text = _materialize_template(profile.get("stdin_template"), req.target, workdir=workdir)
+        _proc_env = _runtime_tool_env(_job_env)
+        proxy_for_command = _outbound_proxy_value(_proc_env)
+        argv = _inject_outbound_proxy(argv, _proc_env, str(profile.get("tool") or ""))
         command = " ".join(shlex.quote(a) for a in argv)
         command = _redact_secrets_from_command(command, req.auth_headers)
-        # Merge per-job env vars into a copy of the process environment before
-        # observability/availability checks. P02/P06 quality depends on knowing
-        # whether a tool used direct container egress, a Docker proxy, or never
-        # executed because its binary was missing.
-        _proc_env = _runtime_tool_env(_job_env)
+        if proxy_for_command:
+            safe_proxy = _safe_proxy_value(proxy_for_command)
+            command = command.replace(shlex.quote(proxy_for_command), shlex.quote(safe_proxy)).replace(proxy_for_command, safe_proxy)
         egress_context = _egress_context(argv, _proc_env, profile)
         _set_job_fields(job_id, stage="executing", command=command, egress_context=egress_context)
 

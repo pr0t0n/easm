@@ -225,9 +225,15 @@ services:
       # application code and must survive container recreation without waiting
       # for a heavyweight Kali image rebuild.
       - ./kali-runner/runner.py:/app/runner.py:ro
+      - ./kali-runner/tests:/app/tests:ro
+      - ./kali-runner:/kali-runner:ro
+      - ./backend:/backend:ro
+      - ./mcp-server:/mcp-server:ro
+      - ./docker-compose.yml:/docker-compose.yml:ro
       # Read-only, database-free P02→P06 diagnostic. It emits JSON only to
       # stdout and keeps its complete observation state in process memory.
       - ./kali-runner/scripts:/opt/runner-scripts:ro
+      - ./kali-runner/scripts:/app/scripts:ro
       # Module manifest mounted read-only so install steps can be tuned without
       # a rebuild (a container restart reloads modules.yaml).
       - ./kali-runner/modules.yaml:/app/modules.yaml:ro
