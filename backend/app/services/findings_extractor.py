@@ -3382,7 +3382,7 @@ _VERIFICATION_TOOL_MAP: dict[str, str] = {
     "shodan-cli":     "nuclei",
     "theharvester":   "nuclei",
     "tech_correlator": "nuclei",
-    "curl-headers":   "shcheck",
+    "curl-headers":   "nuclei-headers",
     "wafw00f":        "nuclei-headers",
     # WAF / header findings → safety check
     "shcheck":        "nuclei-headers",
@@ -3408,7 +3408,7 @@ _TITLE_VERIFICATION: list[tuple[str, str]] = [
     ("rce",              "nuclei-rce"),
     ("default credentials", "nuclei-default-credentials"),
     ("exposed",          "nuclei-exposure"),
-    ("header",           "shcheck"),
+    ("header",           "nuclei-headers"),
     ("cors",             "nuclei-cors"),
     ("cve-",             "nuclei"),
 ]

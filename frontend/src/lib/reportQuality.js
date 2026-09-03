@@ -18,6 +18,57 @@ export function isTerminalScanStatus(status) {
   return ["completed", "completed_with_gaps", "failed", "cancelled", "stopped"].includes(String(status || "").toLowerCase());
 }
 
+export function verificationStatusDescriptor(status) {
+  const normalized = String(status || "candidate").toLowerCase();
+  if (["confirmed", "true_positive", "validated", "exploitable"].includes(normalized)) {
+    return {
+      status: "confirmed",
+      label: "Confirmado",
+      meaning: "Evidencia suficiente ou reproducao deterministica confirmaram o achado.",
+    };
+  }
+  if (["refuted", "false_positive", "not_applicable", "invalid_evidence", "benign"].includes(normalized)) {
+    return {
+      status: "refuted",
+      label: "Refutado",
+      meaning: "Reteste ou evidencia negativa indicou falso positivo ou nao aplicabilidade.",
+    };
+  }
+  if (["blocked", "needs_human_review", "inconclusive", "insufficient_evidence", "budget_exhausted"].includes(normalized)) {
+    return {
+      status: "blocked",
+      label: "Bloqueado",
+      meaning: "A validacao precisa de evidencia, acesso, pre-condicao ou revisao adicional.",
+    };
+  }
+  return {
+    status: "candidate",
+    label: "Candidato",
+    meaning: "Ha indicio observado, ainda sem prova deterministica suficiente.",
+  };
+}
+
+export function verificationStatusSummary(findings = []) {
+  const severities = ["critical", "high", "medium", "low", "info"];
+  const states = ["confirmed", "candidate", "blocked", "refuted"];
+  const matrix = Object.fromEntries(severities.map((severity) => [severity, Object.fromEntries(states.map((state) => [state, 0]))]));
+  const totals = Object.fromEntries(states.map((state) => [state, 0]));
+  (Array.isArray(findings) ? findings : []).forEach((finding) => {
+    const severity = severities.includes(String(finding?.severity || "").toLowerCase())
+      ? String(finding?.severity || "").toLowerCase()
+      : "info";
+    const descriptor = verificationStatusDescriptor(
+      finding?.verification_status
+      || finding?.verification?.status
+      || finding?.verification_explanation?.status
+      || finding?.adjudication?.final_verdict,
+    );
+    matrix[severity][descriptor.status] += 1;
+    totals[descriptor.status] += 1;
+  });
+  return { matrix_by_severity: matrix, totals_by_state: totals };
+}
+
 export function completedWithGapsSummary(scan = {}, qualityOverride = null) {
   const status = String(scan?.status || "").toLowerCase();
   const state = scan?.state_data || {};

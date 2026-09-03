@@ -26,3 +26,13 @@ def test_dashboard_control_plane_exposes_quality_loop_through_cockpit():
     source = inspect.getsource(routes_scans.get_cockpit)
     assert '"quality"' in source
     assert "build_scan_quality" in source
+
+
+def test_pentest_report_exposes_verification_and_skipped_context():
+    from app.services import pentest_report_builder
+
+    source = inspect.getsource(pentest_report_builder.build_pentest_report_contract)
+    finding_source = inspect.getsource(pentest_report_builder._finding_sections)
+    assert '"verification"' in source
+    assert '"skipped_work_items"' in source
+    assert '"verification_explanation"' in finding_source

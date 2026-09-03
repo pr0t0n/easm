@@ -30,6 +30,37 @@ const SEV_CONFIG = {
   info:     { label: 'Info', icon: 'fa-search', cls: 'sev-info', order: 4 },
 };
 
+const VERIFICATION_CONFIG = {
+  confirmed: {
+    label: 'Confirmado',
+    cls: 'vf-confirmed',
+    icon: 'fa-circle-check',
+    meaning: 'Evidência suficiente ou reprodução determinística confirmaram o achado.',
+    next_step: 'Priorizar correção conforme severidade e validar no reteste.',
+  },
+  candidate: {
+    label: 'Candidato',
+    cls: 'vf-candidate',
+    icon: 'fa-circle-question',
+    meaning: 'Há indício observado, mas ainda falta prova determinística para promover.',
+    next_step: 'Coletar evidência faltante, executar validador específico ou revisar manualmente.',
+  },
+  blocked: {
+    label: 'Bloqueado',
+    cls: 'vf-blocked',
+    icon: 'fa-circle-pause',
+    meaning: 'A validação não concluiu por ausência de evidência, pré-condição, acesso ou ferramenta.',
+    next_step: 'Resolver o bloqueio indicado e reexecutar o loop de validação.',
+  },
+  refuted: {
+    label: 'Refutado',
+    cls: 'vf-refuted',
+    icon: 'fa-circle-xmark',
+    meaning: 'Reteste, contradição ou decisão determinística indicou falso positivo ou não aplicabilidade.',
+    next_step: 'Manter registro como evidência negativa e não abrir remediação.',
+  },
+};
+
 function getSevConfig(sev) {
   return SEV_CONFIG[String(sev || 'info').toLowerCase()] || SEV_CONFIG.info;
 }
@@ -41,6 +72,49 @@ function severityRank(sev) {
   if (normalized === 'medium') return 3;
   if (normalized === 'low') return 2;
   return 1;
+}
+
+function verificationBucket(status) {
+  const normalized = String(status || 'candidate').toLowerCase();
+  if (['confirmed', 'true_positive', 'validated', 'exploitable'].includes(normalized)) return 'confirmed';
+  if (['refuted', 'false_positive', 'not_applicable', 'invalid_evidence', 'benign'].includes(normalized)) return 'refuted';
+  if (['blocked', 'needs_human_review', 'inconclusive', 'insufficient_evidence', 'budget_exhausted'].includes(normalized)) return 'blocked';
+  return 'candidate';
+}
+
+function verificationForVuln(vuln) {
+  const explanation = vuln?.verification_explanation && typeof vuln.verification_explanation === 'object'
+    ? vuln.verification_explanation
+    : {};
+  const status = explanation.status
+    || vuln?.verification_status
+    || vuln?.verification?.status
+    || vuln?.adjudication?.final_verdict
+    || vuln?.adjudication?.status
+    || 'candidate';
+  const bucket = verificationBucket(status);
+  const cfg = VERIFICATION_CONFIG[bucket] || VERIFICATION_CONFIG.candidate;
+  return {
+    ...cfg,
+    status: bucket,
+    raw_status: explanation.raw_status || status,
+    meaning: explanation.meaning || cfg.meaning,
+    next_step: explanation.next_step || cfg.next_step,
+    reason_code: explanation.reason_code || vuln?.adjudication?.reason_code || '',
+    missing_evidence: Array.isArray(explanation.missing_evidence)
+      ? explanation.missing_evidence
+      : (Array.isArray(vuln?.adjudication?.missing_evidence) ? vuln.adjudication.missing_evidence : []),
+  };
+}
+
+function skippedCategoryLabel(category) {
+  return ({
+    covered_by_equivalent_validator: 'Coberto por validador equivalente',
+    not_applicable_until_evidence_exists: 'Sem evidência necessária',
+    not_applicable_until_technology_detected: 'Tecnologia não detectada',
+    stale_or_absent_http_surface: 'Superfície HTTP pendente',
+    tooling_gap: 'Gap de ferramenta',
+  })[String(category || '')] || String(category || 'Outro');
 }
 
 function severityThreshold() {
@@ -171,6 +245,10 @@ function normalizeFindingForReport(finding) {
     cvss: finding?.cvss || finding?.risk_score || details.cvss || details.cvss_score || '-',
     risk_score: finding?.risk_score || details.risk_score || 0,
     confidence_score: finding?.confidence_score || details.confidence_score || 0,
+    verification_status: finding?.verification_status || details.verification_status || details.validation_decision?.status || 'candidate',
+    verification_explanation: finding?.verification_explanation || details.verification_explanation || {},
+    adjudication: finding?.adjudication || details.adjudication || {},
+    validation_lifecycle: finding?.validation_lifecycle || details.validation_lifecycle || {},
     target,
     target_summary: target,
     full_url: target,
@@ -206,12 +284,32 @@ function normalizeFindingForReport(finding) {
   };
 }
 
+function flattenedContractFindings(report) {
+  const findings = report?.findings;
+  if (Array.isArray(findings)) return findings.map(normalizeFindingForReport);
+  if (!findings || typeof findings !== 'object') return [];
+  return ['confirmed', 'candidates', 'blocked', 'hypotheses', 'refuted']
+    .flatMap((section) => Array.isArray(findings[section]) ? findings[section] : [])
+    .map(normalizeFindingForReport);
+}
+
 function vulnerabilityRowsFromReport(report) {
   const v2 = (report?.state_data || {}).report_v2 || {};
   const table = Array.isArray(v2.vulnerability_table) ? v2.vulnerability_table : [];
-  if (table.length > 0) return table;
-  const findings = Array.isArray(report?.findings) ? report.findings : [];
-  return findings.map(normalizeFindingForReport);
+  const contractFindings = flattenedContractFindings(report);
+  if (table.length > 0) {
+    const byId = new Map();
+    contractFindings.forEach((finding) => {
+      [finding.finding_id, finding.id, finding.finding_id ? `F-${finding.finding_id}` : '']
+        .filter(Boolean)
+        .forEach((key) => byId.set(String(key), finding));
+    });
+    return table.map((row) => {
+      const match = byId.get(String(row.finding_id || row.id || ''));
+      return match ? { ...match, ...row, verification_status: row.verification_status || match.verification_status, verification_explanation: row.verification_explanation || match.verification_explanation, adjudication: row.adjudication || match.adjudication } : row;
+    });
+  }
+  return contractFindings;
 }
 
 function renderScopeSummary(report) {
@@ -271,6 +369,29 @@ function renderDataQualityPanel(report) {
   const confidence = attempted > 0 ? Math.round((executed / attempted) * 100) : 0;
   const assets = v2.assets_summary || {};
   const findings = Number(v2.summary?.total || 0);
+  const verification = report?.verification || {};
+  const verificationTotals = verification.totals_by_state || {};
+  const skipped = report?.skipped_work_items || {};
+  const skippedCategories = skipped.by_category || {};
+  const stateHtml = ['confirmed', 'candidate', 'blocked', 'refuted']
+    .map((state) => {
+      const cfg = VERIFICATION_CONFIG[state];
+      const count = Number(verificationTotals[state] || 0);
+      return `<div class="verification-kpi ${cfg.cls}"><span><i class="fas ${cfg.icon}"></i> ${cfg.label}</span><strong>${count}</strong><small>${esc(cfg.meaning)}</small></div>`;
+    })
+    .join('');
+  const matrix = verification.matrix_by_severity || {};
+  const severityRows = ['critical', 'high', 'medium', 'low', 'info']
+    .filter((severity) => matrix[severity])
+    .map((severity) => {
+      const sev = getSevConfig(severity);
+      const row = matrix[severity] || {};
+      return `<tr><td>${esc(sev.label)}</td><td>${Number(row.confirmed || 0)}</td><td>${Number(row.candidate || 0)}</td><td>${Number(row.blocked || 0)}</td><td>${Number(row.refuted || 0)}</td></tr>`;
+    })
+    .join('');
+  const skippedHtml = Object.entries(skippedCategories).length
+    ? Object.entries(skippedCategories).map(([category, count]) => `<span>${esc(skippedCategoryLabel(category))}: <strong>${Number(count || 0)}</strong></span>`).join('')
+    : '<span>Sem skipped registrados</span>';
   panel.innerHTML = `
     <div class="quality-card">
       <div class="quality-title">Cobertura e confiança dos dados</div>
@@ -280,6 +401,15 @@ function renderDataQualityPanel(report) {
         <div><span>Ativos observados</span><strong>${Number(assets.total_assets || 0)}</strong></div>
         <div><span>Vulnerabilidades no escopo</span><strong>${findings}</strong></div>
       </div>
+      <div class="verification-grid">${stateHtml}</div>
+      ${severityRows ? `
+      <div class="verification-matrix-wrap">
+        <table class="verification-matrix">
+          <thead><tr><th>Severidade</th><th>Confirmado</th><th>Candidato</th><th>Bloqueado</th><th>Refutado</th></tr></thead>
+          <tbody>${severityRows}</tbody>
+        </table>
+      </div>` : ''}
+      <div class="skipped-summary"><span>Skipped: <strong>${Number(skipped.total || 0)}</strong></span>${skippedHtml}</div>
     </div>
   `;
 }
@@ -739,6 +869,7 @@ function renderCategoryBars(rawCategoryScores = [], total = 0) {
 
 function renderVulnCard(vuln, index) {
   const sev = getSevConfig(vuln.severity);
+  const verification = verificationForVuln(vuln);
   const cvss = vuln.cvss && vuln.cvss !== '-' ? Number(vuln.cvss).toFixed(1) : '-';
   const cve = vuln.cve && vuln.cve !== '-' ? vuln.cve : null;
   const cveDesc = vuln.cve_description && vuln.cve_description !== '-' ? vuln.cve_description : null;
@@ -820,13 +951,17 @@ function renderVulnCard(vuln, index) {
 
   // data-search inclui todos os alvos para que o filtro de texto funcione
   const searchAttr = [vuln.name || vuln.problem, displayTarget, cve || '', ...allAssets].join(' ');
+  const missingEvidenceHtml = verification.missing_evidence.length
+    ? `<div class="verification-missing">${verification.missing_evidence.slice(0, 5).map((item) => `<span>${esc(item)}</span>`).join('')}</div>`
+    : '';
+  const reasonHtml = verification.reason_code ? `<div class="verification-reason">Razão: <strong>${esc(verification.reason_code)}</strong></div>` : '';
 
   return `
 <div class="vuln-card ${sev.cls}" data-sev="${String(vuln.severity || 'info').toLowerCase()}" data-search="${esc(searchAttr)}" id="${id}">
-  <!-- CABEÇALHO: clicável para expandir detalhes técnicos -->
   <div class="vuln-card-header" onclick="toggleVuln('${id}')">
     <div class="vuln-header-left">
       <span class="vuln-sev-badge"><i class="fas ${sev.icon}"></i> ${sev.label}</span>
+      <span class="verification-badge ${verification.cls}"><i class="fas ${verification.icon}"></i> ${verification.label}</span>
       ${cve ? `<span class="vuln-cve-pill">${esc(cve)}</span>` : ''}
     </div>
     <div class="vuln-header-center">
@@ -842,10 +977,17 @@ function renderVulnCard(vuln, index) {
     </div>
   </div>
 
-  <!-- CORPO PRINCIPAL: sempre visível — foco em resolução ─────────────────── -->
   <div class="vuln-card-main">
     ${cveBlock}
     ${affectedBlock}
+
+    <div class="verification-block ${verification.cls}">
+      <div class="vuln-section-label"><i class="fas ${verification.icon}"></i> Estado da evidência — ${verification.label}</div>
+      <div class="verification-text">${esc(verification.meaning)}</div>
+      <div class="verification-next">${esc(verification.next_step)}</div>
+      ${reasonHtml}
+      ${missingEvidenceHtml}
+    </div>
 
     ${execExplanation ? `
     <div class="vuln-explanation-exec">
@@ -873,7 +1015,6 @@ function renderVulnCard(vuln, index) {
     </div>` : ''}
   </div>
 
-  <!-- DETALHES TÉCNICOS: colapsável — para analistas ─────────────────────── -->
   <div class="vuln-card-body">
     <div class="vuln-detail-grid">
       <div class="vuln-detail-item">
@@ -1033,6 +1174,15 @@ function renderFiltered() {
     summary.innerHTML = `<strong>${filtered.length}</strong> achados exibidos`;
     Object.entries(counts).forEach(([k, v]) => {
       if (v > 0) summary.innerHTML += ` | <span style="color:var(--${k})">${v} ${k}</span>`;
+    });
+    const verificationCounts = filtered.reduce((acc, vuln) => {
+      const status = verificationForVuln(vuln).status;
+      acc[status] = (acc[status] || 0) + 1;
+      return acc;
+    }, {});
+    ['confirmed', 'candidate', 'blocked', 'refuted'].forEach((state) => {
+      const value = Number(verificationCounts[state] || 0);
+      if (value > 0) summary.innerHTML += ` | <span class="filter-vf ${VERIFICATION_CONFIG[state].cls}">${value} ${VERIFICATION_CONFIG[state].label.toLowerCase()}</span>`;
     });
   }
 

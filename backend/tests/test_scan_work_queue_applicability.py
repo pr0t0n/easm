@@ -526,11 +526,95 @@ def test_requeue_evidence_ready_work_items_revives_missing_evidence_skip() -> No
     assert requeued == 1
     assert item.status == "queued"
     assert item.last_error is None
-    assert item.result["reason"] == "required_evidence_now_present"
+    assert item.result["reason"] == "applicability_prerequisite_now_present"
     assert item.item_metadata["requeued_after_evidence"] is True
     assert job.status == "running"
     assert job.mission_progress == 99
     assert job.state_data["quality_gate_active"] is True
+
+
+def test_requeue_evidence_ready_work_items_revives_stale_http_surface_skip() -> None:
+    item = SimpleNamespace(
+        id=43,
+        scan_job_id=7,
+        phase_id="P18",
+        skill_id="skill.chain.exposed_git_to_credential_leak",
+        tool_name="nuclei-exposure",
+        target="target.example.com",
+        status="skipped",
+        last_error="skipped:applicability:no_http_surface:tcp_closed",
+        result={"status": "skipped"},
+        item_metadata={"skill_ids": ["skill.chain.exposed_git_to_credential_leak"]},
+        lease_until=None,
+        finished_at="earlier",
+        updated_at=None,
+    )
+    job = SimpleNamespace(
+        id=7,
+        status="completed_with_gaps",
+        current_step="P21 Quality Gate",
+        mission_progress=100,
+        state_data={
+            "preflight": {
+                "targets": {
+                    "target.example.com": {
+                        "status": "http_live",
+                        "open_ports": [443],
+                        "http": [{"status_code": 200}],
+                        "p06_complete": True,
+                        "p06_http_live": True,
+                    }
+                }
+            }
+        },
+    )
+
+    class FakeQuery:
+        def filter(self, *_args, **_kwargs):
+            return self
+
+        def all(self):
+            return [item]
+
+    class FakeDb:
+        def __init__(self):
+            self.added = []
+
+        def query(self, *_args, **_kwargs):
+            return FakeQuery()
+
+        def add(self, obj):
+            self.added.append(obj)
+
+    requeued = requeue_evidence_ready_work_items(FakeDb(), job)  # type: ignore[arg-type]
+
+    assert requeued == 1
+    assert item.status == "queued"
+    assert item.last_error is None
+    assert item.result["reason"] == "applicability_prerequisite_now_present"
+
+
+def test_requeue_evidence_ready_work_items_does_not_mutate_completed_scan() -> None:
+    item = SimpleNamespace(
+        id=44,
+        scan_job_id=7,
+        phase_id="P18",
+        skill_id="skill.chain.exposed_git_to_credential_leak",
+        tool_name="nuclei-exposure",
+        target="target.example.com",
+        status="skipped",
+        last_error="skipped:applicability:no_http_surface:tcp_closed",
+        result={"status": "skipped"},
+        item_metadata={},
+    )
+    job = SimpleNamespace(id=7, status="completed", state_data={})
+
+    class FakeDb:
+        def query(self, *_args, **_kwargs):
+            raise AssertionError("terminal completed scans must not query mutable work items")
+
+    assert requeue_evidence_ready_work_items(FakeDb(), job) == 0  # type: ignore[arg-type]
+    assert item.status == "skipped"
 
 
 def test_post_p09_triage_keeps_high_cost_tool_when_direct_evidence_exists() -> None:

@@ -1,7 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { completedWithGapsSummary, isTerminalScanStatus, remediationPriority, remediationSla } from "./reportQuality.js";
+import {
+  completedWithGapsSummary,
+  isTerminalScanStatus,
+  remediationPriority,
+  remediationSla,
+  verificationStatusDescriptor,
+  verificationStatusSummary,
+} from "./reportQuality.js";
 
 test("quality completion with gaps remains terminal and visible", () => {
   assert.equal(isTerminalScanStatus("completed_with_gaps"), true);
@@ -32,5 +39,32 @@ test("remediation priority and SLA are deterministic", () => {
     due: "7 dias",
     effort: "Sprint atual",
     owner: "Time do sistema",
+  });
+});
+
+test("verification status aliases collapse into report states", () => {
+  assert.equal(verificationStatusDescriptor("confirmed").status, "confirmed");
+  assert.equal(verificationStatusDescriptor("needs_human_review").status, "blocked");
+  assert.equal(verificationStatusDescriptor("invalid_evidence").status, "refuted");
+  assert.equal(verificationStatusDescriptor("candidate").status, "candidate");
+});
+
+test("verification status summary groups by severity", () => {
+  const summary = verificationStatusSummary([
+    { severity: "high", verification_status: "confirmed" },
+    { severity: "high", verification_status: "needs_human_review" },
+    { severity: "medium", adjudication: { final_verdict: "false_positive" } },
+    { severity: "low", verification_status: "hypothesis" },
+  ]);
+
+  assert.equal(summary.matrix_by_severity.high.confirmed, 1);
+  assert.equal(summary.matrix_by_severity.high.blocked, 1);
+  assert.equal(summary.matrix_by_severity.medium.refuted, 1);
+  assert.equal(summary.matrix_by_severity.low.candidate, 1);
+  assert.deepEqual(summary.totals_by_state, {
+    confirmed: 1,
+    candidate: 1,
+    blocked: 1,
+    refuted: 1,
   });
 });

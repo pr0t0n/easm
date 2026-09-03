@@ -1892,15 +1892,22 @@ def work_item_applicability_decision(
 
 
 def requeue_evidence_ready_work_items(db: Session, job: ScanJob) -> int:
-    """Requeue tools that were skipped only because required evidence was absent."""
+    """Requeue tools skipped by stale applicability context once prerequisites exist."""
+    job_status = str(getattr(job, "status", "") or "").lower()
+    if job_status not in {"running", "completed_with_gaps"}:
+        return 0
     state = dict(job.state_data or {})
     now = datetime.now()
     candidates = (
         db.query(ScanWorkItem)
         .filter(
-            ScanWorkItem.scan_job_id == job.id,
-            ScanWorkItem.status == "skipped",
-            ScanWorkItem.last_error.like("skipped:applicability:required_evidence_absent:%"),
+                ScanWorkItem.scan_job_id == job.id,
+                ScanWorkItem.status == "skipped",
+                or_(
+                    ScanWorkItem.last_error.like("skipped:applicability:required_evidence_absent:%"),
+                    ScanWorkItem.last_error.like("skipped:applicability:required_technology_absent:%"),
+                    ScanWorkItem.last_error.like("skipped:applicability:no_http_surface:%"),
+                ),
         )
         .all()
     )
@@ -1924,7 +1931,7 @@ def requeue_evidence_ready_work_items(db: Session, job: ScanJob) -> int:
         item.last_error = None
         item.result = {
             "status": "requeued",
-            "reason": "required_evidence_now_present",
+            "reason": "applicability_prerequisite_now_present",
             "applicability": decision,
             "requeued_at": now.isoformat(),
         }
