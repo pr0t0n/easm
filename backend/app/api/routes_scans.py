@@ -2623,6 +2623,17 @@ def create_scan(
         enforce_public_targets=bool(settings.enforce_scan_authorization_for_public_targets),
     )
     compliance_status = "approved" if authorization_gate.get("approved") else "authorization_required"
+    if compliance_status != "approved":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "scan_authorization_required",
+                "reason": authorization_gate.get("reason") or "authorization_required",
+                "mode": authorization_gate.get("mode"),
+                "public_targets": authorization_gate.get("public_targets") or [],
+                "authorized_scope": authorization_gate.get("authorized_scope") or [],
+            },
+        )
 
     llm_risk_auth_type = str(payload.llm_risk_auth_type or "none").strip().lower()
     if payload.llm_risk_enabled and not str(payload.llm_risk_url or "").strip():

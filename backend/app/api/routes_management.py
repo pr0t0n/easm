@@ -315,6 +315,17 @@ def _create_scan_from_schedule(
         enforce_public_targets=bool(settings.enforce_scan_authorization_for_public_targets),
     )
     compliance_status = "approved" if authorization_gate.get("approved") else "authorization_required"
+    if compliance_status != "approved":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "scan_authorization_required",
+                "reason": authorization_gate.get("reason") or "authorization_required",
+                "mode": authorization_gate.get("mode"),
+                "public_targets": authorization_gate.get("public_targets") or [],
+                "authorized_scope": authorization_gate.get("authorized_scope") or [],
+            },
+        )
 
     job = ScanJob(
         owner_id=owner_id,

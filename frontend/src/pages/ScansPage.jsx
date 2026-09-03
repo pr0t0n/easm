@@ -27,10 +27,10 @@ const FASE_NOMES = {
 };
 
 const LEVEL_MAP = {
-  recon: "Recon", asm: "Recon",
-  standard: "Padrão", full: "Padrão",
+  recon: "Superficial", asm: "Superficial",
+  standard: "Normal", full: "Normal",
   aggressive: "Agressivo",
-  Recon: "Recon", Standard: "Padrão", Aggressive: "Agressivo",
+  Recon: "Superficial", Superficial: "Superficial", Standard: "Normal", Normal: "Normal", Aggressive: "Agressivo",
 };
 
 const ACTIVE_STATUS    = ["queued", "running", "retrying", "waiting_for_auth"];
@@ -38,8 +38,8 @@ const STOPPABLE_STATUS = [...ACTIVE_STATUS, "paused"];
 const TERMINAL_STATUS  = new Set(["completed", "completed_with_gaps", "failed", "cancelled", "stopped"]);
 
 const SCAN_PERFIL = {
-  Recon:     { c: "var(--sev-info-text)",  bg: "var(--sev-info-bg)",  bd: "var(--sev-info-border)",  d: "P01-P08 + P18/P21/P22, profundidade baixa" },
-  Padrão:    { c: "var(--ink-soft)",        bg: "var(--surface-soft)", bd: "var(--line)",              d: "P01-P22, profundidade média" },
+  Superficial: { c: "var(--sev-info-text)", bg: "var(--sev-info-bg)", bd: "var(--sev-info-border)", d: "P01-P08 + P18/P21/P22, profundidade baixa" },
+  Normal:    { c: "var(--ink-soft)",        bg: "var(--surface-soft)", bd: "var(--line)",              d: "P01-P22, profundidade média" },
   Agressivo: { c: "var(--sev-high-text)",  bg: "var(--sev-high-bg)",  bd: "var(--sev-high-border)",  d: "P01-P22, profundidade alta" },
 };
 const SCAN_COMPLETO_ATIVIDADES = [
@@ -109,17 +109,15 @@ function extractPhase(step) {
   const m = String(step).match(/P(\d+)/i);
   return m ? `P${m[1].padStart(2,"0")}` : null;
 }
-// compliance_status é a única fonte real do motivo de bloqueio hoje
-// (create_scan só seta status="blocked" para auth_failed/tool_health_failed —
-// não existe gate de "guardrail/escopo" na criação do scan).
 function blockedReasonLabel(scan) {
   const reason = scan.compliance_status;
+  if (reason === "authorization_required") return "Bloqueado · autorização obrigatória";
   if (reason === "auth_failed") return "Bloqueado · autenticação obrigatória falhou";
   if (reason === "tool_health_failed") return "Bloqueado · ferramentas indisponíveis";
   return scan.last_error ? `Bloqueado · ${scan.last_error}` : "Bloqueado";
 }
 function getPerfil(scan) {
-  return LEVEL_MAP[scan.level] || LEVEL_MAP[scan.scan_level] || "Padrão";
+  return LEVEL_MAP[scan.level] || LEVEL_MAP[scan.scan_level] || "Normal";
 }
 function executionPlanLabel(scan) {
   const state = scan?.state_data || {};
@@ -160,7 +158,7 @@ function getFaseStates(scan) {
 
 // ─── Atoms ───────────────────────────────────────────────────────────────────
 function PerfilBadge({ perfil }) {
-  const p = SCAN_PERFIL[perfil] || SCAN_PERFIL.Padrão;
+  const p = SCAN_PERFIL[perfil] || SCAN_PERFIL.Normal;
   return (
     <span title={p.d} style={{
       fontSize: 10, fontWeight: 700, color: p.c, background: p.bg,
@@ -332,6 +330,7 @@ function ActiveScanCard({ scan, onStop, onPause, onResume, onContinue, onDelete,
 
 // ─── Compositor de nova missão (inline, como no protótipo) ────────────────────
 function NovoScanComposer({ groups, onClose, onCreate, onSchedule, statusMsg }) {
+  const [perfil,   setPerfil]   = useState("Normal");
   const [crit,     setCrit]     = useState("Alta");
   const [janela,   setJanela]   = useState("imediato");
   const [target,   setTarget]   = useState("");
@@ -346,6 +345,7 @@ function NovoScanComposer({ groups, onClose, onCreate, onSchedule, statusMsg }) 
   const [sourceConfig, setSourceConfig] = useState({ sourcePath: "", repositoryUrl: "" });
   const [scheduleForm, setScheduleForm] = useState({ frequency: "daily", run_time: "00:00", day_of_week: "monday", day_of_month: 1 });
   const [submitting, setSubmitting] = useState(false);
+  const LEVEL_REVERSE = { Superficial: "asm", Normal: "full", Agressivo: "aggressive" };
 
   useEffect(() => {
     if (!accessGroupId && groups.length === 1) {
@@ -375,7 +375,7 @@ function NovoScanComposer({ groups, onClose, onCreate, onSchedule, statusMsg }) 
       } else {
         await onCreate({
           target,
-          scanLevel: "full",
+          scanLevel: LEVEL_REVERSE[perfil] || "full",
           executionPlan,
           accessGroupId,
           accessGroupName: selectedGroup?.name || "",
@@ -414,8 +414,7 @@ function NovoScanComposer({ groups, onClose, onCreate, onSchedule, statusMsg }) 
         </div>
       )}
 
-      <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr 1.25fr 1fr auto", gap: 14, alignItems: "end" }}>
-        {/* Alvo */}
+      <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr 1.25fr 1fr 1fr auto", gap: 14, alignItems: "end" }}>
         <div>
           <label style={{ fontSize: 11, fontWeight: 600, color: "var(--ink-soft)", display: "block", marginBottom: 5 }}>Escopo / alvo</label>
           <input
@@ -426,7 +425,6 @@ function NovoScanComposer({ groups, onClose, onCreate, onSchedule, statusMsg }) 
           <div style={{ fontSize: 10.5, color: "var(--ink-muted)", marginTop: 4 }}>separe múltiplos alvos com ;</div>
         </div>
 
-        {/* Empresa */}
         <div>
           <label style={{ fontSize: 11, fontWeight: 600, color: "var(--ink-soft)", display: "block", marginBottom: 5 }}>Empresa</label>
           <select
@@ -441,14 +439,20 @@ function NovoScanComposer({ groups, onClose, onCreate, onSchedule, statusMsg }) 
         </div>
 
         <div>
-          <label style={{ fontSize: 11, fontWeight: 600, color: "var(--ink-soft)", display: "block", marginBottom: 5 }}>Versão</label>
-          <div style={{ border: "1px solid var(--brand-300)", background: "var(--brand-50)", color: "var(--brand-700)", borderRadius: 8, padding: "8px 10px", fontSize: 12, fontWeight: 800 }}>
-            Scan Completo
+          <label style={{ fontSize: 11, fontWeight: 600, color: "var(--ink-soft)", display: "block", marginBottom: 5 }}>Perfil Pentest</label>
+          <div style={{ display: "flex", gap: 4 }}>
+            {["Superficial","Normal","Agressivo"].map((p) => (
+              <button key={p} type="button" onClick={() => setPerfil(p)} style={{
+                flex: 1, fontSize: 10, fontWeight: perfil === p ? 700 : 500, padding: "8px 3px", borderRadius: 8, cursor: "pointer",
+                border: `1px solid ${perfil === p ? SCAN_PERFIL[p].bd : "var(--line)"}`,
+                background: perfil === p ? SCAN_PERFIL[p].bg : "#fff",
+                color: perfil === p ? SCAN_PERFIL[p].c : "var(--ink-soft)", fontFamily: "var(--font-body)",
+              }}>{p}</button>
+            ))}
           </div>
-          <div style={{ fontSize: 10, color: "var(--ink-muted)", marginTop: 4 }}>lista única de atividades, sem versão parcial</div>
+          <div style={{ fontSize: 10, color: "var(--ink-muted)", marginTop: 4 }}>{SCAN_PERFIL[perfil].d}</div>
         </div>
 
-        {/* Criticidade */}
         <div>
           <label style={{ fontSize: 11, fontWeight: 600, color: "var(--ink-soft)", display: "block", marginBottom: 5 }}>Criticidade</label>
           <div style={{ display: "flex", gap: 4 }}>
@@ -464,7 +468,6 @@ function NovoScanComposer({ groups, onClose, onCreate, onSchedule, statusMsg }) 
           <div style={{ fontSize: 10, color: "var(--ink-muted)", marginTop: 4 }}>define posição na fila</div>
         </div>
 
-        {/* Janela */}
         <div>
           <label style={{ fontSize: 11, fontWeight: 600, color: "var(--ink-soft)", display: "block", marginBottom: 5 }}>Janela</label>
           <div style={{ display: "flex", gap: 4 }}>
@@ -1263,8 +1266,8 @@ function EditScheduleModal({ schedule, groups, onSave, onClose }) {
             <div>
               <label style={labelStyle}>Perfil</label>
               <select value={form.scan_type} onChange={(e) => set("scan_type", e.target.value)} style={inputStyle}>
-                <option value="asm">Recon</option>
-                <option value="full">Padrão</option>
+                <option value="asm">Superficial</option>
+                <option value="full">Normal</option>
                 <option value="aggressive">Agressivo</option>
               </select>
             </div>
@@ -1608,7 +1611,7 @@ export default function ScansPage() {
                         <span style={{ fontSize: 10, fontWeight: 600, color: "var(--sev-critical-text)" }}>empresa não definida</span>
                       );
                     })()}
-                    <PerfilBadge perfil={LEVEL_MAP[f.scan_type] || LEVEL_MAP[f.level] || "Padrão"} />
+                    <PerfilBadge perfil={LEVEL_MAP[f.scan_type] || LEVEL_MAP[f.level] || "Normal"} />
                     {f.enabled === false && (
                       <span style={{ fontSize: 9.5, fontWeight: 700, color: "var(--sev-medium-text)", background: "var(--sev-medium-bg)", border: "1px solid var(--sev-medium-border)", padding: "1px 6px", borderRadius: 99 }}>PAUSADO</span>
                     )}
