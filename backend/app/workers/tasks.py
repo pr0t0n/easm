@@ -4869,6 +4869,11 @@ def dispatch_scan_work_items(
         except Exception as _retry_exc:
             import logging as _retry_log2
             _retry_log2.getLogger(__name__).debug("auto_retry_timeouts failed: %s", _retry_exc)
+            if not db.is_active:
+                db.rollback()
+                job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+                if not job:
+                    return {"claimed": len(item_ids), "error": "scan_missing_after_auto_retry_rollback"}
 
         # ── Poller rehydration ────────────────────────────────────────────────
         # A submitted item is durable DB state, but its poll task is just a
@@ -4883,6 +4888,11 @@ def dispatch_scan_work_items(
             _poll_rehydrate_log.getLogger(__name__).debug(
                 "poller_rehydration failed: %s", _poll_rehydrate_exc
             )
+            if not db.is_active:
+                db.rollback()
+                job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+                if not job:
+                    return {"claimed": len(item_ids), "error": "scan_missing_after_poller_rehydration_rollback"}
 
         # If the executable queue has drained and only gate-blocked items remain,
         # those items can no longer be unblocked by a future phase completion.
@@ -5026,6 +5036,20 @@ def dispatch_scan_work_items(
                 counts,
                 phase_id=_frontier_phase or str(state.get("current_pentest_phase_id") or ""),
             )
+        if not db.is_active:
+            db.rollback()
+            job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+            if not job:
+                return {"claimed": len(item_ids), "counts": counts, "error": "scan_missing_after_dispatch_state_rollback"}
+            state = dict(job.state_data or {})
+            state["work_queue_counts"] = counts
+            state["work_queue_last_dispatch"] = {
+                "claimed": len(item_ids),
+                "limit": limit,
+                "engine": "capacity_work_queue",
+                "counts": counts,
+                "updated_at": datetime.now().isoformat(),
+            }
         state = _assign_scan_state(db, job, state)
         if _should_log_dispatch:
             db.add(ScanLog(
