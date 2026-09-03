@@ -47,6 +47,30 @@ def test_execute_tool_with_workers_never_falls_through_to_mcp_for_phase_control_
     mock_kali.assert_not_called()
 
 
+def test_execute_tool_with_workers_routes_zap_api_to_backend_zap_scanner():
+    fake_result = {"status": "success", "findings": [], "scan_type": "zap-api", "openapi_url": "https://api.example.com/openapi.json"}
+
+    with patch("app.services.zap_scanner.run_zap_api_scan", return_value=dict(fake_result)) as mock_run, \
+         patch("app.services.worker_dispatcher._resolve_auth_context", return_value={}), \
+         patch("app.services.worker_dispatcher._persist_result_artifact"), \
+         patch("app.services.worker_dispatcher.execute_via_kali") as mock_kali:
+        result = execute_tool_with_workers(
+            "zap-api",
+            "https://api.example.com",
+            scan_id=13,
+            skill_contract={"openapi_url": "https://api.example.com/openapi.json"},
+        )
+
+    mock_run.assert_called_once_with(
+        "https://api.example.com",
+        openapi_url="https://api.example.com/openapi.json",
+        auth_headers=None,
+    )
+    mock_kali.assert_not_called()
+    assert result["status"] == "success"
+    assert result["source_agent_name"] == "Backend ZAP API Scanner"
+
+
 def test_execute_tool_with_workers_blocks_phase_control_tool_without_scan_id():
     with patch("app.services.worker_dispatcher._resolve_auth_context", return_value={}):
         result = execute_tool_with_workers("report-snapshot-builder", "https://valid.com", scan_id=None)

@@ -5663,6 +5663,8 @@ def execute_scan_work_item(item_id: int):
             # expiry/pause also deletes this exact key, so a worker OOM can be
             # retried without a second multi-hour lockout.
             _execute_lock_ttl = max(60, int(settings.scan_work_queue_lease_seconds))
+            if str(item.tool_name or "").strip().lower() == "zap-api":
+                _execute_lock_ttl = max(_execute_lock_ttl, int(os.getenv("ZAP_API_WORK_ITEM_LEASE_SECONDS", "5400")))
             if not _execute_lock.set(_execute_lock_key, _execute_lock_token, nx=True, ex=_execute_lock_ttl):
                 db.add(ScanLog(
                     scan_job_id=item.scan_job_id,
@@ -5861,7 +5863,10 @@ def execute_scan_work_item(item_id: int):
         item.attempts = int(item.attempts or 0) + 1
         item.started_at = now
         item.finished_at = None
-        item.lease_until = now + timedelta(seconds=1800)
+        _work_item_lease_seconds = 1800
+        if str(item.tool_name or "").strip().lower() == "zap-api":
+            _work_item_lease_seconds = int(os.getenv("ZAP_API_WORK_ITEM_LEASE_SECONDS", "5400"))
+        item.lease_until = now + timedelta(seconds=_work_item_lease_seconds)
         item.updated_at = now
         db.add(ScanLog(
             scan_job_id=item.scan_job_id,
@@ -5974,7 +5979,7 @@ def execute_scan_work_item(item_id: int):
             "report-snapshot-builder",
         }
         if (
-            _norm_item_tool in {"bl-test", "code-analyzer", "semgrep"}
+            _norm_item_tool in {"bl-test", "code-analyzer", "semgrep", "zap-api"}
             or _norm_item_tool in _PHASE_CONTROL_TOOL_NAMES
             or _norm_item_tool.startswith("skill-probe")
         ):
@@ -5989,6 +5994,9 @@ def execute_scan_work_item(item_id: int):
                 "validation_wire": _wire_contract,
                 "input_bindings": dict(_item_meta.get("input_bindings") or {}),
                 "expected_signals": dict(_item_meta.get("expected_signals") or {}),
+                "api_scan_config": dict(_item_meta.get("api_scan_config") or {}),
+                "openapi_url": _item_meta.get("openapi_url"),
+                "swagger_url": _item_meta.get("swagger_url"),
             }
             result = execute_tool_with_workers(
                 item.tool_name,

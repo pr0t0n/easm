@@ -32,7 +32,7 @@ _ZAP_API_KEY = os.getenv("ZAP_API_KEY", "scriptkiddo-zap-key")
 _SPIDER_MAX_WAIT = 120      # spider passivo/ativo
 _AJAX_MAX_WAIT = 180        # AJAX spider (mais lento — usa browser)
 _ACTIVE_MAX_WAIT = 1800     # active scan completo (30 min)
-_API_SCAN_MAX_WAIT = 900    # API scan (15 min)
+_API_SCAN_MAX_WAIT = int(os.getenv("ZAP_API_SCAN_MAX_WAIT", "3600"))
 
 # Severidade ZAP → plataforma
 _ZAP_RISK_MAP = {
@@ -149,6 +149,13 @@ def _same_target_host(url: str, target: str) -> bool:
         return bool(urlparse(url).hostname and urlparse(url).hostname == urlparse(target).hostname)
     except Exception:
         return False
+
+
+def _zap_target_url(target: str) -> str:
+    value = str(target or "").strip()
+    if value.startswith(("http://", "https://")):
+        return value.rstrip("/")
+    return f"https://{value}".rstrip("/")
 
 
 def _is_zap_does_not_exist(exc: Exception) -> bool:
@@ -527,11 +534,16 @@ def run_zap_api_scan(
     if not is_zap_available():
         return {"error": "ZAP service unavailable", "findings": []}
 
+    target_url = _zap_target_url(target)
+    import_result: dict[str, Any] = {}
+    import_errors: list[str] = []
+    active_error = ""
+
     # Auto-discover OpenAPI URL if not provided
     if not openapi_url:
         from urllib.parse import urljoin
         for path in ("/swagger.json", "/openapi.json", "/api-docs", "/api/swagger.json", "/v2/api-docs"):
-            candidate = urljoin(target, path)
+            candidate = urljoin(target_url + "/", path.lstrip("/"))
             try:
                 r = requests.get(candidate, timeout=10, verify=False, allow_redirects=True, headers=auth_headers or None)
                 if r.status_code == 200 and ("swagger" in r.text.lower() or "openapi" in r.text.lower()):
@@ -542,30 +554,36 @@ def run_zap_api_scan(
                 continue
 
     if openapi_url:
-        # Import OpenAPI definition into ZAP
         try:
-            _zap_post("/JSON/openapi/action/importUrl/", {
+            import_result = _zap("/JSON/openapi/action/importUrl/", {
                 "url": openapi_url,
-                "hostOverride": "",
+                "hostOverride": target_url,
+                "maxMessages": "0",
             })
+            import_errors = [str(item) for item in import_result.get("importUrl") or [] if str(item)]
         except Exception as exc:
+            active_error = str(exc)
             logger.warning("ZAP OpenAPI import error: %s", exc)
 
-    # Active scan against discovered endpoints
     _auth_rules = _apply_auth_headers(auth_headers)
     try:
         ascan_data = _zap_post("/JSON/ascan/action/scan/", {
-            "url": target, "recurse": "true",
+            "url": target_url, "recurse": "true",
         })
         ascan_id = str(ascan_data.get("scan") or "0")
         _wait_for_active_scan(ascan_id, max_wait=_API_SCAN_MAX_WAIT)
     except Exception as exc:
+        active_error = str(exc)
         logger.warning("ZAP API active scan error: %s", exc)
     finally:
         _clear_auth_headers(_auth_rules)
 
-    alerts = _get_alerts(target)
-    findings = _alerts_to_findings(alerts, target)
+    try:
+        imported_urls = list((_zap("/JSON/core/view/urls/", {"baseurl": target_url}) or {}).get("urls") or [])
+    except Exception:
+        imported_urls = []
+    alerts = _get_alerts(target_url)
+    findings = _alerts_to_findings(alerts, target_url)
     for f in findings:
         f["details"]["zap_scan_type"] = "api_scan"
         if openapi_url:
@@ -575,8 +593,11 @@ def run_zap_api_scan(
 
     return {
         "scan_type": "zap-api",
-        "target": target,
+        "target": target_url,
         "openapi_url": openapi_url,
+        "import_errors": import_errors[:25],
+        "imported_url_count": len(imported_urls),
+        "active_error": active_error,
         "alert_count": len(alerts),
         "findings": findings,
     }

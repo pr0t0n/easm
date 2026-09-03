@@ -152,6 +152,37 @@ def execute_tool_with_workers(
         _persist_result_artifact(scan_id, result, skill_contract, auth_context)
         return result
 
+    if norm_tool == "zap-api":
+        from app.services.zap_scanner import run_zap_api_scan
+
+        request_headers = dict(auth_context.get("headers") or {}) if isinstance(auth_context, dict) else {}
+        api_scan_config = dict((skill_contract or {}).get("api_scan_config") or {})
+        openapi_url = str(
+            (skill_contract or {}).get("openapi_url")
+            or (skill_contract or {}).get("swagger_url")
+            or api_scan_config.get("spec_url")
+            or ""
+        ).strip()
+        result = run_zap_api_scan(
+            target,
+            openapi_url=openapi_url or None,
+            auth_headers=request_headers or None,
+        )
+        result.setdefault("status", "success")
+        if skill_id:
+            result.setdefault("skill_id", skill_id)
+            result.setdefault("skill_contract", skill_contract or {})
+            result.setdefault("evidence_required", evidence_required or [])
+        if auth_context:
+            result.setdefault("auth_context", auth_context)
+        if adapter_contract:
+            result.setdefault("mcp_adapter_contract", adapter_contract)
+        result.setdefault("source_agent_id", "backend")
+        result.setdefault("source_agent_name", "Backend ZAP API Scanner")
+        result.setdefault("worker_group", "exploitation")
+        _persist_result_artifact(scan_id, result, skill_contract, auth_context)
+        return result
+
     if norm_tool.startswith("skill-probe"):
         # Bridges a hand-authored skill's markdown prose to bounded, LLM-planned
         # HTTP execution for skills with no dedicated Python test function —
