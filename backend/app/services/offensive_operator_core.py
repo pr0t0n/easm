@@ -310,7 +310,8 @@ def default_phase_contracts(skills_root: Path | str | None = None) -> dict[str, 
          ["paramspider", "ffuf-params", "wfuzz", "gau", "waybackurls",
           "nuclei-graphql",         # HackerOne: 25 GraphQL introspection / API disclosure reports
           "nuclei-exposure",        # HackerOne: hardcoded API keys, token leaks in API responses
-          "nuclei-swagger"]),       # Swagger/OpenAPI exposure → API schema dump for auth bypass
+          "nuclei-swagger",
+          "zap-api"]),              # Swagger/OpenAPI exposure → API schema dump for auth bypass
         ("P17", "Exploit Validation", "Reproduce validated exploit paths safely via nuclei + manual",
          ["skill.vuln.sqli"], ["nuclei"],
          ["sqlmap", "wapiti", "nikto", "wpscan",

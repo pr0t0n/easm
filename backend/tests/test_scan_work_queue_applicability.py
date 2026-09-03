@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 from app.services.endpoint_analysis_pipeline import build_parameterized_surface_state
 from app.services.scan_work_queue import (
+    apply_phase_tool_metadata,
     requeue_evidence_ready_work_items,
     triage_post_p09_injection,
     update_skill_execution_score,
@@ -454,6 +455,7 @@ def test_zap_api_requires_openapi_or_swagger_evidence() -> None:
         "https://api.example.com",
         {"status": "http_live", "open_ports": [443], "http": [{"status_code": 200}]},
     )
+    state["api_scan_config"] = {"allow_mutations": True}
 
     blocked = validate_skill_applicability(
         "P16", "skill.discovery.api_surface", "zap-api", "https://api.example.com", state, at="dispatch",
@@ -462,6 +464,28 @@ def test_zap_api_requires_openapi_or_swagger_evidence() -> None:
     assert "openapi_urls" in blocked["reason"]
 
     state["swagger_urls"] = ["https://api.example.com/swagger.json"]
+    allowed = validate_skill_applicability(
+        "P16", "skill.discovery.api_surface", "zap-api", "https://api.example.com", state, at="dispatch",
+    )
+    assert allowed["applicable"] is True
+    assert allowed["evidence"]["matched_keys"] == ["swagger_urls"]
+
+
+def test_zap_api_requires_explicit_mutation_authorization() -> None:
+    state = _state_for(
+        "https://api.example.com",
+        {"status": "http_live", "open_ports": [443], "http": [{"status_code": 200}]},
+    )
+    state["swagger_urls"] = ["https://api.example.com/swagger.json"]
+    state["api_scan_config"] = {"allow_mutations": False}
+
+    blocked = validate_skill_applicability(
+        "P16", "skill.discovery.api_surface", "zap-api", "https://api.example.com", state, at="dispatch",
+    )
+    assert blocked["applicable"] is False
+    assert blocked["reason"] == "api_mutation_guardrail_requires_explicit_authorization"
+
+    state["api_scan_config"] = {"allow_mutations": True}
     allowed = validate_skill_applicability(
         "P16", "skill.discovery.api_surface", "zap-api", "https://api.example.com", state, at="dispatch",
     )
@@ -615,6 +639,17 @@ def test_requeue_evidence_ready_work_items_does_not_mutate_completed_scan() -> N
 
     assert requeue_evidence_ready_work_items(FakeDb(), job) == 0  # type: ignore[arg-type]
     assert item.status == "skipped"
+
+
+def test_zap_api_metadata_carries_openapi_url_from_api_scan_config() -> None:
+    meta = apply_phase_tool_metadata(
+        {"api_scan_config": {"spec_url": "https://api.example.test/openapi.json"}},
+        "P16",
+        "zap-api",
+    )
+
+    assert meta["openapi_url"] == "https://api.example.test/openapi.json"
+    assert meta["swagger_url"] == "https://api.example.test/openapi.json"
 
 
 def test_post_p09_triage_keeps_high_cost_tool_when_direct_evidence_exists() -> None:

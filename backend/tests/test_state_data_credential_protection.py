@@ -106,6 +106,10 @@ def test_scan_response_redacts_auth_config_and_llm_risk_credentials():
                 "auth_value": "sk-do-not-leak",
                 "target_url": "https://risk.example.com",
             },
+            "api_scan_config": {
+                "enabled": True,
+                "spec_payload": {"example": "token-example-should-not-leak"},
+            },
             "current_surface": "example.com",
         },
     )
@@ -117,6 +121,7 @@ def test_scan_response_redacts_auth_config_and_llm_risk_credentials():
     assert "eyJraldontleak" not in serialized
     assert "sk-do-not-leak" not in serialized
     assert "abc123" not in serialized
+    assert "token-example-should-not-leak" not in serialized
 
     # Non-secret fields survive so the UI/API consumer keeps useful context.
     assert dumped["state_data"]["auth_config"]["username"] == "admin"
@@ -125,6 +130,7 @@ def test_scan_response_redacts_auth_config_and_llm_risk_credentials():
     assert dumped["state_data"]["current_surface"] == "example.com"
     assert dumped["state_data"]["auth_config"]["password"] == "[REDACTED]"
     assert dumped["state_data"]["llm_risk"]["auth_value"] == "[REDACTED]"
+    assert dumped["state_data"]["api_scan_config"]["spec_payload"] == "[REDACTED]"
 
 
 def test_report_response_redacts_credentials_in_nested_state_data():

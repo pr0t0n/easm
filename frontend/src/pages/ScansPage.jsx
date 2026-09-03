@@ -4,6 +4,7 @@ import CompanyScopeSelect from "../components/CompanyScopeSelect";
 import CredentialCaptureModal from "../components/CredentialCaptureModal";
 import LogTerminal from "../components/LogTerminal";
 import { completedWithGapsSummary } from "../lib/reportQuality";
+import { apiCredentialPlan, buildApiScanConfig } from "../lib/apiScan";
 import { buildScannerAuthConfig } from "../lib/scannerAuth";
 
 // ─── Fases (prototype style) ────────────────────────────────────────────────
@@ -41,6 +42,20 @@ const SCAN_PERFIL = {
   Padrão:    { c: "var(--ink-soft)",        bg: "var(--surface-soft)", bd: "var(--line)",              d: "P01-P22, profundidade média" },
   Agressivo: { c: "var(--sev-high-text)",  bg: "var(--sev-high-bg)",  bd: "var(--sev-high-border)",  d: "P01-P22, profundidade alta" },
 };
+const SCAN_COMPLETO_ATIVIDADES = [
+  "Inventário de ativos",
+  "Portas e serviços",
+  "HTTP/WAF/TLS",
+  "Endpoints e parâmetros",
+  "JavaScript e código",
+  "API e OpenAPI/Swagger",
+  "Autenticação e sessão",
+  "Autorização A/B",
+  "Injeção e validação",
+  "Exposição de arquivos",
+  "Segredos e supply chain",
+  "Evidência e relatório",
+];
 const CRIT_CSS = {
   Crítica: { c: "var(--sev-critical-text)", bg: "var(--sev-critical-bg)", bd: "var(--sev-critical-border)" },
   Alta:    { c: "var(--sev-high-text)",     bg: "var(--sev-high-bg)",     bd: "var(--sev-high-border)" },
@@ -317,7 +332,6 @@ function ActiveScanCard({ scan, onStop, onPause, onResume, onContinue, onDelete,
 
 // ─── Compositor de nova missão (inline, como no protótipo) ────────────────────
 function NovoScanComposer({ groups, onClose, onCreate, onSchedule, statusMsg }) {
-  const [perfil,   setPerfil]   = useState("Padrão");
   const [crit,     setCrit]     = useState("Alta");
   const [janela,   setJanela]   = useState("imediato");
   const [target,   setTarget]   = useState("");
@@ -326,12 +340,12 @@ function NovoScanComposer({ groups, onClose, onCreate, onSchedule, statusMsg }) 
   const [executionPlan, setExecutionPlan] = useState("external_only");
   const [authEnabled, setAuthEnabled] = useState(false);
   const [authConfig,  setAuthConfig]  = useState({ type: "bearer", token: "", cookie: "", username: "", password: "", headerName: "X-API-Key", headerValue: "", multiIdentity: false, tokenB: "", cookieB: "", usernameB: "", passwordB: "", headerValueB: "", roleA: "user", roleB: "user" });
+  const [apiScanEnabled, setApiScanEnabled] = useState(false);
+  const [apiScanConfig, setApiScanConfig] = useState({ specUrl: "", specType: "openapi", specJson: "", activeLevel: "safe", allowMutations: false });
   const [sourceEnabled, setSourceEnabled] = useState(false);
   const [sourceConfig, setSourceConfig] = useState({ sourcePath: "", repositoryUrl: "" });
   const [scheduleForm, setScheduleForm] = useState({ frequency: "daily", run_time: "00:00", day_of_week: "monday", day_of_month: 1 });
   const [submitting, setSubmitting] = useState(false);
-
-  const LEVEL_REVERSE = { Recon: "asm", Padrão: "full", Agressivo: "aggressive" };
 
   useEffect(() => {
     if (!accessGroupId && groups.length === 1) {
@@ -348,17 +362,26 @@ function NovoScanComposer({ groups, onClose, onCreate, onSchedule, statusMsg }) 
     setSubmitting(true);
     try {
       const selectedGroup = groups.find((g) => String(g.id) === String(accessGroupId));
+      const authPayload = buildAuth();
+      let apiPayload = null;
+      try {
+        apiPayload = buildApiScanConfig(apiScanEnabled, apiScanConfig, authPayload);
+      } catch {
+        showMsg("JSON da especificação de API inválido.");
+        return;
+      }
       if (janela === "agendar") {
         await onSchedule({ target, accessGroupId, accessGroupName: selectedGroup?.name || "", scheduleForm });
       } else {
         await onCreate({
           target,
-          scanLevel: LEVEL_REVERSE[perfil] || "full",
+          scanLevel: "full",
           executionPlan,
           accessGroupId,
           accessGroupName: selectedGroup?.name || "",
           scopeAuthorizationAttested,
-          authPayload: buildAuth(),
+          authPayload,
+          apiPayload,
           sourcePayload: sourceEnabled ? {
             source_path: sourceConfig.sourcePath.trim(),
             repository_url: sourceConfig.repositoryUrl.trim(),
@@ -376,6 +399,8 @@ function NovoScanComposer({ groups, onClose, onCreate, onSchedule, statusMsg }) 
     return () => window.removeEventListener("keydown", h);
   }, [onClose]);
 
+  const apiPlan = apiCredentialPlan(buildAuth());
+
   return (
     <div className="sk-panel" style={{ padding: "18px 22px", marginBottom: 16, border: "1px solid var(--brand-300)", boxShadow: "var(--shadow-elevate, 0 4px 24px rgba(0,0,0,.12))" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
@@ -389,7 +414,7 @@ function NovoScanComposer({ groups, onClose, onCreate, onSchedule, statusMsg }) 
         </div>
       )}
 
-      <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr 1fr 1fr 1fr auto", gap: 14, alignItems: "end" }}>
+      <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr 1.25fr 1fr auto", gap: 14, alignItems: "end" }}>
         {/* Alvo */}
         <div>
           <label style={{ fontSize: 11, fontWeight: 600, color: "var(--ink-soft)", display: "block", marginBottom: 5 }}>Escopo / alvo</label>
@@ -415,20 +440,12 @@ function NovoScanComposer({ groups, onClose, onCreate, onSchedule, statusMsg }) 
           <div style={{ fontSize: 10, color: "var(--ink-muted)", marginTop: 4 }}>limite de visibilidade</div>
         </div>
 
-        {/* Perfil */}
         <div>
-          <label style={{ fontSize: 11, fontWeight: 600, color: "var(--ink-soft)", display: "block", marginBottom: 5 }}>Perfil</label>
-          <div style={{ display: "flex", gap: 4 }}>
-            {Object.keys(SCAN_PERFIL).map((p) => (
-              <button key={p} type="button" onClick={() => setPerfil(p)} style={{
-                flex: 1, fontSize: 10.5, fontWeight: perfil === p ? 700 : 500, padding: "8px 4px", borderRadius: 8, cursor: "pointer",
-                border: `1px solid ${perfil === p ? "var(--brand-500)" : "var(--line)"}`,
-                background: perfil === p ? "var(--brand-50)" : "#fff",
-                color: perfil === p ? "var(--brand-700)" : "var(--ink-soft)", fontFamily: "var(--font-body)",
-              }}>{p}</button>
-            ))}
+          <label style={{ fontSize: 11, fontWeight: 600, color: "var(--ink-soft)", display: "block", marginBottom: 5 }}>Versão</label>
+          <div style={{ border: "1px solid var(--brand-300)", background: "var(--brand-50)", color: "var(--brand-700)", borderRadius: 8, padding: "8px 10px", fontSize: 12, fontWeight: 800 }}>
+            Scan Completo
           </div>
-          <div style={{ fontSize: 10, color: "var(--ink-muted)", marginTop: 4 }}>{SCAN_PERFIL[perfil].d}</div>
+          <div style={{ fontSize: 10, color: "var(--ink-muted)", marginTop: 4 }}>lista única de atividades, sem versão parcial</div>
         </div>
 
         {/* Criticidade */}
@@ -468,7 +485,14 @@ function NovoScanComposer({ groups, onClose, onCreate, onSchedule, statusMsg }) 
         </button>
       </div>
 
-      {/* Autenticação (expansível) */}
+      <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "repeat(6, minmax(0, 1fr))", gap: 6 }}>
+        {SCAN_COMPLETO_ATIVIDADES.map((atividade) => (
+          <div key={atividade} style={{ border: "1px solid var(--line-soft)", background: "var(--surface-soft)", borderRadius: 8, padding: "7px 8px", fontSize: 10.5, color: "var(--ink-soft)", fontWeight: 650 }}>
+            {atividade}
+          </div>
+        ))}
+      </div>
+
       <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--line-soft)" }}>
         <div style={{ marginBottom: 12 }}>
           <label style={{ fontSize: 11, fontWeight: 700, color: "var(--ink-soft)", display: "block", marginBottom: 7 }}>Plano de execução</label>
@@ -562,6 +586,50 @@ function NovoScanComposer({ groups, onClose, onCreate, onSchedule, statusMsg }) 
               <input placeholder="Papel do usuário A (ex.: customer)" value={authConfig.roleA} onChange={(e) => setAuthConfig({ ...authConfig, roleA: e.target.value })} style={{ fontSize: 12, padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line)" }} />
               <input placeholder="Papel do usuário B (ex.: manager)" value={authConfig.roleB} onChange={(e) => setAuthConfig({ ...authConfig, roleB: e.target.value })} style={{ fontSize: 12, padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line)" }} />
             </>}
+          </div>
+        )}
+        <label style={{ display: "inline-flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 12, color: "var(--ink-soft)", marginTop: 12 }}>
+          <input type="checkbox" checked={apiScanEnabled} onChange={(e) => setApiScanEnabled(e.target.checked)} />
+          Analisar API no Scan Completo
+        </label>
+        {apiScanEnabled && (
+          <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "160px minmax(0, 1fr)", gap: 10, alignItems: "start" }}>
+            <select value={apiScanConfig.specType} onChange={(e) => setApiScanConfig({ ...apiScanConfig, specType: e.target.value })} style={{ fontSize: 12, padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line)", background: "#fff" }}>
+              <option value="openapi">OpenAPI/Swagger</option>
+              <option value="graphql">GraphQL</option>
+              <option value="postman">Postman</option>
+              <option value="har">HAR</option>
+            </select>
+            <input
+              placeholder="https://api.exemplo.com/openapi.json"
+              value={apiScanConfig.specUrl}
+              onChange={(e) => setApiScanConfig({ ...apiScanConfig, specUrl: e.target.value })}
+              style={{ fontSize: 12, padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line)", background: "#fff", fontFamily: "var(--font-mono)" }}
+            />
+            <textarea
+              placeholder='{"openapi":"3.0.0","paths":{}}'
+              value={apiScanConfig.specJson}
+              onChange={(e) => setApiScanConfig({ ...apiScanConfig, specJson: e.target.value })}
+              rows={4}
+              style={{ gridColumn: "1 / -1", fontSize: 12, padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line)", background: "#fff", fontFamily: "var(--font-mono)", resize: "vertical" }}
+            />
+            <div style={{ gridColumn: "1 / -1", display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 8 }}>
+              <div style={{ border: "1px solid var(--line)", borderRadius: 8, padding: "8px 10px", background: "var(--surface-soft)" }}>
+                <div style={{ fontSize: 10, color: "var(--ink-muted)", fontWeight: 700, textTransform: "uppercase" }}>Plano API</div>
+                <div style={{ fontSize: 12, color: "var(--ink)", fontWeight: 800, marginTop: 3 }}>{apiPlan.label}</div>
+              </div>
+              <div style={{ border: "1px solid var(--line)", borderRadius: 8, padding: "8px 10px", background: "var(--surface-soft)" }}>
+                <div style={{ fontSize: 10, color: "var(--ink-muted)", fontWeight: 700, textTransform: "uppercase" }}>Contextos</div>
+                <div style={{ fontSize: 12, color: "var(--ink)", fontWeight: 800, marginTop: 3 }}>{apiPlan.contexts.length}</div>
+              </div>
+              <label style={{ border: "1px solid var(--line)", borderRadius: 8, padding: "8px 10px", background: "var(--surface-soft)", fontSize: 12, color: "var(--ink-soft)", display: "flex", alignItems: "center", gap: 8 }}>
+                <input type="checkbox" checked={apiScanConfig.allowMutations} onChange={(e) => setApiScanConfig({ ...apiScanConfig, allowMutations: e.target.checked })} />
+                Permitir mutações controladas
+              </label>
+            </div>
+            <div style={{ gridColumn: "1 / -1", fontSize: 10.5, color: "var(--ink-muted)" }}>
+              Sem credencial roda anônimo; com uma roda anônimo e autenticado; com duas roda anônimo, autenticado e A/B.
+            </div>
           </div>
         )}
         <label style={{ display: "inline-flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 12, color: "var(--ink-soft)", marginTop: 10 }}>
@@ -1343,7 +1411,7 @@ export default function ScansPage() {
   // ── Handlers ──────────────────────────────────────────────────────────────
   const showMsg = (m) => { setStatusMsg(m); setTimeout(() => setStatusMsg(""), 4000); };
 
-  const createScan = async ({ target, scanLevel, executionPlan, accessGroupId, accessGroupName, scopeAuthorizationAttested, authPayload, sourcePayload }) => {
+  const createScan = async ({ target, scanLevel, executionPlan, accessGroupId, accessGroupName, scopeAuthorizationAttested, authPayload, apiPayload, sourcePayload }) => {
     const targets = String(target).split(";").map((t) => t.trim()).filter(Boolean);
     let firstInternalScan = null;
     for (const tgt of targets) {
@@ -1352,6 +1420,7 @@ export default function ScansPage() {
       if (accessGroupName) payload.access_group_name = accessGroupName;
       payload.scope_authorization_attested = Boolean(scopeAuthorizationAttested);
       if (authPayload)     payload.auth_config        = authPayload;
+      if (apiPayload)      payload.api_scan_config    = apiPayload;
       if (sourcePayload && (sourcePayload.source_path || sourcePayload.repository_url)) payload.source_config = sourcePayload;
       const { data } = await client.post("/api/scans", payload);
       if (!firstInternalScan && payload.execution_plan === "internal_then_external") firstInternalScan = data;

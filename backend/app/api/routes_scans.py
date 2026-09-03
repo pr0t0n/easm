@@ -2652,6 +2652,20 @@ def create_scan(
     explicit_target_inventory = is_explicit_target_inventory(requested_targets)
     auth_config = payload.auth_config if isinstance(payload.auth_config, dict) else None
     source_config = payload.source_config if isinstance(payload.source_config, dict) else None
+    api_scan_input = payload.api_scan_config if isinstance(payload.api_scan_config, dict) else None
+    from app.services.api_scan_contract import (
+        api_spec_url_in_scope,
+        api_spec_payload,
+        merge_api_scan_state,
+        normalize_api_scan_config,
+    )
+
+    api_scan_config = normalize_api_scan_config(api_scan_input, auth_config)
+    if api_scan_config.get("enabled") and not api_spec_url_in_scope(
+        str(api_scan_config.get("spec_url") or ""),
+        list(authorization_gate.get("authorized_scope") or []),
+    ):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="api_scan_config.spec_url fora do escopo autorizado")
     initial_state: dict[str, Any] = {
         "llm_risk": llm_risk_state,
         "rag_warmup": _warm_skill_rag_for_scan(),
@@ -2685,6 +2699,7 @@ def create_scan(
             }
         ],
     }
+    initial_state = merge_api_scan_state(initial_state, api_scan_config)
     if auth_config:
         initial_state["auth_config"] = auth_config
     if source_config:
@@ -2753,6 +2768,41 @@ def create_scan(
                 job.compliance_status = "auth_failed"
                 job.last_error = f"Falha ao preparar autenticacao: {exc}"
                 compliance_status = "auth_failed"
+    if api_scan_config.get("enabled"):
+        try:
+            from app.services.api_spec_ingestion_service import ingest_api_spec
+            from app.services.auth_session_manager import AuthSessionManager
+
+            auth_headers: dict[str, str] = {}
+            auth_cookies: dict[str, str] = {}
+            if api_scan_config.get("credential_count"):
+                material = AuthSessionManager(db, job).get_material("user_a")
+                if material and material.valid:
+                    auth_headers = dict(material.headers or {})
+                    auth_cookies = dict(material.cookies or {})
+            spec_payload = api_spec_payload(api_scan_input)
+            if api_scan_config.get("spec_url") or spec_payload:
+                ingest_result = ingest_api_spec(
+                    db,
+                    job,
+                    spec_url=str(api_scan_config.get("spec_url") or ""),
+                    spec_payload=spec_payload,
+                    spec_type=str(api_scan_config.get("spec_type") or "openapi"),
+                    execution_context="internal" if api_scan_config.get("credential_count") else "external",
+                    auth_headers=auth_headers,
+                    auth_cookies=auth_cookies,
+                )
+                state = dict(job.state_data or {})
+                api_state = dict(state.get("api_scan_config") or api_scan_config)
+                api_state["ingestion"] = ingest_result
+                state["api_scan_config"] = api_state
+                job.state_data = state
+        except Exception as exc:
+            state = dict(job.state_data or {})
+            api_state = dict(state.get("api_scan_config") or api_scan_config)
+            api_state["ingestion"] = {"ok": False, "error": str(exc)}
+            state["api_scan_config"] = api_state
+            job.state_data = state
     try:
         if scan_level == "full" and settings.enforce_tool_health_precheck:
             from app.services.tool_health_service import latest_tool_health

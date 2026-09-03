@@ -8,10 +8,11 @@ from pydantic import BaseModel, field_validator
 # username/password/bearer_token/cookies/headers, llm_risk's password/auth_value)
 # — see ScanJob.state_data's encryption-at-rest in StateDataJSON, which protects
 # the DB column but not a decrypted-in-Python value handed back over HTTP.
-_STATE_DATA_SENSITIVE_SUBTREES = ("auth_config", "llm_risk")
+_STATE_DATA_SENSITIVE_SUBTREES = ("auth_config", "llm_risk", "api_scan_config")
 _STATE_DATA_SENSITIVE_LEAVES = {
     "password", "passwd", "bearer_token", "token", "cookie", "cookies",
     "headers", "header_value", "auth_value",
+    "spec_payload",
 }
 
 
@@ -64,6 +65,7 @@ class ScanCreate(BaseModel):
     auth_config: dict[str, Any] | None = None
     # Optional source/repository input for SAST and secret scanners.
     source_config: dict[str, Any] | None = None
+    api_scan_config: dict[str, Any] | None = None
 
 
 class ScanResponse(BaseModel):

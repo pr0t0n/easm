@@ -4391,6 +4391,7 @@ def run_scan_postprocessor(
                 is_zap_available,
                 run_zap_active_scan,
                 run_zap_ajax_spider,
+                run_zap_api_scan,
                 run_zap_baseline,
             )
 
@@ -4426,7 +4427,15 @@ def run_scan_postprocessor(
                     db.commit()
                 except Exception:
                     db.rollback()
-                if high_value and active_count < 8:
+                item_meta = dict(getattr(item, "item_metadata", None) or {})
+                if str(item.tool_name or "").strip().lower() == "zap-api":
+                    result = run_zap_api_scan(
+                        url,
+                        openapi_url=str(item_meta.get("openapi_url") or item_meta.get("swagger_url") or ""),
+                        auth_headers=auth_headers or None,
+                    )
+                    patch = {}
+                elif high_value and active_count < 8:
                     result = run_zap_active_scan(url, auth_headers=auth_headers or None, scan_id=job.id)
                     patch = {"zap_active_count": active_count + 1}
                 else:

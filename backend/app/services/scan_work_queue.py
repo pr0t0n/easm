@@ -641,6 +641,12 @@ def apply_phase_tool_metadata(
     if reason:
         result.setdefault("gate_reason", reason)
         result.setdefault("blocked_reason", reason)
+    if str(tool_name or "").strip().lower() == "zap-api":
+        api_config = dict(result.get("api_scan_config") or {})
+        spec_url = str(result.get("openapi_url") or result.get("swagger_url") or api_config.get("spec_url") or "").strip()
+        if spec_url:
+            result["openapi_url"] = spec_url
+            result["swagger_url"] = spec_url
     return result
 
 
@@ -1600,6 +1606,14 @@ def validate_skill_applicability(
             applicable=False,
             score=0.0,
             reason="active_exploit_not_authorized",
+        )
+        return decision
+
+    if tool_l == "zap-api" and not bool((state.get("api_scan_config") or {}).get("allow_mutations")):
+        decision.update(
+            applicable=False,
+            score=0.0,
+            reason="api_mutation_guardrail_requires_explicit_authorization",
         )
         return decision
 
@@ -3110,6 +3124,7 @@ def enqueue_scan_work_items(
         _batch_metadata = apply_phase_tool_metadata({
                 "source": source,
                 "engine": "capacity_work_queue",
+                "api_scan_config": dict(state.get("api_scan_config") or {}),
                 "skill_ids": _batch_skill_ids,
                 "skill_id": (_batch_skill_ids or [""])[0],
                 "skill_attribution": "phase_contract_tool_binding",
@@ -3181,6 +3196,7 @@ def enqueue_scan_work_items(
         _item_meta: dict[str, Any] = {
             "source": source,
             "engine": "capacity_work_queue",
+            "api_scan_config": dict(state.get("api_scan_config") or {}),
             "high_risk": risk_boost < 0,
             "skill_ids": _skill_ids,
             "skill_id": _skill_ids[0] if _skill_ids else "",
