@@ -34,8 +34,16 @@ def test_p02_direct_and_p06_proxy_are_expected_transport_contract() -> None:
     assert consistency["phase_conflicts"] == {}
 
 
-def test_same_phase_mixed_egress_still_blocks_quality() -> None:
+def test_p06_direct_proxy_tool_diversity_is_not_a_quality_blocker() -> None:
     consistency = _recon_egress_consistency(["direct"], ["direct", "proxy"])
 
+    assert consistency["consistent"] is True
+    assert consistency["phase_conflicts"] == {}
+    assert consistency["expected_phase_route_diversity"] == {"P06": ["direct", "proxy"]}
+
+
+def test_p02_mixed_egress_still_blocks_quality() -> None:
+    consistency = _recon_egress_consistency(["direct", "proxy"], ["proxy"])
+
     assert consistency["consistent"] is False
-    assert consistency["phase_conflicts"] == {"P06": ["direct", "proxy"]}
+    assert consistency["phase_conflicts"] == {"P02": ["direct", "proxy"]}

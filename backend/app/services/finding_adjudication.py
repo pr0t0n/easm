@@ -832,8 +832,10 @@ def retry_blocked_post_scan_wire(db: Session, job: Any, finding: Any) -> dict[st
 
 
 def adjudicate_finding(db: Session, job: Any, finding: Any, *, force: bool = False) -> dict[str, Any]:
-    from app.models.models import FindingAdjudication, ValidationWire
+    from app.models.models import Finding, FindingAdjudication, ScanJob, ValidationWire
 
+    job_id = int(job.id)
+    finding_id = int(finding.id)
     dossier = build_adjudication_dossier(db, job, finding)
     dossier_hash = _canonical_hash(dossier)
     latest = (
@@ -887,7 +889,11 @@ def adjudicate_finding(db: Session, job: Any, finding: Any, *, force: bool = Fal
     proposal: dict[str, Any] = {}
     model_meta: dict[str, str] = {"reason": "not_needed"}
     if decision["verdict"] == "inconclusive":
+        db.flush()
+        db.commit()
         proposal, model_meta = review_with_llm(dossier)
+        job = db.query(ScanJob).filter(ScanJob.id == job_id).first() or job
+        finding = db.query(Finding).filter(Finding.id == finding_id).first() or finding
     adjudication = FindingAdjudication(
         scan_job_id=job.id,
         finding_id=finding.id,

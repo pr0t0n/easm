@@ -17,6 +17,32 @@ _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 _FINAL_VERIFICATION_STATUSES = {"confirmed", "refuted", "not_applicable"}
 
 
+def _compact_adjudication_result(value: dict[str, Any]) -> dict[str, Any]:
+    wires = [
+        {
+            "id": wire.get("id"),
+            "status": wire.get("status"),
+            "action_id": wire.get("action_id"),
+            "tool_name": wire.get("tool_name"),
+            "reason_code": wire.get("reason_code"),
+            "work_item_id": wire.get("work_item_id"),
+        }
+        for wire in list(value.get("wires") or [])
+        if isinstance(wire, dict)
+    ]
+    return {
+        "id": value.get("id"),
+        "cycle": value.get("cycle"),
+        "status": value.get("status"),
+        "final_verdict": value.get("final_verdict"),
+        "reason_code": value.get("reason_code"),
+        "wire_ids": [wire.get("id") for wire in wires if wire.get("id")],
+        "wires": wires[:10],
+        "false_positive": value.get("false_positive"),
+        "false_positive_cause": value.get("false_positive_cause"),
+    }
+
+
 def _finding_sort_key(finding: Finding) -> tuple[int, int, float, int]:
     severity = str(finding.severity or "").lower()
     return (
@@ -106,6 +132,8 @@ def enforce_high_risk_lifecycle(db: Session, job: ScanJob, *, limit: int = 50) -
         coverage = _coverage_row(db, job, finding, target)
         details = dict(finding.details or {})
         lifecycle = dict(details.get("validation_lifecycle") or {})
+        if isinstance(lifecycle.get("adjudication"), dict):
+            lifecycle["adjudication"] = _compact_adjudication_result(dict(lifecycle.get("adjudication") or {}))
         lifecycle.update({
             "required": True,
             "required_artifacts": list(decision.required_artifacts),
@@ -186,7 +214,7 @@ def enforce_high_risk_lifecycle(db: Session, job: ScanJob, *, limit: int = 50) -
                     if queued_wires:
                         scheduled = True
                         result["wires_scheduled"] += len(queued_wires)
-                        lifecycle["adjudication"] = adjudication_result
+                        lifecycle["adjudication"] = _compact_adjudication_result(adjudication_result)
             except Exception as exc:
                 # Compatibility fallback: a rollout/migration/LLM failure must
                 # not suppress the conservative validator that existed before
@@ -206,7 +234,7 @@ def enforce_high_risk_lifecycle(db: Session, job: ScanJob, *, limit: int = 50) -
                 coverage.status = str(adjudication_result.get("final_verdict") or "blocked")
                 coverage.blocking_reason = str(adjudication_result.get("reason_code") or "adjudication_blocked")
                 lifecycle["status"] = coverage.blocking_reason
-                lifecycle["adjudication"] = adjudication_result
+                lifecycle["adjudication"] = _compact_adjudication_result(adjudication_result)
             elif not tool:
                 result["blocked_no_validator"] += 1
                 coverage.status = "blocked"

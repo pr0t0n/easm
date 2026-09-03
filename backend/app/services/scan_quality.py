@@ -443,18 +443,24 @@ def _recon_egress_mode_for_quality(phase_id: str, observation: dict[str, Any], c
 
 
 def _recon_egress_consistency(p02_modes: list[str], p06_modes: list[str]) -> dict[str, Any]:
-    phase_conflicts = {
-        phase: modes
-        for phase, modes in {
-            "P02": sorted(set(p02_modes)),
-            "P06": sorted(set(p06_modes)),
-        }.items()
-        if len(modes) > 1
-    }
+    phase_conflicts: dict[str, list[str]] = {}
+    expected_phase_route_diversity: dict[str, list[str]] = {}
+    for phase, modes in {
+        "P02": sorted(set(p02_modes)),
+        "P06": sorted(set(p06_modes)),
+    }.items():
+        if len(modes) <= 1:
+            continue
+        mode_set = set(modes)
+        if phase == "P06" and mode_set <= {"direct", "proxy"}:
+            expected_phase_route_diversity[phase] = modes
+            continue
+        phase_conflicts[phase] = modes
     cross_transport_difference = bool(p02_modes and p06_modes and set(p02_modes) != set(p06_modes))
     return {
         "consistent": not phase_conflicts,
         "phase_conflicts": phase_conflicts,
+        "expected_phase_route_diversity": expected_phase_route_diversity,
         "cross_transport_difference": cross_transport_difference,
         "comparison": "phase_transport_contract",
     }
@@ -2354,6 +2360,7 @@ def run_scan_quality_gate(db: Session, job: ScanJob) -> dict[str, Any]:
     enqueue concrete extra work. If it cannot improve the scan automatically, it
     records the quality state and allows completion with visible gaps.
     """
+    job_id = int(job.id)
     state = dict(job.state_data or {})
     gate_state = dict(state.get("quality_gate") or {})
     rounds = int(gate_state.get("rounds") or 0)
@@ -2404,20 +2411,23 @@ def run_scan_quality_gate(db: Session, job: ScanJob) -> dict[str, Any]:
     try:
         from app.services.finding_validation_lifecycle import enforce_high_risk_lifecycle
 
-        # This is an optional quality extension. Isolate its writes so a
-        # constraint/parser error can be reported as a visible quality gap
-        # without poisoning the scan's outer transaction and turning a fully
-        # drained scan into FAILED.
-        with db.begin_nested():
-            lifecycle = enforce_high_risk_lifecycle(db, job, limit=QUALITY_GATE_MAX_POC_PER_ROUND)
+        lifecycle = enforce_high_risk_lifecycle(db, job, limit=QUALITY_GATE_MAX_POC_PER_ROUND)
         validation_changes["high_risk_lifecycle"] = lifecycle
         if int(lifecycle.get("scheduled", 0) or 0) > 0:
             actions.append({"type": "schedule_p21_validation", **lifecycle})
     except Exception as exc:  # noqa: BLE001
+        try:
+            db.rollback()
+            refreshed = db.query(ScanJob).filter(ScanJob.id == job_id).first()
+            if refreshed is not None:
+                job = refreshed
+                state = dict(job.state_data or {})
+        except Exception:
+            pass
         lifecycle = {"error": str(exc)[:500]}
         validation_changes["high_risk_lifecycle"] = lifecycle
         db.add(ScanLog(
-            scan_job_id=job.id,
+            scan_job_id=job_id,
             source="quality-gate",
             level="WARNING",
             message=f"high_risk_lifecycle_failed error={exc!s}"[:2000],

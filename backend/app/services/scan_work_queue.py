@@ -479,6 +479,7 @@ EVIDENCE_REQUIRED_TOOLS: dict[str, str] = {
     for tool, clauses in TOOL_EVIDENCE_CONTRACTS.items()
 }
 SKILL_SELECTION_THRESHOLD = 0.35
+EVIDENCE_REQUEUE_REOPEN_STATUSES = {"completed_with_gaps"}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # High-risk subdomain keywords → prioridade elevada no scanner
@@ -1904,6 +1905,7 @@ def requeue_evidence_ready_work_items(db: Session, job: ScanJob) -> int:
         .all()
     )
     requeued = 0
+    requeued_ids: list[int] = []
     for item in candidates:
         decision = work_item_applicability_decision(item, state, at="requeue")
         if not decision.get("applicable"):
@@ -1929,13 +1931,23 @@ def requeue_evidence_ready_work_items(db: Session, job: ScanJob) -> int:
         item.item_metadata = meta
         item.updated_at = now
         requeued += 1
+        requeued_ids.append(int(item.id))
     if requeued:
+        clear_work_item_execute_locks(requeued_ids)
         evidence_requeues = list(state.get("evidence_requeues") or [])
         evidence_requeues.append({
             "count": requeued,
             "at": now.isoformat(),
         })
         state["evidence_requeues"] = evidence_requeues[-20:]
+        if str(getattr(job, "status", "") or "").lower() in EVIDENCE_REQUEUE_REOPEN_STATUSES:
+            job.status = "running"
+            job.current_step = "P21 Quality Gate - retomando validacoes por nova evidencia"
+            if int(getattr(job, "mission_progress", 0) or 0) >= 100:
+                job.mission_progress = 99
+            state["quality_gate_active"] = True
+            state["quality_gate_reopened_after_evidence_at"] = now.isoformat()
+            state["quality_gate_reopened_after_evidence_items"] = requeued
         job.state_data = state
         db.add(ScanLog(
             scan_job_id=job.id,

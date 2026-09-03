@@ -40,3 +40,38 @@ def test_coverage_reuses_pending_row_for_same_finding():
     db.new.append(first)
 
     assert _coverage_row(db, job, SimpleNamespace(id=16054), "toligado.valid.com") is first
+
+
+def test_adjudication_lifecycle_stores_summary_not_dossier():
+    from app.services.finding_validation_lifecycle import _compact_adjudication_result
+
+    compact = _compact_adjudication_result({
+        "id": 10,
+        "cycle": 2,
+        "status": "blocked",
+        "final_verdict": "blocked",
+        "reason_code": "missing_positive_reproduction",
+        "false_positive": False,
+        "dossier": {"large": "payload"},
+        "wires": [{
+            "id": 77,
+            "status": "queued",
+            "action_id": "run_family_validator",
+            "tool_name": "sqlmap",
+            "reason_code": "missing_positive_reproduction",
+            "work_item_id": 123,
+            "input_bindings": {"large": "payload"},
+        }],
+    })
+
+    assert compact["wire_ids"] == [77]
+    assert compact["wires"][0] == {
+        "id": 77,
+        "status": "queued",
+        "action_id": "run_family_validator",
+        "tool_name": "sqlmap",
+        "reason_code": "missing_positive_reproduction",
+        "work_item_id": 123,
+    }
+    assert "dossier" not in compact
+    assert "input_bindings" not in compact["wires"][0]

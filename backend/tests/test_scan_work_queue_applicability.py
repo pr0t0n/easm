@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from app.services.endpoint_analysis_pipeline import build_parameterized_surface_state
 from app.services.scan_work_queue import (
     requeue_evidence_ready_work_items,
     triage_post_p09_injection,
@@ -383,6 +384,36 @@ def test_sqlmap_allowed_by_known_parameters_alias() -> None:
     assert decision["evidence"]["matched_keys"] == ["known_parameters"]
 
 
+def test_endpoint_inventory_materializes_parameter_evidence_for_sqlmap() -> None:
+    endpoint = SimpleNamespace(
+        url="https://target.example.com/search?q=invoice",
+        normalized_url="https://target.example.com/search?q=invoice",
+        method="GET",
+        auth_context="anonymous",
+    )
+    parameter = SimpleNamespace(
+        name="q",
+        location="query",
+        type_hint="string",
+        risk_hint="",
+    )
+
+    state = _state_for(
+        "target.example.com",
+        {"status": "http_live", "open_ports": [443], "http": [{"status_code": 200}]},
+    )
+    state.update(build_parameterized_surface_state([(endpoint, [parameter], "external")]))
+
+    decision = validate_skill_applicability(
+        "P10", "skill.vuln.sqli", "sqlmap", "target.example.com", state, at="dispatch",
+    )
+
+    assert decision["applicable"] is True
+    assert "known_parameters" in decision["evidence"]["matched_keys"]
+    assert state["discovered_parameterized_urls"] == ["https://target.example.com/search?q=invoice"]
+    assert state["parameterized_endpoints"][0]["parameter_count"] == 1
+
+
 def test_evidence_from_another_host_does_not_unlock_tool() -> None:
     state = _state_for(
         "target.example.com",
@@ -456,6 +487,9 @@ def test_requeue_evidence_ready_work_items_revives_missing_evidence_skip() -> No
     )
     job = SimpleNamespace(
         id=7,
+        status="completed_with_gaps",
+        current_step="P21 Quality Gate",
+        mission_progress=100,
         state_data={
             "preflight": {
                 "targets": {
@@ -494,6 +528,9 @@ def test_requeue_evidence_ready_work_items_revives_missing_evidence_skip() -> No
     assert item.last_error is None
     assert item.result["reason"] == "required_evidence_now_present"
     assert item.item_metadata["requeued_after_evidence"] is True
+    assert job.status == "running"
+    assert job.mission_progress == 99
+    assert job.state_data["quality_gate_active"] is True
 
 
 def test_post_p09_triage_keeps_high_cost_tool_when_direct_evidence_exists() -> None:

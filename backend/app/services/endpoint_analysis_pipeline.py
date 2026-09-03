@@ -312,6 +312,7 @@ def analyze_endpoints_for_scan(db: Session, job: ScanJob, *, limit: int = 10000,
     tests_current = 0
     skipped_current = 0
     active_plan_keys: set[tuple[str, str, str]] = set()
+    endpoint_parameter_inventory: list[tuple[OffensiveEndpoint, list[OffensiveParameter], str]] = []
     for endpoint in endpoints:
         metadata = dict(endpoint.endpoint_metadata or {})
         previous_analysis_tags = set(_analysis_tags(dict(metadata.get("analysis") or {})))
@@ -322,6 +323,7 @@ def analyze_endpoints_for_scan(db: Session, job: ScanJob, *, limit: int = 10000,
             .all()
         )
         execution_context = "internal" if str(endpoint.auth_context or "").lower() in {"authenticated", "internal", "g1"} else "external"
+        endpoint_parameter_inventory.append((endpoint, parameters, execution_context))
         analysis_input = {
             "version": ANALYSIS_VERSION,
             "url": endpoint.normalized_url,
@@ -445,6 +447,9 @@ def analyze_endpoints_for_scan(db: Session, job: ScanJob, *, limit: int = 10000,
         if (dict(endpoint.endpoint_metadata or {}).get("analysis") or {}).get("version") == ANALYSIS_VERSION
     ]
     state = dict(job.state_data or {})
+    parameter_evidence = build_parameterized_surface_state(endpoint_parameter_inventory)
+    for key, values in parameter_evidence.items():
+        state[key] = _merge_state_evidence_rows(state.get(key), values)
     valid_session_count = db.query(ScanAuthSession).filter(
         ScanAuthSession.scan_job_id == job.id,
         ScanAuthSession.status.in_(["valid", "static"]),
@@ -467,12 +472,109 @@ def analyze_endpoints_for_scan(db: Session, job: ScanJob, *, limit: int = 10000,
         "test_plans_superseded": superseded_plans,
         "business_logic_relevant": state["business_logic_intelligence"]["relevant_endpoints"],
         "business_logic_invariants": state["business_logic_intelligence"]["invariants"],
+        "parameterized_endpoints": len(parameter_evidence["parameterized_endpoints"]),
+        "known_parameters": len(parameter_evidence["known_parameters"]),
         "updated_at": datetime.now().isoformat(),
     }
     job.state_data = state
     db.add(job)
     db.flush()
     return state["endpoint_intelligence"]
+
+
+def _merge_state_evidence_rows(existing: Any, discovered: list[Any], *, limit: int = 1000) -> list[Any]:
+    merged: list[Any] = []
+    seen: set[str] = set()
+
+    def add(value: Any) -> None:
+        if value in (None, "", [], {}, ()):
+            return
+        key = json.dumps(value, sort_keys=True, default=str, separators=(",", ":"))
+        if key in seen:
+            return
+        seen.add(key)
+        merged.append(value)
+
+    if isinstance(existing, list):
+        for value in existing:
+            add(value)
+    elif existing not in (None, "", [], {}, ()):
+        add(existing)
+    for value in discovered:
+        add(value)
+        if len(merged) >= limit:
+            break
+    return merged[:limit]
+
+
+def build_parameterized_surface_state(
+    inventory: list[tuple[OffensiveEndpoint, list[OffensiveParameter], str]],
+) -> dict[str, list[Any]]:
+    parameterized_urls: list[str] = []
+    known_parameters: list[dict[str, Any]] = []
+    parameterized_endpoints: list[dict[str, Any]] = []
+    id_parameters: list[dict[str, Any]] = []
+    url_like_parameters: list[dict[str, Any]] = []
+    object_reference_endpoints: list[str] = []
+    redirect_parameters: list[dict[str, Any]] = []
+    file_path_parameters: list[dict[str, Any]] = []
+    template_parameters: list[dict[str, Any]] = []
+
+    for endpoint, parameters, execution_context in inventory:
+        url = str(getattr(endpoint, "normalized_url", None) or getattr(endpoint, "url", "") or "").strip()
+        if not url:
+            continue
+        parsed = urlparse(url)
+        endpoint_has_query = bool(parsed.query)
+        if parameters or endpoint_has_query:
+            parameterized_urls.append(str(getattr(endpoint, "url", None) or url))
+            parameterized_endpoints.append({
+                "url": url,
+                "method": str(getattr(endpoint, "method", None) or "GET").upper(),
+                "auth_context": str(getattr(endpoint, "auth_context", None) or "anonymous"),
+                "execution_context": execution_context,
+                "parameter_count": len(parameters) or len(parse_qsl(parsed.query, keep_blank_values=True)),
+            })
+        if _OBJECT_SEGMENT.search(parsed.path or ""):
+            object_reference_endpoints.append(url)
+        for parameter in parameters:
+            name = str(getattr(parameter, "name", "") or "").strip()
+            if not name:
+                continue
+            location = str(getattr(parameter, "location", None) or "query")
+            type_hint = str(getattr(parameter, "type_hint", None) or "")
+            risk_hint = str(getattr(parameter, "risk_hint", None) or "")
+            row = {
+                "url": url,
+                "name": name,
+                "location": location,
+                "type_hint": type_hint,
+                "risk_hint": risk_hint,
+            }
+            known_parameters.append(row)
+            token = f"{name} {type_hint} {risk_hint}".lower()
+            if any(marker in token for marker in ("id", "uuid", "object", "account", "tenant", "company", "user", "cliente", "pedido")):
+                id_parameters.append(row)
+            if any(marker in token for marker in ("url", "uri", "redirect", "callback", "return", "next", "continue", "webhook", "proxy", "fetch")):
+                url_like_parameters.append(row)
+            if any(marker in token for marker in ("redirect", "return", "next", "continue", "callback")):
+                redirect_parameters.append(row)
+            if any(marker in token for marker in ("file", "path", "template", "download", "view", "document")):
+                file_path_parameters.append(row)
+            if any(marker in token for marker in ("template", "ssti", "view", "render")):
+                template_parameters.append(row)
+
+    return {
+        "discovered_parameterized_urls": _merge_state_evidence_rows([], parameterized_urls),
+        "known_parameters": _merge_state_evidence_rows([], known_parameters),
+        "parameterized_endpoints": _merge_state_evidence_rows([], parameterized_endpoints),
+        "id_parameters": _merge_state_evidence_rows([], id_parameters),
+        "url_like_parameters": _merge_state_evidence_rows([], url_like_parameters),
+        "object_reference_endpoints": _merge_state_evidence_rows([], object_reference_endpoints),
+        "redirect_parameters": _merge_state_evidence_rows([], redirect_parameters),
+        "file_path_parameters": _merge_state_evidence_rows([], file_path_parameters),
+        "template_parameters": _merge_state_evidence_rows([], template_parameters),
+    }
 
 
 def recommended_execution_tools(analysis: dict[str, Any]) -> list[str]:
