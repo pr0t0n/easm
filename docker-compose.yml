@@ -636,7 +636,7 @@ services:
     # o Docker reinicia sozinho. Antes ficava morto (sem restart policy).
     restart: unless-stopped
     command: >
-      zap.sh -Xmx1024m -daemon
+      zap.sh -Xmx${ZAP_JAVA_XMX:-3072m} -daemon
         -host 0.0.0.0
         -port 8090
         -config api.key=${ZAP_API_KEY:-scriptkiddo-zap-key}
@@ -660,9 +660,9 @@ services:
     deploy:
       resources:
         limits:
-          memory: 2g
+          memory: ${ZAP_MEMORY_LIMIT:-4g}
         reservations:
-          memory: 512m
+          memory: ${ZAP_MEMORY_RESERVATION:-1g}
 
   # ─────────────────────────────────────────────────────────────────
   # Pentest Automation Lab — optional controlled targets for E2E validation.

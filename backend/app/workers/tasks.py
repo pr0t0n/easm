@@ -6037,6 +6037,8 @@ def execute_scan_work_item(item_id: int):
             )
             stdout = str(result.get("stdout") or "")
             _parser_stdout_limit = 200_000
+            _parsed_result = result.get("parsed") or result.get("parsed_result") or {}
+            _findings_extracted = result.get("findings_extracted") or result.get("findings") or []
             item.result = {
                 "status": raw_status or terminal,
                 "exit_code": exit_code,
@@ -6047,8 +6049,8 @@ def execute_scan_work_item(item_id: int):
                 "stdout_parser_limit_chars": _parser_stdout_limit,
                 "stdout_truncated_for_parser": len(stdout) > _parser_stdout_limit,
                 "stderr": result.get("stderr") or "",
-                "parsed_result": result.get("parsed") or {},
-                "findings_extracted": result.get("findings_extracted") or [],
+                "parsed_result": _parsed_result,
+                "findings_extracted": _findings_extracted,
                 "finished_at": now_done.isoformat(),
                 "execution_path": "backend_local",
             }

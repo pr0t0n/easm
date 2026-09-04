@@ -18,7 +18,7 @@ import os
 import time
 import uuid
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse
 
 import requests
@@ -50,11 +50,11 @@ _ZAP_CONFIDENCE_MAP = {
 }
 
 
-def _zap(path: str, params: dict | None = None) -> dict:
+def _zap(path: str, params: dict | None = None, *, timeout: int = 30) -> dict:
     """Chama um endpoint GET da API ZAP."""
     p = {"apikey": _ZAP_API_KEY, **(params or {})}
     url = f"{_ZAP_BASE}{path}"
-    resp = requests.get(url, params=p, timeout=30)
+    resp = requests.get(url, params=p, timeout=timeout)
     resp.raise_for_status()
     return resp.json()
 
@@ -201,21 +201,24 @@ def _wait_for_ajax_spider(max_wait: int = _AJAX_MAX_WAIT) -> None:
     logger.warning("ZAP AJAX spider timeout after %ds", max_wait)
 
 
-def _wait_for_active_scan(scan_id: str, max_wait: int = _ACTIVE_MAX_WAIT) -> None:
+def _wait_for_active_scan(scan_id: str, max_wait: int = _ACTIVE_MAX_WAIT, on_progress: Callable[[], None] | None = None) -> bool:
     """Aguarda o active scan ZAP completar."""
     deadline = time.time() + max_wait
     while time.time() < deadline:
         try:
             status = _zap("/JSON/ascan/view/status/", {"scanId": scan_id})
             pct = int(status.get("status") or 0)
+            if on_progress:
+                on_progress()
             if pct >= 100:
-                return
+                return True
         except Exception as exc:
             if _is_zap_does_not_exist(exc):
                 logger.warning("ZAP active scan scanId=%s never registered — aborting wait early", scan_id)
-                return
+                return False
         time.sleep(10)
     logger.warning("ZAP active scan timeout after %ds", max_wait)
+    return False
 
 
 def _get_alerts(target: str) -> list[dict]:
@@ -538,6 +541,23 @@ def run_zap_api_scan(
     import_result: dict[str, Any] = {}
     import_errors: list[str] = []
     active_error = ""
+    imported_urls: list[str] = []
+    alerts: list[dict] = []
+
+    def refresh_snapshot() -> None:
+        nonlocal imported_urls, alerts
+        try:
+            current_urls = list((_zap("/JSON/core/view/urls/", {"baseurl": target_url}) or {}).get("urls") or [])
+            if current_urls:
+                imported_urls = current_urls
+        except Exception as exc:
+            logger.debug("ZAP API URL snapshot error: %s", exc)
+        try:
+            current_alerts = _get_alerts(target_url)
+            if current_alerts or not alerts:
+                alerts = current_alerts
+        except Exception as exc:
+            logger.debug("ZAP API alert snapshot error: %s", exc)
 
     # Auto-discover OpenAPI URL if not provided
     if not openapi_url:
@@ -559,30 +579,39 @@ def run_zap_api_scan(
                 "url": openapi_url,
                 "hostOverride": target_url,
                 "maxMessages": "0",
-            })
+            }, timeout=int(os.getenv("ZAP_OPENAPI_IMPORT_TIMEOUT", "300")))
             import_errors = [str(item) for item in import_result.get("importUrl") or [] if str(item)]
         except Exception as exc:
             active_error = str(exc)
             logger.warning("ZAP OpenAPI import error: %s", exc)
 
+    refresh_snapshot()
+    effective_scan_policy = os.getenv("ZAP_API_SCAN_POLICY", "API").strip()
     _auth_rules = _apply_auth_headers(auth_headers)
     try:
-        ascan_data = _zap_post("/JSON/ascan/action/scan/", {
-            "url": target_url, "recurse": "true",
-        })
+        scan_policy = effective_scan_policy
+        scan_payload = {"url": target_url, "recurse": "true"}
+        if scan_policy:
+            scan_payload["scanPolicyName"] = scan_policy
+        try:
+            ascan_data = _zap_post("/JSON/ascan/action/scan/", scan_payload)
+        except requests.HTTPError as exc:
+            if not scan_policy or getattr(exc.response, "status_code", None) != 400:
+                raise
+            scan_payload.pop("scanPolicyName", None)
+            effective_scan_policy = ""
+            ascan_data = _zap_post("/JSON/ascan/action/scan/", scan_payload)
         ascan_id = str(ascan_data.get("scan") or "0")
-        _wait_for_active_scan(ascan_id, max_wait=_API_SCAN_MAX_WAIT)
+        finished = _wait_for_active_scan(ascan_id, max_wait=_API_SCAN_MAX_WAIT, on_progress=refresh_snapshot)
+        if not finished and not active_error:
+            active_error = "zap_active_scan_incomplete_or_lost"
     except Exception as exc:
         active_error = str(exc)
         logger.warning("ZAP API active scan error: %s", exc)
     finally:
         _clear_auth_headers(_auth_rules)
 
-    try:
-        imported_urls = list((_zap("/JSON/core/view/urls/", {"baseurl": target_url}) or {}).get("urls") or [])
-    except Exception:
-        imported_urls = []
-    alerts = _get_alerts(target_url)
+    refresh_snapshot()
     findings = _alerts_to_findings(alerts, target_url)
     for f in findings:
         f["details"]["zap_scan_type"] = "api_scan"
@@ -595,6 +624,7 @@ def run_zap_api_scan(
         "scan_type": "zap-api",
         "target": target_url,
         "openapi_url": openapi_url,
+        "scan_policy": effective_scan_policy,
         "import_errors": import_errors[:25],
         "imported_url_count": len(imported_urls),
         "active_error": active_error,

@@ -12,6 +12,7 @@ false success trail.
 from __future__ import annotations
 
 import logging
+import json
 from typing import Any
 
 from app.core.config import settings
@@ -168,7 +169,36 @@ def execute_tool_with_workers(
             openapi_url=openapi_url or None,
             auth_headers=request_headers or None,
         )
-        result.setdefault("status", "success")
+        findings = list(result.get("findings") or [])
+        import_errors = [str(err) for err in (result.get("import_errors") or []) if str(err)]
+        active_error = str(result.get("active_error") or "").strip()
+        imported_url_count = int(result.get("imported_url_count") or 0)
+        alert_count = int(result.get("alert_count") or 0)
+        parsed = {
+            "scan_type": result.get("scan_type") or "zap-api",
+            "target": result.get("target") or target,
+            "openapi_url": result.get("openapi_url") or openapi_url,
+            "scan_policy": result.get("scan_policy") or "",
+            "imported_url_count": imported_url_count,
+            "alert_count": alert_count,
+            "import_errors": import_errors[:25],
+            "active_error": active_error,
+            "findings": findings,
+        }
+        result["parsed"] = parsed
+        result["findings_extracted"] = findings
+        result["stdout"] = json.dumps(
+            {k: v for k, v in parsed.items() if k != "findings"} | {"finding_count": len(findings)},
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        if active_error and imported_url_count == 0 and not findings:
+            result["status"] = "failed"
+            result["error"] = active_error
+            result["exit_code"] = 1
+        else:
+            result.setdefault("status", "success")
+            result.setdefault("exit_code", 0)
         if skill_id:
             result.setdefault("skill_id", skill_id)
             result.setdefault("skill_contract", skill_contract or {})
