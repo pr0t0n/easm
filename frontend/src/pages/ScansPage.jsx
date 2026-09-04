@@ -155,6 +155,28 @@ function getFaseStates(scan) {
     return "pending";
   });
 }
+function apiScanSummary(scan) {
+  const api = scan?.state_data?.api_scan_observability || scan?.api_scan_observability || {};
+  const latest = api.latest || {};
+  const totals = api.totals || {};
+  const imported = Number(latest.imported_url_count ?? totals.imported_url_count ?? 0);
+  const alerts = Number(latest.alert_count ?? totals.alert_count ?? 0);
+  const findings = Number(latest.finding_count ?? totals.finding_count ?? 0);
+  return {
+    visible: Boolean(api.visible || api.enabled || latest.work_item_id || imported || alerts || findings),
+    enabled: Boolean(api.enabled),
+    status: String(api.latest_status || latest.status || "not_scheduled"),
+    specUrl: String(api.spec_url || latest.openapi_url || ""),
+    scanner: String(api.scanner || "OWASP ZAP"),
+    activity: String(api.activity || "openapi_dast"),
+    imported,
+    alerts,
+    findings,
+    itemId: latest.work_item_id,
+    importSource: String(latest.import_source || ""),
+    activeError: String(latest.active_error || ""),
+  };
+}
 
 // ─── Atoms ───────────────────────────────────────────────────────────────────
 function PerfilBadge({ perfil }) {
@@ -197,6 +219,61 @@ function MiniPipeline({ faseStates }) {
     </div>
   );
 }
+function ApiScanBadge({ scan }) {
+  const api = apiScanSummary(scan);
+  if (!api.visible) return null;
+  const ok = api.status === "completed";
+  return (
+    <span title={`${api.scanner} · ${api.imported} URLs · ${api.alerts} alertas`} style={{
+      fontSize: 10, fontWeight: 800, color: ok ? "var(--sev-low-text)" : "var(--sev-medium-text)",
+      background: ok ? "var(--sev-low-bg)" : "var(--sev-medium-bg)",
+      border: `1px solid ${ok ? "var(--sev-low-border)" : "var(--sev-medium-border)"}`,
+      padding: "2px 7px", borderRadius: 999,
+    }}>
+      API/ZAP {api.status}
+    </span>
+  );
+}
+function ApiScanPanel({ scan }) {
+  const api = apiScanSummary(scan);
+  if (!api.visible) return null;
+  const ok = api.status === "completed";
+  const statusColor = ok ? "var(--sev-low-text)" : api.activeError ? "var(--sev-critical-text)" : "var(--sev-medium-text)";
+  return (
+    <div style={{ border: "1px solid var(--line-soft)", borderRadius: 8, padding: "10px 11px", marginBottom: 14, background: "var(--surface)" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "baseline", marginBottom: 8 }}>
+        <div>
+          <div className="sk-eyebrow" style={{ marginBottom: 3 }}>API / ZAP</div>
+          <div style={{ fontSize: 11.5, color: "var(--ink-muted)" }}>
+            {api.scanner} · {api.activity.replace(/_/g, " ")}
+          </div>
+        </div>
+        <span className="sk-mono" style={{ fontSize: 11, fontWeight: 800, color: statusColor }}>{api.status}</span>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 6 }}>
+        {[
+          ["Work item", api.itemId ? `#${api.itemId}` : "—"],
+          ["URLs importadas", api.imported],
+          ["Alertas ZAP", api.alerts],
+          ["Findings brutos", api.findings],
+        ].map(([label, value]) => (
+          <div key={label} style={{ border: "1px solid var(--line-soft)", borderRadius: 8, padding: "7px 6px", background: "var(--surface-soft)", minWidth: 0 }}>
+            <div className="sk-mono" style={{ fontSize: 14, fontWeight: 800, color: "var(--ink)" }}>{value}</div>
+            <div style={{ fontSize: 9.5, color: "var(--ink-muted)", marginTop: 2, textTransform: "uppercase" }}>{label}</div>
+          </div>
+        ))}
+      </div>
+      <div className="sk-mono" title={api.specUrl} style={{ marginTop: 8, fontSize: 10.5, color: "var(--ink-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        spec: {api.specUrl || "—"}{api.importSource ? ` · import: ${api.importSource}` : ""}
+      </div>
+      {api.activeError && (
+        <div style={{ marginTop: 7, fontSize: 11, color: "var(--sev-critical-text)", lineHeight: 1.35 }}>
+          {api.activeError}
+        </div>
+      )}
+    </div>
+  );
+}
 
 // ─── Card de missão ativa ─────────────────────────────────────────────────────
 function ActiveScanCard({ scan, onStop, onPause, onResume, onContinue, onDelete, onReport, onFinalize, onClick }) {
@@ -228,6 +305,7 @@ function ActiveScanCard({ scan, onStop, onPause, onResume, onContinue, onDelete,
 	          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 3 }}>
 	            <span className="sk-mono" style={{ fontSize: 14, fontWeight: 700 }}>#{scan.id}</span>
 	            <PerfilBadge perfil={perfil} />
+	            <ApiScanBadge scan={scan} />
 	            <span style={{ fontSize: 10, fontWeight: 800, color: "var(--brand-700)", background: "var(--brand-50)", border: "1px solid var(--brand-200)", padding: "2px 7px", borderRadius: 999 }}>
 	              {executionPlanLabel(scan)}
 	            </span>
@@ -1110,6 +1188,7 @@ function DetailPanel({ scan, logs, onClose, autoOpenCapture = false, onAutoOpenC
         {/* fases */}
         <div style={{ flex: 1, overflowY: "auto", padding: "14px 20px" }}>
           <QualityPanel quality={quality} scan={scan} />
+          <ApiScanPanel scan={scan} />
 
           {rows.length === 0 ? (
             <div style={{ textAlign: "center", color: "var(--ink-muted)", fontSize: 12, padding: "32px 0" }}>Aguardando dados das fases…</div>

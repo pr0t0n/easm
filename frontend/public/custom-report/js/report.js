@@ -373,6 +373,23 @@ function renderDataQualityPanel(report) {
   const verificationTotals = verification.totals_by_state || {};
   const skipped = report?.skipped_work_items || {};
   const skippedCategories = skipped.by_category || {};
+  const apiScan = v2.api_scan_observability || report?.api_scan_observability || {};
+  const apiTotals = apiScan.totals || {};
+  const apiItems = Array.isArray(apiScan.items) ? apiScan.items : [];
+  const apiLatest = apiItems[apiItems.length - 1] || {};
+  const apiVisible = Boolean(apiScan.visible || apiScan.enabled || apiItems.length);
+  const apiHtml = apiVisible ? `
+      <div class="quality-card" style="margin-top:14px">
+        <div class="quality-title">API / OWASP ZAP</div>
+        <div class="quality-grid">
+          <div><span>Status</span><strong>${esc(apiScan.latest_status || apiLatest.status || '-')}</strong></div>
+          <div><span>URLs importadas</span><strong>${Number(apiTotals.imported_url_count || apiLatest.imported_url_count || 0)}</strong></div>
+          <div><span>Alertas ZAP</span><strong>${Number(apiTotals.alert_count || apiLatest.alert_count || 0)}</strong></div>
+          <div><span>Findings brutos</span><strong>${Number(apiTotals.finding_count || apiLatest.finding_count || 0)}</strong></div>
+        </div>
+        <div class="section-intro" style="margin-top:10px">Spec: ${esc(apiScan.spec_url || apiLatest.spec_url || '-')} · Scanner: ${esc(apiLatest.scanner || 'OWASP ZAP')}</div>
+      </div>
+    ` : '';
   const stateHtml = ['confirmed', 'candidate', 'blocked', 'refuted']
     .map((state) => {
       const cfg = VERIFICATION_CONFIG[state];
@@ -411,6 +428,7 @@ function renderDataQualityPanel(report) {
       </div>` : ''}
       <div class="skipped-summary"><span>Skipped: <strong>${Number(skipped.total || 0)}</strong></span>${skippedHtml}</div>
     </div>
+    ${apiHtml}
   `;
 }
 

@@ -155,6 +155,7 @@ class ScanStatusResponse(BaseModel):
     node_history: list[str] = []
     discovered_ports: list[int]
     pending_port_tests: list[int]
+    api_scan_observability: dict[str, Any] = {}
     retry_attempt: int = 0
     retry_max: int = 0
     next_retry_at: datetime | None = None

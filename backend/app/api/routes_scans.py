@@ -43,6 +43,7 @@ from app.services.strategy_runtime import (
 from app.services.scan_scope import initial_pentest_current_step_for_targets, is_explicit_target_inventory
 from app.services.scan_profiles import normalize_scan_level, scan_profile
 from app.services.scan_quality import build_scan_quality
+from app.services.pentest_report_builder import _api_scan_observability
 from app.services.kali_executor import cancel_scan_jobs_in_kali_runner
 from app.services.risk_service import (
     build_priority_reason,
@@ -2991,6 +2992,7 @@ def list_scans(db: Session = Depends(get_db), current_user: User = Depends(get_c
             "subdomain_coverage": state.get("subdomain_coverage") or {},
         }
         for key in (
+            "api_scan_observability",
             "execution_plan",
             "execution_plan_stage",
             "current_surface",
@@ -5542,6 +5544,7 @@ def scan_status(scan_id: int, db: Session = Depends(get_db), current_user: User 
             COALESCE(state_data->'node_history',   '[]'::jsonb)     AS node_history,
             COALESCE(state_data->'discovered_ports','[]'::jsonb)    AS discovered_ports,
             COALESCE(state_data->'pending_port_tests','[]'::jsonb)  AS pending_port_tests,
+            COALESCE(state_data->'api_scan_observability','{}'::jsonb) AS api_scan_observability,
             COALESCE(jsonb_array_length(state_data->'phase_ledger_v2'), 0) AS ledger_count
         FROM scan_jobs
         WHERE id = :scan_id
@@ -5570,6 +5573,7 @@ def scan_status(scan_id: int, db: Session = Depends(get_db), current_user: User 
         node_history=row["node_history"] or [],
         discovered_ports=row["discovered_ports"] or [],
         pending_port_tests=row["pending_port_tests"] or [],
+        api_scan_observability=row["api_scan_observability"] or {},
         retry_attempt=row["retry_attempt"],
         retry_max=row["retry_max"],
         next_retry_at=row["next_retry_at"],
@@ -5897,6 +5901,7 @@ def scan_runtime_feed(
         "scan_id": scan_id,
         "target_query": job.target_query,
         "status": job.status,
+        "api_scan_observability": _api_scan_observability(db, job),
         # current_step/mission_progress agora refletem o work_queue real
         "current_step": _current_phase if _total > 0 else job.current_step,
         "mission_progress": _wq_progress,
@@ -6681,6 +6686,7 @@ def scan_report(
                     "execution_summary": compact_execution_summary,
                 },
                 "tool_execution_summary": focused_tool_execution,
+                "api_scan_observability": _api_scan_observability(db, job),
                 "vulnerability_analysis_evidence": vulnerability_evidence,
                 "bas_detection_validation": bas_detection_validation,
                 "bas_control_matrix": bas_detection_validation.get("control_matrix") or [],
