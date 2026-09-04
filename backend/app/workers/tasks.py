@@ -4433,6 +4433,7 @@ def run_scan_postprocessor(
                         url,
                         openapi_url=str(item_meta.get("openapi_url") or item_meta.get("swagger_url") or ""),
                         auth_headers=auth_headers or None,
+                        scan_id=job.id,
                     )
                     patch = {}
                 elif high_value and active_count < 8:
@@ -5228,6 +5229,41 @@ def dispatch_scan_work_items(
             _terminal_statuses = {"completed", "done", "failed", "timeout", "skipped"}
             _total = sum(counts.values())
             _done = sum(counts.get(s, 0) for s in _terminal_statuses)
+            _nonterminal_count = (
+                db.query(func.count(ScanWorkItem.id))
+                .filter(
+                    ScanWorkItem.scan_job_id == scan_id,
+                    ScanWorkItem.status.in_(["queued", "retry", "dispatched", "running", "submitted"]),
+                )
+                .scalar() or 0
+            )
+            if _nonterminal_count:
+                _barrier_state = dict(job.state_data or {})
+                _barrier_state["completion_waiting_for"] = "active_work_items"
+                _barrier_state["completion_waiting_since"] = (
+                    _barrier_state.get("completion_waiting_since")
+                    or datetime.now().isoformat()
+                )
+                _barrier_state = _assign_scan_state(db, job, _barrier_state)
+                job.status = "running"
+                job.mission_progress = min(99, int(job.mission_progress or 0))
+                job.current_step = _step_with_phase(
+                    _barrier_state,
+                    f"Aguardando {int(_nonterminal_count)} atividade(s) ativa(s)",
+                )
+                db.add(ScanLog(
+                    scan_job_id=scan_id,
+                    source="work-queue",
+                    level="INFO",
+                    message=f"completion_barrier_wait producer=active_work_items active={int(_nonterminal_count)} counts={counts}",
+                ))
+                db.commit()
+                _schedule_scan_work_dispatch(scan_id, limit, countdown=30)
+                return {
+                    "claimed": len(item_ids),
+                    "counts": counts,
+                    "completion_waiting_for": "active_work_items",
+                }
             if _total > 0 and _done >= _total and job.status == "running":
                 import logging as _clog
                 _clog.getLogger(__name__).info(
@@ -6017,6 +6053,17 @@ def execute_scan_work_item(item_id: int):
                 or ""
             ).strip()
             terminal = _backend_local_terminal_status(raw_status, exit_code, _local_error)
+            if _norm_item_tool == "zap-api" and terminal == "failed" and item.attempts < item.max_attempts:
+                _zap_local_error = _local_error.lower()
+                if any(token in _zap_local_error for token in (
+                    "connection refused",
+                    "connection reset",
+                    "zap service unavailable",
+                    "zap_unavailable",
+                    "max retries exceeded",
+                    "read timed out",
+                )):
+                    terminal = "retry"
             if terminal == "failed" and item.attempts < item.max_attempts and _work_item_tool_is_required(item):
                 terminal = "retry"
             if terminal == "failed" and not _local_error:
@@ -6039,6 +6086,9 @@ def execute_scan_work_item(item_id: int):
             _parser_stdout_limit = 200_000
             _parsed_result = result.get("parsed") or result.get("parsed_result") or {}
             _findings_extracted = result.get("findings_extracted") or result.get("findings") or []
+            if isinstance(_parsed_result, dict):
+                _parsed_result = dict(_parsed_result)
+                _parsed_result.setdefault("finding_count", len(_findings_extracted))
             item.result = {
                 "status": raw_status or terminal,
                 "exit_code": exit_code,
@@ -6055,6 +6105,46 @@ def execute_scan_work_item(item_id: int):
                 "execution_path": "backend_local",
             }
             item.updated_at = now_done
+            if _norm_item_tool == "zap-api" and job:
+                state = dict(job.state_data or {})
+                api_config = dict(state.get("api_scan_config") or {})
+                api_runs = list(state.get("api_scan_observability_runs") or [])
+                summary = {
+                    "work_item_id": item.id,
+                    "status": terminal,
+                    "target": item.target,
+                    "openapi_url": _parsed_result.get("openapi_url"),
+                    "scan_policy": _parsed_result.get("scan_policy"),
+                    "import_source": _parsed_result.get("import_source"),
+                    "rewritten_spec": dict(_parsed_result.get("rewritten_spec") or {}),
+                    "imported_url_count": int(_parsed_result.get("imported_url_count") or 0),
+                    "alert_count": int(_parsed_result.get("alert_count") or 0),
+                    "finding_count": len(_findings_extracted),
+                    "active_error": _parsed_result.get("active_error") or "",
+                    "finished_at": now_done.isoformat(),
+                }
+                api_runs.append(summary)
+                state["api_scan_observability_runs"] = api_runs[-20:]
+                state["api_scan_observability"] = {
+                    "enabled": True,
+                    "latest_status": terminal,
+                    "spec_url": summary.get("openapi_url") or api_config.get("spec_url") or "",
+                    "scanner": "OWASP ZAP",
+                    "activity": "openapi_dast",
+                    "latest": summary,
+                }
+                job.state_data = state
+                db.add(ScanLog(
+                    scan_job_id=item.scan_job_id,
+                    source="api-scan",
+                    level="INFO",
+                    message=(
+                        f"api_scan_finish item={item.id} status={terminal} target={item.target} "
+                        f"spec_url={summary.get('openapi_url')} imported_urls={summary['imported_url_count']} "
+                        f"alerts={summary['alert_count']} findings={summary['finding_count']} "
+                        f"active_error={summary['active_error']}"
+                    )[:4000],
+                ))
             try:
                 kali_inflight_release(str(item.resource_class or "light"), 1)
             except Exception:

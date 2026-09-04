@@ -168,6 +168,7 @@ def execute_tool_with_workers(
             target,
             openapi_url=openapi_url or None,
             auth_headers=request_headers or None,
+            scan_id=scan_id,
         )
         findings = list(result.get("findings") or [])
         import_errors = [str(err) for err in (result.get("import_errors") or []) if str(err)]
@@ -179,6 +180,8 @@ def execute_tool_with_workers(
             "target": result.get("target") or target,
             "openapi_url": result.get("openapi_url") or openapi_url,
             "scan_policy": result.get("scan_policy") or "",
+            "import_source": result.get("import_source") or "",
+            "rewritten_spec": dict(result.get("rewritten_spec") or {}),
             "imported_url_count": imported_url_count,
             "alert_count": alert_count,
             "import_errors": import_errors[:25],

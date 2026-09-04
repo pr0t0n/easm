@@ -650,6 +650,146 @@ def apply_phase_tool_metadata(
     return result
 
 
+def _api_scan_base_target(job: ScanJob, state: dict[str, Any], clean_targets: list[str]) -> str:
+    api_config = dict(state.get("api_scan_config") or {})
+    spec_url = str(api_config.get("spec_url") or "").strip()
+    candidates = [spec_url, str(getattr(job, "target_query", "") or "")]
+    candidates.extend(clean_targets or [])
+    for value in candidates:
+        raw = str(value or "").strip()
+        if not raw:
+            continue
+        try:
+            parsed = urlparse(raw if "://" in raw else f"https://{raw}")
+            host = str(parsed.hostname or "").strip().lower()
+            if host:
+                return f"{parsed.scheme or 'https'}://{host}"
+        except Exception:
+            continue
+    return ""
+
+
+def _api_scan_spec_url(state: dict[str, Any]) -> str:
+    api_config = dict(state.get("api_scan_config") or {})
+    candidates = [api_config.get("spec_url")]
+    candidates.extend(state.get("openapi_urls") or [])
+    candidates.extend(state.get("swagger_urls") or [])
+    for value in candidates:
+        raw = str(value or "").strip()
+        if raw and raw != "inline":
+            return raw
+    return ""
+
+
+def _seed_api_scan_work_item(
+    db: Session,
+    job: ScanJob,
+    state: dict[str, Any],
+    clean_targets: list[str],
+    authorized_scope: list[str],
+    *,
+    source: str,
+) -> tuple[int, int, int]:
+    api_config = dict(state.get("api_scan_config") or {})
+    if not api_config.get("enabled"):
+        return 0, 0, 0
+    spec_url = _api_scan_spec_url(state)
+    target = _api_scan_base_target(job, state, clean_targets)
+    if not target:
+        return 0, 0, 1
+    target_host = str(urlparse(target).hostname or "").strip().lower()
+    if authorized_scope and not is_host_in_scope(target_host, authorized_scope):
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="api-scan",
+            level="WARNING",
+            message=f"api_scan_seed_scope_blocked target={target} authorized_scope={authorized_scope}",
+        ))
+        return 0, 0, 1
+    skill_ids = _skill_ids_for_phase_tool("P16", "zap-api") or ["vuln-api-graphql"]
+    observability = {
+        "enabled": True,
+        "scanner": "OWASP ZAP",
+        "activity": "openapi_dast",
+        "spec_url": spec_url,
+        "spec_type": api_config.get("spec_type") or "openapi",
+        "ingested_endpoints": int(dict(api_config.get("ingestion") or {}).get("endpoints") or 0),
+        "execution_contexts": list(api_config.get("execution_contexts") or ["anonymous"]),
+        "allow_mutations": bool(api_config.get("allow_mutations")),
+    }
+    metadata = apply_phase_tool_metadata({
+        "source": source,
+        "engine": "api_scan_orchestrator",
+        "api_scan_config": api_config,
+        "openapi_url": spec_url,
+        "swagger_url": spec_url,
+        "api_observability": observability,
+        "queue_ready_at": datetime.now().isoformat(),
+        "skill_ids": skill_ids,
+        "skill_id": skill_ids[0],
+        "applicability": _tool_applicability_decision("P16", "zap-api", target, state, at="enqueue"),
+    }, "P16", "zap-api", source=source)
+    status = "queued" if metadata.get("applicability", {}).get("applicable") else "skipped"
+    last_error = None if status == "queued" else f"skipped:applicability:{metadata.get('applicability', {}).get('reason') or 'not_applicable'}"
+    existing_item = db.query(ScanWorkItem).filter(
+        ScanWorkItem.scan_job_id == job.id,
+        ScanWorkItem.execution_context == "external",
+        ScanWorkItem.phase_id == "P16",
+        ScanWorkItem.tool_name == "zap-api",
+        ScanWorkItem.target == target[:500],
+    ).first()
+    if existing_item:
+        current_meta = dict(existing_item.item_metadata or {})
+        current_meta.update(metadata)
+        existing_item.item_metadata = current_meta
+        if existing_item.status in {"blocked", "skipped", "queued", "retry"}:
+            existing_item.status = status
+            existing_item.last_error = last_error
+            if status == "queued":
+                existing_item.lease_until = None
+        existing_item.updated_at = datetime.now()
+        db.flush()
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="api-scan",
+            level="INFO",
+            message=(
+                f"api_scan_seed existing=1 item={existing_item.id} status={existing_item.status} "
+                f"target={target} spec_url={spec_url} endpoints={observability['ingested_endpoints']}"
+            )[:4000],
+        ))
+        return 0, 1, 0
+    item = ScanWorkItem(
+        scan_job_id=job.id,
+        execution_context="external",
+        phase_id="P16",
+        target=target[:500],
+        tool_name="zap-api",
+        profile=_tool_profile("zap-api")[:120],
+        resource_class=resource_class_for_tool("zap-api"),
+        priority=max(1, PHASE_PRIORITY.get("P16", 45) - 12),
+        status=status,
+        last_error=last_error,
+        max_attempts=2,
+        item_metadata=metadata,
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+    )
+    db.add(item)
+    db.flush()
+    db.add(ScanLog(
+        scan_job_id=job.id,
+        source="api-scan",
+        level="INFO",
+        message=(
+            f"api_scan_seed created=1 item={item.id} status={item.status} "
+            f"target={target} spec_url={spec_url} endpoints={observability['ingested_endpoints']} "
+            f"contexts={observability['execution_contexts']}"
+        )[:4000],
+    ))
+    return 1, 0, 0
+
+
 def initial_status_for_phase(phase_id: str) -> str:
     return "blocked" if phase_id in _BLOCKED_AT_CREATE else "queued"
 
@@ -3026,6 +3166,18 @@ def enqueue_scan_work_items(
         job,
         [c for items in consultation_by_phase_target.values() for c in items],
     )
+
+    api_created, api_existing, api_skipped = _seed_api_scan_work_item(
+        db,
+        job,
+        state,
+        clean_targets,
+        authorized_scope,
+        source=source,
+    )
+    created += api_created
+    existing += api_existing
+    skipped += api_skipped
 
     # ── Pass 2: create / update batch work items ─────────────────────────────
     for (phase_id, tool), tset in batch_accumulator.items():

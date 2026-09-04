@@ -636,7 +636,7 @@ services:
     # o Docker reinicia sozinho. Antes ficava morto (sem restart policy).
     restart: unless-stopped
     command: >
-      zap.sh -Xmx${ZAP_JAVA_XMX:-3072m} -daemon
+      zap.sh -Xmx${ZAP_JAVA_XMX:-5120m} -daemon
         -host 0.0.0.0
         -port 8090
         -config api.key=${ZAP_API_KEY:-scriptkiddo-zap-key}
@@ -651,6 +651,7 @@ services:
       - "${ZAP_HOST_PORT:-8090}:8090"
     volumes:
       - zap_data:/home/zap/.ZAP
+      - evidence_storage:/evidence
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8090/JSON/core/view/version/?apikey=${ZAP_API_KEY:-scriptkiddo-zap-key}"]
       interval: 30s
@@ -660,7 +661,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: ${ZAP_MEMORY_LIMIT:-4g}
+          memory: ${ZAP_MEMORY_LIMIT:-6g}
         reservations:
           memory: ${ZAP_MEMORY_RESERVATION:-1g}
 

@@ -84,6 +84,7 @@ def test_execute_tool_with_workers_routes_zap_api_to_backend_zap_scanner():
         "https://api.example.com",
         openapi_url="https://api.example.com/openapi.json",
         auth_headers=None,
+        scan_id=13,
     )
     mock_kali.assert_not_called()
     assert result["status"] == "success"

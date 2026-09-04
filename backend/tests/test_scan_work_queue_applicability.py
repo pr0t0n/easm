@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 from app.services.endpoint_analysis_pipeline import build_parameterized_surface_state
 from app.services.scan_work_queue import (
+    _seed_api_scan_work_item,
     apply_phase_tool_metadata,
     requeue_evidence_ready_work_items,
     triage_post_p09_injection,
@@ -650,6 +651,66 @@ def test_zap_api_metadata_carries_openapi_url_from_api_scan_config() -> None:
 
     assert meta["openapi_url"] == "https://api.example.test/openapi.json"
     assert meta["swagger_url"] == "https://api.example.test/openapi.json"
+
+
+def test_api_scan_seed_creates_visible_zap_api_work_item() -> None:
+    added = []
+
+    class Query:
+        def filter(self, *_args, **_kwargs):
+            return self
+
+        def first(self):
+            return None
+
+    class DB:
+        def query(self, *_args, **_kwargs):
+            return Query()
+
+        def add(self, obj):
+            added.append(obj)
+
+        def flush(self):
+            for index, obj in enumerate(added, start=1):
+                if getattr(obj, "id", None) is None:
+                    obj.id = index
+
+    job = SimpleNamespace(id=15, target_query="api.example.test")
+    state = {
+        "api_scan_config": {
+            "enabled": True,
+            "spec_url": "https://api.example.test/openapi.json",
+            "spec_type": "openapi",
+            "allow_mutations": True,
+            "execution_contexts": ["anonymous"],
+            "ingestion": {"endpoints": 146},
+        },
+        "openapi_urls": ["https://api.example.test/openapi.json"],
+        "swagger_urls": ["https://api.example.test/openapi.json"],
+    }
+
+    created, existing, skipped = _seed_api_scan_work_item(
+        DB(),
+        job,
+        state,
+        ["api.example.test"],
+        [],
+        source="unit",
+    )
+
+    work_items = [obj for obj in added if obj.__class__.__name__ == "ScanWorkItem"]
+    assert created == 1
+    assert existing == 0
+    assert skipped == 0
+    assert len(work_items) == 1
+    item = work_items[0]
+    assert item.phase_id == "P16"
+    assert item.tool_name == "zap-api"
+    assert item.status == "queued"
+    assert item.target == "https://api.example.test"
+    assert item.item_metadata["openapi_url"] == "https://api.example.test/openapi.json"
+    assert item.item_metadata["api_observability"]["scanner"] == "OWASP ZAP"
+    assert item.item_metadata["api_observability"]["ingested_endpoints"] == 146
 
 
 def test_post_p09_triage_keeps_high_cost_tool_when_direct_evidence_exists() -> None:

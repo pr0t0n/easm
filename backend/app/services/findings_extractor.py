@@ -2571,6 +2571,11 @@ def persist_finding_dicts(
         risk_score = int(f.get("risk_score") or 1)
         details = dict(f.get("details") or {})
         tool_col = str(details.get("tool") or default_tool)[:100]
+        source_tool = str(f.get("source_tool") or details.get("source_tool") or tool_col).strip()
+        if source_tool:
+            details.setdefault("source_tool", source_tool[:100])
+        if tool_col == "zap-api":
+            details.setdefault("api_tested_via", "openapi_dast")
         domain_col = _resolve_finding_target(details, default_target, source_item)
         if _finding_noise_reason(title, details):
             continue
@@ -3315,7 +3320,9 @@ def persist_findings_from_work_item(
     target = str(item.target or "")
     phase_id = str(item.phase_id or "")
 
-    raw_findings = extract_findings_from_work_item(tool, target, phase_id, result)
+    raw_findings = list(result.get("findings_extracted") or [])
+    if not raw_findings:
+        raw_findings = extract_findings_from_work_item(tool, target, phase_id, result)
     _try_ingest_spec_from_findings(db, job, raw_findings)
     meta_persisted = _persist_extractor_meta(db, item, result)
     if not raw_findings:
@@ -3336,6 +3343,11 @@ def persist_findings_from_work_item(
     }
     for _rf in raw_findings:
         _d = dict(_rf.get("details") or {})
+        _source_tool = str(_rf.get("source_tool") or _d.get("source_tool") or _d.get("tool") or tool).strip()
+        if _source_tool:
+            _d.setdefault("source_tool", _source_tool[:100])
+        if str(_d.get("tool") or tool).strip().lower() == "zap-api":
+            _d.setdefault("api_tested_via", "openapi_dast")
         _d["skill_context"] = _skill_context
         _rf["details"] = _d
 

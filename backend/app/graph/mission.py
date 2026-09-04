@@ -236,7 +236,7 @@ SKILL_CATALOG: list[dict[str, Any]] = [
         "category": "vulnerabilities",
         "description": "Testes de API REST/GraphQL, fuzzing de parametros/corpos, rate limiting e endpoints expostos.",
         "triggers": ["api", "rest", "graphql", "rate", "endpoint", "json", "post", "form", "fuzz"],
-        "playbook": ["nuclei", "arjun", "wapiti", "ffuf-params", "ffuf-post"],
+        "playbook": ["zap-api", "nuclei", "arjun", "wapiti", "ffuf-params", "ffuf-post"],
         "phases": ["P16"],
     },
     {
@@ -775,7 +775,7 @@ _LEGACY_PHASE_CONTRACTS_UNUSED: dict[str, dict[str, Any]] = {
         "name": "API Security (REST/GraphQL/Rate Limit)",
         "required_skills": ["vuln-api-graphql"],
         "required_tools": ["nuclei"],
-        "optional_tools": ["arjun", "wapiti", "ffuf-params", "ffuf-post"],
+        "optional_tools": ["zap-api", "arjun", "wapiti", "ffuf-params", "ffuf-post"],
         "minimum_evidence": {
             "type": "api_scan_result",
             "description": "API endpoints tested for auth bypass, rate limiting, and injection; results recorded",
