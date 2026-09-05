@@ -126,8 +126,7 @@ def cancel_scan_jobs_in_kali_runner(
 
 def kali_enabled_for_tool(tool_name: str) -> bool:
     """Back-compat helper: true only when a Kali profile exists."""
-    name = str(tool_name or "").strip().lower()
-    return bool(name and name in TOOL_TO_PROFILE)
+    return bool(profile_for_tool(tool_name))
 
 
 # ── Batch profile mapping ─────────────────────────────────────────────────────
@@ -141,6 +140,7 @@ BATCH_TOOL_TO_PROFILE: dict[str, str] = {
     "httpx":      "httpx_probe_batch",
     "dnsx":       "dnsx_resolve_batch",
     "nuclei":     "nuclei_cves_batch",
+    "nuclei-cves": "nuclei_cves_batch",
     "nmap-vulscan": "nmap_vuln_scripts_batch",
     "subjack":    "domain_takeover_batch",
 }
@@ -187,6 +187,7 @@ TOOL_TO_PROFILE: dict[str, str] = {
 
     # Weaponization / Vuln Scanning
     "nuclei": "nuclei_cves",
+    "nuclei-cves": "nuclei_cves",
     "nuclei-rce": "nuclei_rce",
     "nuclei-auth": "nuclei_auth",
     "nuclei-auth-bypass": "nuclei_auth",
@@ -315,6 +316,20 @@ TOOL_TO_PROFILE: dict[str, str] = {
 }
 
 
+def canonical_tool_name(tool_name: str) -> str:
+    name = str(tool_name or "").strip().lower()
+    if name.startswith("nuclei-cve-"):
+        return "nuclei-cves"
+    return name
+
+
+def profile_for_tool(tool_name: str, *, batch: bool = False) -> str | None:
+    name = canonical_tool_name(tool_name)
+    if batch:
+        return BATCH_TOOL_TO_PROFILE.get(name) or TOOL_TO_PROFILE.get(name)
+    return TOOL_TO_PROFILE.get(name)
+
+
 # ── Public API: HTTP execution ───────────────────────────────────────────────
 TERMINAL_STATES = {"done", "failed", "timeout", "skipped"}
 LOST_JOB_RETRIES = 2
@@ -393,6 +408,7 @@ def execute_via_kali(
     downstream code (`_run_tools_and_collect`) needs no special-case branch.
     """
     norm_tool = str(tool_name or "").strip().lower()
+    profile_tool = canonical_tool_name(norm_tool)
 
     # Deduplicate and normalise the batch list (skip blanks / duplicates)
     batch_targets: list[str] = []
@@ -405,16 +421,16 @@ def execute_via_kali(
                 batch_targets.append(nt)
 
     # Choose batch or single-target profile
-    use_batch = len(batch_targets) > 1 and norm_tool in BATCH_TOOL_TO_PROFILE
+    use_batch = len(batch_targets) > 1 and profile_tool in BATCH_TOOL_TO_PROFILE
     if use_batch:
-        profile = BATCH_TOOL_TO_PROFILE[norm_tool]
+        profile = profile_for_tool(profile_tool, batch=True)
         # Use the first target as the nominal "target" field (runner uses it
         # only for logging when target_type=targets_file; the real targets come
         # from the file written from req.targets).
         dispatch_target = batch_targets[0]
         dispatch_targets = batch_targets
     else:
-        profile = TOOL_TO_PROFILE.get(norm_tool)
+        profile = profile_for_tool(norm_tool)
         if not profile:
             return _kali_failure(tool_name, target, scan_mode, "no_profile_mapping")
         dispatch_target = normalize_target_for_kali(target)

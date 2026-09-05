@@ -20,3 +20,15 @@ test("custom report renders API ZAP observability", () => {
   assert.ok(reportJs.includes("Alertas ZAP"));
   assert.ok(reportJs.includes("Findings brutos"));
 });
+
+test("scan drawer renders BAC 200 visibility", () => {
+  assert.match(scansPage, /business_access_control/);
+  assert.ok(scansPage.includes("BAC / 200"));
+  assert.ok(scansPage.includes("retornando 200"));
+});
+
+test("custom report renders BAC 200 visibility", () => {
+  assert.match(reportJs, /business_access_control/);
+  assert.ok(reportJs.includes("Broken Access Control / HTTP 200"));
+  assert.ok(reportJs.includes("Retornando 200"));
+});

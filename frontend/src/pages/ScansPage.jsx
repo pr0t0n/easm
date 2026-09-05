@@ -177,6 +177,19 @@ function apiScanSummary(scan) {
     activeError: String(latest.active_error || ""),
   };
 }
+function businessAccessControlSummary(quality, scan) {
+  const state = scan?.state_data || {};
+  const report = state.report_v2 || {};
+  const bac = quality?.business_access_control || report.business_access_control || state.business_access_control || {};
+  const endpoints = Array.isArray(bac.endpoints) ? bac.endpoints : [];
+  return {
+    visible: Boolean(bac.visible || endpoints.length || bac.total || bac.returning_200),
+    total: Number(bac.total || endpoints.length || 0),
+    confirmed: Number(bac.confirmed || 0),
+    returning200: Number(bac.returning_200 || 0),
+    endpoints,
+  };
+}
 
 // ─── Atoms ───────────────────────────────────────────────────────────────────
 function PerfilBadge({ perfil }) {
@@ -269,6 +282,53 @@ function ApiScanPanel({ scan }) {
       {api.activeError && (
         <div style={{ marginTop: 7, fontSize: 11, color: "var(--sev-critical-text)", lineHeight: 1.35 }}>
           {api.activeError}
+        </div>
+      )}
+    </div>
+  );
+}
+function BusinessAccessControlPanel({ quality, scan }) {
+  const bac = businessAccessControlSummary(quality, scan);
+  if (!bac.visible) return null;
+  return (
+    <div style={{ border: "1px solid var(--sev-high-border)", borderRadius: 8, padding: "10px 11px", marginBottom: 14, background: "var(--sev-high-bg)" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "baseline", marginBottom: 8 }}>
+        <div>
+          <div className="sk-eyebrow" style={{ marginBottom: 3 }}>BAC / 200</div>
+          <div style={{ fontSize: 11.5, color: "var(--sev-high-text)" }}>
+            Endpoints com autorização A/B violada
+          </div>
+        </div>
+        <span className="sk-mono" style={{ fontSize: 11, fontWeight: 800, color: "var(--sev-high-text)" }}>{bac.returning200} retornando 200</span>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 6, marginBottom: 8 }}>
+        {[
+          ["Total", bac.total],
+          ["Confirmados", bac.confirmed],
+          ["HTTP 200", bac.returning200],
+        ].map(([label, value]) => (
+          <div key={label} style={{ border: "1px solid var(--sev-high-border)", borderRadius: 8, padding: "7px 6px", background: "var(--surface)" }}>
+            <div className="sk-mono" style={{ fontSize: 14, fontWeight: 800, color: "var(--ink)" }}>{value}</div>
+            <div style={{ fontSize: 9.5, color: "var(--ink-muted)", marginTop: 2, textTransform: "uppercase" }}>{label}</div>
+          </div>
+        ))}
+      </div>
+      <div style={{ display: "grid", gap: 6 }}>
+        {bac.endpoints.slice(0, 5).map((row, idx) => (
+          <div key={`${row.finding_id || idx}-${row.endpoint || ""}`} style={{ border: "1px solid var(--sev-high-border)", borderRadius: 8, padding: "7px 8px", background: "var(--surface)", minWidth: 0 }}>
+            <div className="sk-mono" title={row.endpoint || ""} style={{ fontSize: 10.5, color: "var(--ink)", fontWeight: 800, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {row.method || "GET"} {row.endpoint || "—"}
+            </div>
+            <div style={{ marginTop: 3, fontSize: 10.5, color: "var(--ink-muted)", display: "flex", justifyContent: "space-between", gap: 8 }}>
+              <span>{row.primary_identity_key || "A"} → {row.primary_status_code || "—"} · {row.secondary_identity_key || "B"} → {row.secondary_status_code || "—"}</span>
+              <span className="sk-mono">#{row.finding_id || "—"}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+      {bac.endpoints.length > 5 && (
+        <div style={{ marginTop: 6, fontSize: 10.5, color: "var(--sev-high-text)" }}>
+          +{bac.endpoints.length - 5} endpoints adicionais no relatório
         </div>
       )}
     </div>
@@ -1189,6 +1249,7 @@ function DetailPanel({ scan, logs, onClose, autoOpenCapture = false, onAutoOpenC
         <div style={{ flex: 1, overflowY: "auto", padding: "14px 20px" }}>
           <QualityPanel quality={quality} scan={scan} />
           <ApiScanPanel scan={scan} />
+          <BusinessAccessControlPanel quality={quality} scan={scan} />
 
           {rows.length === 0 ? (
             <div style={{ textAlign: "center", color: "var(--ink-muted)", fontSize: 12, padding: "32px 0" }}>Aguardando dados das fases…</div>

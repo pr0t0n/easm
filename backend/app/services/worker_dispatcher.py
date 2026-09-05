@@ -17,7 +17,7 @@ from typing import Any
 
 from app.core.config import settings
 from app.services.mcp_client import mcp_client
-from app.services.kali_executor import execute_via_kali, TOOL_TO_PROFILE
+from app.services.kali_executor import execute_via_kali, TOOL_TO_PROFILE, profile_for_tool
 from app.workers.worker_groups import find_agent_by_tool
 
 
@@ -274,7 +274,7 @@ def execute_tool_with_workers(
         _persist_result_artifact(scan_id, result, skill_contract, auth_context)
         return result
 
-    if norm_tool not in TOOL_TO_PROFILE:
+    if not profile_for_tool(norm_tool):
         return {
             "tool": tool_name,
             "target": target,

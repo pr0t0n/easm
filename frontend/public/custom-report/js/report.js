@@ -378,6 +378,9 @@ function renderDataQualityPanel(report) {
   const apiItems = Array.isArray(apiScan.items) ? apiScan.items : [];
   const apiLatest = apiItems[apiItems.length - 1] || {};
   const apiVisible = Boolean(apiScan.visible || apiScan.enabled || apiItems.length);
+  const bac = v2.business_access_control || report?.business_access_control || {};
+  const bacEndpoints = Array.isArray(bac.endpoints) ? bac.endpoints : [];
+  const bacVisible = Boolean(bac.visible || bacEndpoints.length || bac.returning_200);
   const apiHtml = apiVisible ? `
       <div class="quality-card" style="margin-top:14px">
         <div class="quality-title">API / OWASP ZAP</div>
@@ -388,6 +391,35 @@ function renderDataQualityPanel(report) {
           <div><span>Findings brutos</span><strong>${Number(apiTotals.finding_count || apiLatest.finding_count || 0)}</strong></div>
         </div>
         <div class="section-intro" style="margin-top:10px">Spec: ${esc(apiScan.spec_url || apiLatest.spec_url || '-')} · Scanner: ${esc(apiLatest.scanner || 'OWASP ZAP')}</div>
+      </div>
+    ` : '';
+  const bacHtml = bacVisible ? `
+      <div class="quality-card" style="margin-top:14px">
+        <div class="quality-title">Broken Access Control / HTTP 200</div>
+        <div class="quality-grid">
+          <div><span>Total BAC</span><strong>${Number(bac.total || bacEndpoints.length || 0)}</strong></div>
+          <div><span>Confirmados</span><strong>${Number(bac.confirmed || 0)}</strong></div>
+          <div><span>Retornando 200</span><strong>${Number(bac.returning_200 || 0)}</strong></div>
+          <div><span>Endpoints listados</span><strong>${bacEndpoints.length}</strong></div>
+        </div>
+        ${bacEndpoints.length ? `
+        <div class="verification-matrix-wrap">
+          <table class="verification-matrix">
+            <thead><tr><th>Endpoint</th><th>Método</th><th>Identidade A</th><th>Identidade B</th><th>Status B</th><th>Finding</th></tr></thead>
+            <tbody>
+              ${bacEndpoints.slice(0, 25).map((row) => `
+                <tr>
+                  <td>${esc(row.endpoint || '-')}</td>
+                  <td>${esc(row.method || 'GET')}</td>
+                  <td>${esc(row.primary_identity_key || '-')} / ${esc(String(row.primary_status_code || '-'))}</td>
+                  <td>${esc(row.secondary_identity_key || '-')}</td>
+                  <td>${esc(String(row.secondary_status_code || '-'))}</td>
+                  <td>#${esc(String(row.finding_id || '-'))}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>` : ''}
       </div>
     ` : '';
   const stateHtml = ['confirmed', 'candidate', 'blocked', 'refuted']
@@ -429,6 +461,7 @@ function renderDataQualityPanel(report) {
       <div class="skipped-summary"><span>Skipped: <strong>${Number(skipped.total || 0)}</strong></span>${skippedHtml}</div>
     </div>
     ${apiHtml}
+    ${bacHtml}
   `;
 }
 

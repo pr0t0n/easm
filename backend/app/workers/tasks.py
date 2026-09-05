@@ -5946,6 +5946,53 @@ def execute_scan_work_item(item_id: int):
             if str(_env_name) in {"SCAN_FUZZ_PARAM", "SCAN_FUZZ_POST_DATA", "SCAN_FUZZ_CONTENT_TYPE"}:
                 _job_env[str(_env_name)] = str(_env_value)
 
+        _norm_item_tool = str(item.tool_name or "").strip().lower()
+        if _norm_item_tool == "ffuf-post" and not str(_job_env.get("SCAN_FUZZ_POST_DATA") or "").strip():
+            from urllib.parse import urlparse
+
+            state = dict(job.state_data or {}) if job else {}
+            target_path = urlparse(_dispatch_target if "://" in _dispatch_target else f"http://{_dispatch_target}").path.rstrip("/")
+            candidates = list(state.get("discovered_parameterized_requests") or []) + list(state.get("fuzz_post_templates") or [])
+            for row in candidates:
+                if not isinstance(row, dict):
+                    continue
+                if str(row.get("method") or "POST").upper() not in {"POST", "PUT", "PATCH"}:
+                    continue
+                body_template = str(row.get("body_template") or row.get("SCAN_FUZZ_POST_DATA") or "").strip()
+                if not body_template:
+                    env = dict(row.get("env") or {})
+                    body_template = str(env.get("SCAN_FUZZ_POST_DATA") or "").strip()
+                if not body_template or "FUZZ" not in body_template:
+                    continue
+                row_url = str(row.get("url") or row.get("endpoint") or row.get("target") or "")
+                row_path = urlparse(row_url if "://" in row_url else f"http://{row_url}").path.rstrip("/")
+                if row_path and row_path == target_path:
+                    _job_env["SCAN_FUZZ_POST_DATA"] = body_template
+                    _job_env.setdefault("SCAN_FUZZ_CONTENT_TYPE", str(row.get("content_type") or "application/x-www-form-urlencoded"))
+                    break
+            if not str(_job_env.get("SCAN_FUZZ_POST_DATA") or "").strip():
+                now_done = datetime.now()
+                item.status = "skipped"
+                item.finished_at = now_done
+                item.lease_until = None
+                item.last_error = "skipped:applicability:required_evidence_absent:fuzz_post_templates,post_endpoints"
+                item.result = {
+                    "status": "skipped",
+                    "exit_code": 0,
+                    "stderr": "ffuf_post_body_template_not_observed",
+                    "parsed_result": {"blocked_precondition": "ffuf_post_body_template_not_observed"},
+                    "finished_at": now_done.isoformat(),
+                    "execution_path": "worker_precondition",
+                }
+                item.updated_at = now_done
+                try:
+                    from app.services.scan_work_queue import kali_inflight_release
+                    kali_inflight_release(str(item.resource_class or "light"), 1)
+                except Exception:
+                    pass
+                db.commit()
+                return {"id": item.id, "status": "skipped", "reason": item.last_error}
+
         try:
             from app.services.scan_scope import authorized_scope_for_scan
             _authorized_scope = authorized_scope_for_scan(db, item.scan_job_id)
@@ -6006,7 +6053,6 @@ def execute_scan_work_item(item_id: int):
             db.rollback()
             raise
 
-        _norm_item_tool = str(item.tool_name or "").strip().lower()
         _PHASE_CONTROL_TOOL_NAMES = {
             "credential-boundary-review",
             "post-exploitation-boundary-review",
@@ -6089,6 +6135,13 @@ def execute_scan_work_item(item_id: int):
             if isinstance(_parsed_result, dict):
                 _parsed_result = dict(_parsed_result)
                 _parsed_result.setdefault("finding_count", len(_findings_extracted))
+            _stdout_full_path = ""
+            if len(stdout) > _parser_stdout_limit:
+                try:
+                    from app.services.artifact_store import write_artifact_file
+                    _stdout_full_path = write_artifact_file(item.scan_job_id, "full_stdout", stdout, suffix=".txt")
+                except Exception:
+                    _stdout_full_path = ""
             item.result = {
                 "status": raw_status or terminal,
                 "exit_code": exit_code,
@@ -6096,6 +6149,7 @@ def execute_scan_work_item(item_id: int):
                 "stdout_preview": stdout[:3000],
                 "stdout_full": stdout[:_parser_stdout_limit],
                 "stdout_full_chars": len(stdout),
+                "stdout_full_path": _stdout_full_path,
                 "stdout_parser_limit_chars": _parser_stdout_limit,
                 "stdout_truncated_for_parser": len(stdout) > _parser_stdout_limit,
                 "stderr": result.get("stderr") or "",
@@ -6103,6 +6157,7 @@ def execute_scan_work_item(item_id: int):
                 "findings_extracted": _findings_extracted,
                 "finished_at": now_done.isoformat(),
                 "execution_path": "backend_local",
+                "evidence_path": _stdout_full_path,
             }
             item.updated_at = now_done
             if _norm_item_tool == "zap-api" and job:
@@ -6465,7 +6520,7 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
         db.close()
         status_response = requests.get(
             f"{settings.mcp_server_url.rstrip('/')}/mcp/jobs/{kali_job_id}",
-            timeout=10,
+            timeout=30,
         )
         status_response.raise_for_status()
         status_payload = dict(status_response.json())
@@ -6649,6 +6704,13 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
                     list(_scope_output_guard.get("allowed_redirects") or []),
                 )
         from app.services.tool_output_compression import compress_tool_output as _compress_stdout
+        _stdout_full_path = ""
+        if len(_full_stdout) > _parser_stdout_limit:
+            try:
+                from app.services.artifact_store import write_artifact_file
+                _stdout_full_path = write_artifact_file(item.scan_job_id, "full_stdout", _full_stdout, suffix=".txt")
+            except Exception:
+                _stdout_full_path = ""
         item.result = {
             **result_state,
             "status": raw_status,
@@ -6663,6 +6725,7 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
             "stdout_preview": _compress_stdout(_full_stdout, max_chars=3000),
             "stdout_full": _full_stdout[:_parser_stdout_limit],        # parser input (bounded for JSONB safety)
             "stdout_full_chars": len(_full_stdout),
+            "stdout_full_path": _stdout_full_path,
             "stdout_parser_limit_chars": _parser_stdout_limit,
             "stdout_truncated_for_parser": len(_full_stdout) > _parser_stdout_limit,
             "parsed_result": _parsed_result,
@@ -6673,6 +6736,7 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
             "batch_target_file_sha256": result.get("batch_target_file_sha256"),
             "scope_output_guard": _scope_output_guard,
             "finished_at": datetime.now().isoformat(),
+            "evidence_path": _stdout_full_path or result.get("evidence_path") or "",
         }
         item.updated_at = datetime.now()
         db.commit()

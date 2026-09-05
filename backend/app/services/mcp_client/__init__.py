@@ -12,6 +12,7 @@ from app.services.kali_executor import (
     TOOL_TO_PROFILE,
     normalize_kali_result,
     normalize_target_for_kali,
+    profile_for_tool,
     resolve_authorized_scope_for_dispatch,
 )
 
@@ -248,7 +249,7 @@ class MCPClient:
         normalized_target = normalize_target_for_kali(original_target)
         mcp_tools = self.list_tools_sync()
         tool_names = {str(item.get("name") or "") for item in mcp_tools}
-        profile_name = TOOL_TO_PROFILE.get(requested.lower(), requested)
+        profile_name = profile_for_tool(requested.lower()) or TOOL_TO_PROFILE.get(requested.lower(), requested)
         selected_name = requested if requested in tool_names else profile_name
 
         metadata_timeout = 0

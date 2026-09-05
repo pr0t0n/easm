@@ -146,6 +146,66 @@ def _finding(cls, status, sev, ep, ev, payload=None):
                         "discovery_method": "teste ativo de business logic (chromium-capture + REST-CRUD + read-back)"}}
 
 
+def _bac_200_findings(wire_assessments: list[dict]) -> list[dict]:
+    findings: list[dict] = []
+    for row in wire_assessments:
+        if row.get("vulnerable") is not True:
+            continue
+        endpoint = str(row.get("endpoint") or "")
+        method = str(row.get("method") or "GET").upper()
+        primary = str(row.get("primary_identity_key") or "primary")
+        secondary = str(row.get("secondary_identity_key") or "secondary")
+        primary_status = int(row.get("primary_status_code") or 0)
+        secondary_status = int(row.get("secondary_status_code") or 0)
+        evidence = (
+            f"{method} {endpoint} returned HTTP {primary_status} for {primary} "
+            f"and HTTP {secondary_status} for {secondary} with the same response fingerprint."
+        )
+        findings.append({
+            "title": f"Broken Access Control confirmado: {method} retornou 200 para identidade não proprietária",
+            "severity": "high",
+            "risk_score": 9,
+            "url": endpoint,
+            "source_tool": "bl-test",
+            "details": {
+                "tool": "bl-test",
+                "source_tool": "bl-test",
+                "vuln_family": "broken_access_control",
+                "finding_class": "bac_200_cross_identity",
+                "verification_status": "confirmed",
+                "validation_contract_satisfied": True,
+                "false_positive_controls_passed": True,
+                "cvss_estimate": 9.1,
+                "endpoint": endpoint,
+                "method": method,
+                "url": endpoint,
+                "http_status": secondary_status,
+                "primary_status_code": primary_status,
+                "secondary_status_code": secondary_status,
+                "primary_identity_key": primary,
+                "secondary_identity_key": secondary,
+                "body_fingerprint": row.get("secondary_body_fingerprint") or row.get("primary_body_fingerprint"),
+                "content_type": row.get("secondary_content_type") or row.get("primary_content_type"),
+                "object_attribution": row.get("object_attribution"),
+                "validation_wire_id": row.get("validation_wire_id"),
+                "positive_control": {"identity_key": primary, "status_code": primary_status},
+                "negative_control": {"identity_key": secondary, "status_code": secondary_status, "expected": "401/403/404"},
+                "evidence": evidence,
+                "description": evidence,
+                "discovery_method": "comparação autenticada A/B com objeto observado",
+                "reproduction": {
+                    "method": method,
+                    "url": endpoint,
+                    "identity_a": primary,
+                    "identity_b": secondary,
+                    "expected_result": "A segunda identidade deve receber 401, 403 ou 404 para objeto de outra identidade.",
+                    "observed_result": f"HTTP {secondary_status} com fingerprint igual ao controle positivo.",
+                },
+            },
+        })
+    return findings
+
+
 # SPA business routes — loaded from wordlist so new routes can be added without
 # code changes. Covers hash-mode (Angular/Vue) and history-mode (React) SPAs.
 SPA_BUSINESS_ROUTES: list[str] = _wl("spa-business-routes.txt", [
@@ -751,6 +811,7 @@ def run_as_tool(
             return []
 
     if not actions:
+        ro_findings = _read_only_business_logic_findings()
         return {
             **common,
             "status": "blocked_precondition",
@@ -758,19 +819,8 @@ def run_as_tool(
             "stdout": "business_logic: 0 ações; pré-condições/contratos pendentes",
             "stderr": "",
             "parsed": {"summary": {"observed": 0, "failed": 0, "blocked": len(blocked)}, "observations": [], "blocked": blocked},
-            # No observed actions means the mutation-action contract's
-            # preconditions are not met -- the "no plan, no request" guardrail
-            # correctly still blocks the FULL named-technique battery here
-            # (analyze_business_logic bundles genuine writes -- test_mass_assignment
-            # registers a real account, test_file_upload uploads a real file --
-            # those must stay gated behind a vetted action/contract). But two
-            # checks in that same battery need no mutation plan at all and were
-            # being suppressed as collateral damage on every target where no
-            # mutation baseline was observed (i.e. most targets, since most
-            # endpoints are read-only): CORS-reflection and rate-limit-absence
-            # only ever issue reads/failed-login probes against `base`/`domain`.
-            # Run just those two directly instead of the mutating battery.
-            "business_logic_findings": _read_only_business_logic_findings(),
+            "findings_extracted": ro_findings,
+            "business_logic_findings": ro_findings,
         }
 
     base_parsed = urlparse(base)
@@ -855,8 +905,16 @@ def run_as_tool(
                         wire_assessments.append({
                             "validation_wire_id": action.get("validation_wire_id"),
                             "action_id": "compare_two_identities",
+                            "endpoint": object_url,
+                            "method": method,
                             "primary_identity_key": key_a,
                             "secondary_identity_key": key_b,
+                            "primary_status_code": obs_a.get("status_code"),
+                            "secondary_status_code": obs_b.get("status_code"),
+                            "primary_body_fingerprint": obs_a.get("body_fingerprint"),
+                            "secondary_body_fingerprint": obs_b.get("body_fingerprint"),
+                            "primary_content_type": obs_a.get("content_type"),
+                            "secondary_content_type": obs_b.get("content_type"),
                             "owner_control_succeeded": owner_ok,
                             "secondary_request_succeeded": secondary_ok,
                             "same_resource_fingerprint": same_resource,
@@ -888,6 +946,7 @@ def run_as_tool(
     negative_control = bool(wire_assessments) and all(
         row.get("negative_control_passed") is True for row in wire_assessments
     )
+    bl_findings = _business_logic_findings() + _bac_200_findings(wire_assessments)
     return {
         **common,
         "status": "done" if observations and failures == 0 else ("partial" if observations else "blocked_precondition"),
@@ -911,5 +970,6 @@ def run_as_tool(
             "negative_control_passed": negative_control,
             "wire_assessments": wire_assessments,
         },
-        "business_logic_findings": _business_logic_findings(),
+        "findings_extracted": bl_findings,
+        "business_logic_findings": bl_findings,
     }

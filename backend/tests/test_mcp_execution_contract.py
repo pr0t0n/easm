@@ -99,6 +99,39 @@ def test_mcp_execution_normalizes_localhost_and_legacy_status(monkeypatch) -> No
     assert result["dispatch_task_name"] == "kali:sqlmap_basic"
 
 
+def test_mcp_execution_routes_nuclei_cve_alias_to_cves_profile(monkeypatch) -> None:
+    client = MCPClient(base_url="http://mcp.test")
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(client, "list_tools_sync", lambda: [{"name": "nuclei_cves"}])
+
+    def _call(tool_name: str, parameters: dict[str, object], *, timeout: float | None = None) -> dict[str, object]:
+        captured["tool_name"] = tool_name
+        captured["parameters"] = dict(parameters)
+        captured["timeout"] = timeout
+        return {
+            "status": "done",
+            "profile": "nuclei_cves",
+            "job_id": "job-456",
+            "command": "nuclei -u https://example.com",
+            "return_code": 0,
+            "stdout": "",
+            "stderr": "",
+        }
+
+    monkeypatch.setattr(client, "call_tool_sync", _call)
+
+    result = client.execute_kali_tool_sync(
+        tool_name="nuclei-cve-2011-3368",
+        target="https://example.com",
+        scan_id=27,
+    )
+
+    assert captured["tool_name"] == "nuclei_cves"
+    assert result["status"] == "executed"
+    assert result["dispatch_task_name"] == "kali:nuclei_cves"
+
+
 def test_learning_playbook_keeps_technique_when_candidate_matches_technique_tools(monkeypatch) -> None:
     row = SimpleNamespace(
         id=99,

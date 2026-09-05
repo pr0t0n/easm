@@ -979,6 +979,14 @@ def _append_skill_consultations_to_state(
 
 
 def _tool_profile(tool_name: str) -> str:
+    try:
+        from app.services.kali_executor import profile_for_tool
+
+        profile = profile_for_tool(tool_name)
+        if profile:
+            return profile
+    except Exception:
+        pass
     entry = ToolCatalog().get(tool_name)
     return entry.profile if entry else tool_name
 
@@ -2741,6 +2749,9 @@ BATCH_PROFILE_OVERRIDE: dict[str, str] = {
 
 
 def _batch_tool_profile(tool_name: str) -> str:
+    tool = str(tool_name or "").strip().lower()
+    if tool.startswith("nuclei-cve-"):
+        return "nuclei_cves_batch"
     return BATCH_PROFILE_OVERRIDE.get(tool_name) or _tool_profile(tool_name)
 
 

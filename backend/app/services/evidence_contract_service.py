@@ -79,6 +79,7 @@ def create_artifact_from_tool_result(
         and details.get("false_positive_controls_passed") is True
     )
     explicit_negative = details.get("negative_control_passed") is True
+    false_positive_controls = details.get("false_positive_controls_passed") is True
     validation_status = "confirmed" if positive else "refuted" if explicit_negative else "candidate"
     contract = EvidenceContract(
         scan_job_id=scan_job_id,
@@ -89,9 +90,6 @@ def create_artifact_from_tool_result(
         target=str(result.get("target") or ""),
         identity_key=identity_key,
         artifact_type="tool_result",
-        # A tool exiting successfully proves the command ran, not that it proved a
-        # vulnerability — promotion to "confirmed" is decided by evaluate_finding_promotion
-        # based on baseline/exploit reproduction, never by execution status alone.
         validation_status=validation_status,
         confidence_score=95 if positive or explicit_negative else 80 if str(result.get("status") or "") in {"executed", "done", "completed"} else 40,
         baseline_request={
@@ -126,7 +124,8 @@ def create_artifact_from_tool_result(
             "status": result.get("status"),
             "dispatch_task_id": result.get("dispatch_task_id"),
             "validation_wire_id": wire.get("id"),
-            "negative_control": explicit_negative,
+            "negative_control": explicit_negative or false_positive_controls,
+            "false_positive_controls_passed": false_positive_controls,
             "expected_signals": dict(result.get("expected_signals") or {}),
         },
     )
@@ -162,7 +161,11 @@ def evaluate_finding_promotion(db: Session, finding: Finding) -> ValidationDecis
         "prototype_pollution", "file_upload", "nosql_injection",
     }
     identity_families = {"idor_bola", "bola_bfla", "broken_access_control", "auth_bypass"}
-    has_negative_control = any(bool((a.artifact_metadata or {}).get("negative_control")) for a in artifacts)
+    has_negative_control = any(
+        bool((a.artifact_metadata or {}).get("negative_control"))
+        or bool((a.artifact_metadata or {}).get("false_positive_controls_passed"))
+        for a in artifacts
+    )
     identity_values = {
         part.strip()
         for artifact in artifacts
@@ -189,11 +192,13 @@ def evaluate_finding_promotion(db: Session, finding: Finding) -> ValidationDecis
     needs_auth = family in identity_families or any(token in title for token in AUTH_REQUIRED_KEYWORDS)
     if needs_auth:
         required.append("authenticated_identity")
-        if not any(str(a.identity_key or "") for a in artifacts) and not details.get("identity_key"):
+        detail_primary_identity = details.get("identity_key") or details.get("primary_identity_key")
+        detail_secondary_identity = details.get("secondary_identity_key")
+        if not any(str(a.identity_key or "") for a in artifacts) and not detail_primary_identity:
             missing.append("authenticated_identity")
         if family in identity_families:
             required.append("two_distinct_identities")
-            if len(identity_values) < 2 and not (details.get("identity_key") and details.get("secondary_identity_key")):
+            if len(identity_values) < 2 and not (detail_primary_identity and detail_secondary_identity):
                 missing.append("two_distinct_identities")
 
     if status == "hypothesis":

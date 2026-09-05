@@ -4,7 +4,9 @@ from app.services.scan_work_queue import (
     BATCH_CAPABLE_TOOLS,
     BATCH_PROFILE_OVERRIDE,
     _batch_tool_profile,
+    _tool_profile,
 )
+from app.services.kali_executor import profile_for_tool
 
 
 def test_batch_capable_tools_all_have_a_verified_batch_profile_override() -> None:
@@ -25,8 +27,14 @@ def test_batch_tool_profile_uses_the_batch_variant() -> None:
     assert _batch_tool_profile("subjack") == "domain_takeover_batch"
     assert _batch_tool_profile("nuclei") == "nuclei_cves_batch"
     assert _batch_tool_profile("nuclei-cves") == "nuclei_cves_batch"
+    assert _batch_tool_profile("nuclei-cve-2011-3368") == "nuclei_cves_batch"
     assert _batch_tool_profile("katana") == "katana_crawl_batch"
     assert _batch_tool_profile("nikto") == "nikto_basic_batch"
+
+
+def test_nuclei_cve_alias_uses_cves_profile() -> None:
+    assert profile_for_tool("nuclei-cve-2011-3368") == "nuclei_cves"
+    assert _tool_profile("nuclei-cve-2007-6750") == "nuclei_cves"
 
 
 def test_tools_without_a_batch_profile_are_not_batch_capable() -> None:

@@ -456,7 +456,7 @@ def _candidate_profile_names(request: MCPExecutionRequest) -> list[str]:
     _add(raw_profile.replace("_", "-"))
     _add(raw_tool.replace("_", "-"))
     for base in (raw_profile, raw_tool):
-        if base in ("nuclei", "nuclei-base"):
+        if base in ("nuclei", "nuclei-base") or base.startswith("nuclei-cve-"):
             _add("nuclei_cves")
     return cands
 

@@ -7,6 +7,7 @@ Validator output.
 """
 from __future__ import annotations
 
+import logging
 import re
 import threading
 from typing import Any
@@ -88,6 +89,8 @@ PHASE_TO_CAPABILITIES: dict[str, list[str]] = {
     "P21": ["evidence_adjudication", "governance"],
     "P22": ["governance", "executive_analyst"],
 }
+
+logger = logging.getLogger(__name__)
 
 
 def _safe_db_rollback(db) -> None:
@@ -2013,6 +2016,52 @@ def _run_backend_local_tool(execution: dict[str, Any]) -> dict[str, Any]:
         return {"status": "failed", "error": f"{type(exc).__name__}: {exc}", "exit_code": None}
 
 
+def _ffuf_post_body_precondition(
+    target: str, arguments: dict[str, Any], scan_id: int | None,
+) -> dict[str, Any] | None:
+    env_vars = dict(arguments.get("env_vars") or {})
+    if str(env_vars.get("SCAN_FUZZ_POST_DATA") or "").strip():
+        return None
+    if not scan_id:
+        return {
+            "status": "blocked_precondition", "error": "ffuf_post_body_template_not_observed",
+            "exit_code": None, "stdout": "", "stderr": "",
+        }
+    target_path = urlparse(target if "://" in target else f"http://{target}").path.rstrip("/")
+    try:
+        from app.db.session import SessionLocal
+
+        db = SessionLocal()
+        try:
+            job = db.query(ScanJob).filter(ScanJob.id == int(scan_id)).first()
+            state = dict((job.state_data if job else None) or {})
+        finally:
+            db.close()
+    except Exception:
+        state = {}
+    for row in list(state.get("discovered_parameterized_requests") or []):
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("method") or "").upper() not in {"POST", "PUT", "PATCH"}:
+            continue
+        body_template = str(row.get("body_template") or "").strip()
+        if not body_template or not row.get("body_parameters"):
+            continue
+        try:
+            row_path = urlparse(str(row.get("url") or "")).path.rstrip("/")
+        except Exception:
+            continue
+        if row_path and row_path == target_path:
+            env_vars["SCAN_FUZZ_POST_DATA"] = body_template
+            env_vars.setdefault("SCAN_FUZZ_CONTENT_TYPE", str(row.get("content_type") or "") or "application/x-www-form-urlencoded")
+            arguments["env_vars"] = env_vars
+            return None
+    return {
+        "status": "blocked_precondition", "error": "ffuf_post_body_template_not_observed",
+        "exit_code": None, "stdout": "", "stderr": "",
+    }
+
+
 def _call_mcp_execution(
     execution: dict[str, Any],
     authorized_scope: list[str] | None = None,
@@ -2031,6 +2080,13 @@ def _call_mcp_execution(
         return _run_backend_local_tool(execution)
     arguments: dict[str, Any] = dict(execution.get("arguments") or {})
     arguments.setdefault("target", execution["target"])
+    if str(execution.get("tool_name") or "").strip().lower() == "ffuf-post":
+        _blocked = _ffuf_post_body_precondition(
+            str(execution.get("target") or ""), arguments,
+            execution.get("scan_id") or arguments.get("scan_id") or scan_id,
+        )
+        if _blocked is not None:
+            return _blocked
     execution_scan_id = execution.get("scan_id") or arguments.get("scan_id") or scan_id
     if execution_scan_id is not None:
         arguments["scan_id"] = int(execution_scan_id)
@@ -2096,10 +2152,14 @@ def _call_mcp_execution(
         _sleep = min(3 + int(_elapsed // 30) * 2, 20)
         _time.sleep(_sleep)
         try:
-            status_resp = requests.get(f"{base}/mcp/jobs/{job_id}", timeout=10)
+            status_resp = requests.get(f"{base}/mcp/jobs/{job_id}", timeout=30)
             status_resp.raise_for_status()
             status_data = dict(status_resp.json())
-        except Exception:
+        except Exception as _poll_exc:
+            logger.debug(
+                "mcp job poll infra error job_id=%s tool=%s: %s",
+                job_id, execution.get("tool_name"), _poll_exc,
+            )
             continue
         _st = str(status_data.get("status") or "").lower()
         if _st in _TERMINAL:
@@ -5098,7 +5158,7 @@ def _extract_evidence(phase_id: str, tool_name: str, mcp_res: dict[str, Any]) ->
                 "title": f.get("title") if isinstance(f, dict) else str(f),
                 "severity": f.get("severity") if isinstance(f, dict) else "info",
                 "vuln_family": det.get("vuln_family") or "business_logic",
-                "url": det.get("asset") or det.get("matched_at"),
+                "url": det.get("asset") or det.get("matched_at") or det.get("endpoint"),
                 "evidence": det.get("evidence"),
                 "payload": det.get("payload"),
                 "verification_status": det.get("verification_status"),

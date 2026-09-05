@@ -13,7 +13,7 @@ from typing import Any
 import requests
 
 from app.core.config import settings
-from app.services.kali_executor import TOOL_TO_PROFILE
+from app.services.kali_executor import TOOL_TO_PROFILE, profile_for_tool
 
 
 CACHE_TTL_SECONDS = 30
@@ -108,7 +108,7 @@ def _profile_binary_candidates(profile: dict[str, Any], tool_name: str) -> set[s
 
 def _tool_availability(tool_name: str, profiles_payload: dict[str, Any], tools_payload: dict[str, Any]) -> dict[str, Any]:
     normalized = _normalize_tool_name(tool_name)
-    profile_id = TOOL_TO_PROFILE.get(normalized)
+    profile_id = profile_for_tool(normalized)
     # Backend-local virtual tools: declared in TOOL_TO_PROFILE with a sentinel
     # profile id (e.g. "code_analyzer_backend") but executed inside the backend
     # itself. They are always "available" — no Kali round-trip needed.

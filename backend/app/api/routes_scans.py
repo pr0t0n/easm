@@ -43,7 +43,7 @@ from app.services.strategy_runtime import (
 from app.services.scan_scope import initial_pentest_current_step_for_targets, is_explicit_target_inventory
 from app.services.scan_profiles import normalize_scan_level, scan_profile
 from app.services.scan_quality import build_scan_quality
-from app.services.pentest_report_builder import _api_scan_observability
+from app.services.pentest_report_builder import _api_scan_observability, _business_access_control_summary
 from app.services.kali_executor import cancel_scan_jobs_in_kali_runner
 from app.services.risk_service import (
     build_priority_reason,
@@ -6052,10 +6052,13 @@ def scan_quality(
             )
             snapshot["runtime_visibility"] = _runtime_visibility(job, validations, artifacts, work_items)
             snapshot["quality_gate"] = dict((job.state_data or {}).get("quality_gate") or {})
+            snapshot["business_access_control"] = _business_access_control_summary(db, job)
         except Exception:
             pass
         return snapshot
-    return build_scan_quality(db, job)
+    quality = build_scan_quality(db, job)
+    quality["business_access_control"] = _business_access_control_summary(db, job)
+    return quality
 
 
 @router.get("/scans/{scan_id}/report", response_model=ReportResponse)
@@ -6114,6 +6117,24 @@ def scan_report(
     findings = db.query(Finding).filter(Finding.scan_job_id == scan_id).all()
     if selected_target_tokens:
         findings = [f for f in findings if _matches_selected_targets(_resolve_finding_target_tokens(f))]
+
+    _evidence_artifacts_by_finding: dict[int, list[dict]] = {}
+    _finding_ids_for_evidence = [f.id for f in findings]
+    if _finding_ids_for_evidence:
+        for _art in (
+            db.query(EvidenceArtifact)
+            .filter(EvidenceArtifact.finding_id.in_(_finding_ids_for_evidence))
+            .order_by(EvidenceArtifact.created_at.desc())
+            .all()
+        ):
+            _evidence_artifacts_by_finding.setdefault(_art.finding_id, []).append({
+                "id": _art.id,
+                "artifact_type": _art.artifact_type,
+                "validation_status": _art.validation_status,
+                "tool_name": _art.tool_name,
+                "workspace_path": _art.workspace_path,
+                "created_at": _art.created_at.isoformat() if _art.created_at else None,
+            })
 
     scan_logs = db.query(ScanLog).filter(ScanLog.scan_job_id == scan_id).order_by(ScanLog.created_at.asc()).all()
     trace_events = (
@@ -6297,6 +6318,13 @@ def scan_report(
                 ),
                 "source_group": _source_group_from_details(source_context),
                 "is_false_positive": bool(finding.is_false_positive),
+                "finding_class": _sanitize_text(details.get("finding_class") or ""),
+                "primary_identity_key": _sanitize_text(details.get("primary_identity_key") or ""),
+                "secondary_identity_key": _sanitize_text(details.get("secondary_identity_key") or ""),
+                "primary_status_code": details.get("primary_status_code"),
+                "secondary_status_code": details.get("secondary_status_code"),
+                "object_attribution": _sanitize_text(details.get("object_attribution") or ""),
+                "evidence_artifacts": _evidence_artifacts_by_finding.get(finding.id) or [],
             }
         )
 
@@ -6317,6 +6345,16 @@ def scan_report(
                 "details": details,
                 "age": age,
                 "fair": fair,
+                "url": finding.url,
+                "verification_status": finding.verification_status,
+                "finding_class": details.get("finding_class"),
+                "method": details.get("method"),
+                "primary_identity_key": details.get("primary_identity_key"),
+                "secondary_identity_key": details.get("secondary_identity_key"),
+                "primary_status_code": details.get("primary_status_code"),
+                "secondary_status_code": details.get("secondary_status_code"),
+                "object_attribution": details.get("object_attribution"),
+                "evidence_artifacts": _evidence_artifacts_by_finding.get(finding.id) or [],
             }
         )
 
@@ -6645,6 +6683,7 @@ def scan_report(
 
     paged_findings = enriched_findings[findings_offset:findings_offset + findings_limit]
     paged_vulnerabilities = consolidated_vulnerability_table[findings_offset:findings_offset + findings_limit]
+    business_access_control = _business_access_control_summary(db, job)
     compact_execution_summary = [
         {
             "asset": row.get("asset"),
@@ -6687,6 +6726,7 @@ def scan_report(
                 },
                 "tool_execution_summary": focused_tool_execution,
                 "api_scan_observability": _api_scan_observability(db, job),
+                "business_access_control": business_access_control,
                 "vulnerability_analysis_evidence": vulnerability_evidence,
                 "bas_detection_validation": bas_detection_validation,
                 "bas_control_matrix": bas_detection_validation.get("control_matrix") or [],
