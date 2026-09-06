@@ -16,8 +16,8 @@ const KIND_LABEL = {
   false_positive: "Falso positivo",
 };
 const KIND_ORDER = ["validated_risk", "candidate_risk", "bas_observation", "observation", "false_positive"];
-const SOURCE_LABEL = { bas: "BAS", pentest: "Pentest", learning: "Aprendizado", osint: "OSINT", manual: "Manual" };
-const SOURCE_ORDER = ["bas", "pentest", "learning", "osint", "manual"];
+const SOURCE_LABEL = { api: "API", bas: "BAS", pentest: "Pentest", learning: "Aprendizado", osint: "OSINT", manual: "Manual" };
+const SOURCE_ORDER = ["api", "bas", "pentest", "learning", "osint", "manual"];
 const VSTATUS_LABEL = {
   confirmed: "Confirmado", candidate: "Candidato", hypothesis: "Hipótese", refuted: "Refutado",
   inconclusive: "Inconclusivo", blocked: "Bloqueado", not_applicable: "Não aplicável",
@@ -29,6 +29,16 @@ function mitreStr(m) {
   if (typeof m === "string") return m;
   if (Array.isArray(m)) return m.map((x) => (typeof x === "string" ? x : x?.id || x?.technique_id || "")).filter(Boolean).join(", ") || "—";
   return m.id || m.technique_id || m.name || "—";
+}
+
+function apiObservationLabel(obs = {}) {
+  if (!obs.visible) return "";
+  const parts = [];
+  if (obs.tested_via) parts.push(String(obs.tested_via).toUpperCase());
+  if (obs.imported_url_count != null) parts.push(`${obs.imported_url_count} URLs`);
+  if (obs.alert_count != null) parts.push(`${obs.alert_count} alertas`);
+  if (obs.zap_scan_type) parts.push(obs.zap_scan_type);
+  return parts.join(" · ");
 }
 
 function currentUserIsAdmin() {
@@ -156,6 +166,9 @@ export default function VulnerabilitiesPage() {
     const experiment = selectedIntel?.experiment || {};
     const ledger = Array.isArray(selectedIntel?.confidence_ledger) ? selectedIntel.confidence_ledger : [];
     const contradictions = Array.isArray(selectedIntel?.contradictions) ? selectedIntel.contradictions : [];
+    const apiObs = f.api_scan_observability || {};
+    const apiObsLabel = apiObservationLabel(apiObs);
+    const evidenceArtifacts = Array.isArray(f.evidence_artifacts) ? f.evidence_artifacts : [];
     const adjudication = selectedAdjudication?.current || null;
     const answers = selectedAdjudication?.assessment?.answers || {};
     const fpAnswer = answers.false_positive || {};
@@ -204,6 +217,21 @@ export default function VulnerabilitiesPage() {
                 <div className="sk-eyebrow">Observado</div>
                 <p className="report-narrative">{f.observation_summary || "Sem resumo observado para este achado."}</p>
               </section>
+
+              {apiObs.visible && (
+                <section className="report-section">
+                  <div className="sk-eyebrow">Observabilidade API</div>
+                  <div className="vuln-experiment-grid">
+                    <div><b>Executor</b><span>{apiObs.tested_via || f.tool || "—"}</span></div>
+                    <div><b>Tipo</b><span>{apiObs.zap_scan_type || "—"}</span></div>
+                    <div><b>URLs importadas</b><span className="sk-mono">{apiObs.imported_url_count ?? "—"}</span></div>
+                    <div><b>Alertas brutos</b><span className="sk-mono">{apiObs.alert_count ?? "—"}</span></div>
+                    <div><b>Swagger/OpenAPI</b><span className="sk-mono">{apiObs.openapi_url || "—"}</span></div>
+                    <div><b>Artifact principal</b><span className="sk-mono">{apiObs.evidence_artifact_id || f.evidence_artifact_id || "—"}</span></div>
+                  </div>
+                  {apiObsLabel && <div className="vuln-code sk-mono" style={{ marginTop: 10 }}>{apiObsLabel}</div>}
+                </section>
+              )}
 
               <section className="report-section">
                 <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
@@ -281,6 +309,17 @@ export default function VulnerabilitiesPage() {
                   <ol className="vuln-repro">
                     {(proofPack.reproduction?.steps || reproSteps).slice(0, 8).map((s, i) => <li key={i}>{String(s)}</li>)}
                   </ol>
+                )}
+                {evidenceArtifacts.length > 0 && (
+                  <div style={{ marginTop: 12 }}>
+                    <b style={{ fontSize: 12 }}>Artifacts vinculados</b>
+                    {evidenceArtifacts.slice(0, 8).map((artifact) => (
+                      <div key={artifact.id} className="vuln-code sk-mono" style={{ marginTop: 6 }}>
+                        #{artifact.id} · {artifact.tool_name || "ferramenta"} · {artifact.validation_status || "—"} · {artifact.artifact_type || "artifact"}
+                        {artifact.workspace_path ? <><br />{artifact.workspace_path}</> : null}
+                      </div>
+                    ))}
+                  </div>
                 )}
               </section>
 
@@ -460,15 +499,27 @@ export default function VulnerabilitiesPage() {
                 {items.length === 0 && <tr><td colSpan={7}>Nenhum achado no filtro atual.</td></tr>}
                 {items.map((f) => {
                   const sev = String(f.severity || "info").toLowerCase();
+                  const apiObs = f.api_scan_observability || {};
+                  const apiLabel = apiObservationLabel(apiObs);
                   return (
                     <tr key={f.id} onClick={() => setSelected(f)} style={{ cursor: "pointer" }}>
                       <td><span className={`sk-badge sk-badge--${sev}`}><span className={`sk-dot sk-dot--${sev}`} />{SEV_LABEL[sev]}</span></td>
-                      <td><b>{f.title}</b><small style={{ display: "block", color: "var(--ink-muted)" }}>{f.vuln_family_label || f.tool || ""}</small></td>
+                      <td>
+                        <b>{f.title}</b>
+                        <small style={{ display: "block", color: "var(--ink-muted)" }}>{f.vuln_family_label || f.tool || ""}</small>
+                        {apiLabel && <small className="sk-mono" style={{ display: "block", color: "var(--brand-700)", marginTop: 3 }}>{apiLabel}</small>}
+                      </td>
                       <td>{f.finding_kind_label || "Achado"}</td>
-                      <td>{f.source_label || f.tool || "—"}</td>
+                      <td>
+                        <span>{f.source_label || f.tool || "—"}</span>
+                        {f.tool && <small className="sk-mono" style={{ display: "block", color: "var(--ink-muted)" }}>{f.tool}</small>}
+                      </td>
                       <td className="sk-mono">{f.target || f.domain || f.target_query || "—"}</td>
                       <td className="sk-mono" style={{ maxWidth: 420 }}>{f.observation_summary || f.cve || mitreStr(f.mitre_attack)}</td>
-                      <td><span className="evidence-pill">{VSTATUS_LABEL[f.verification_status] || f.verification_status || "—"}</span></td>
+                      <td>
+                        <span className="evidence-pill">{VSTATUS_LABEL[f.verification_status] || f.verification_status || "—"}</span>
+                        {(f.evidence_artifacts?.length || f.evidence_artifact_id) ? <small className="sk-mono" style={{ display: "block", color: "var(--ink-muted)", marginTop: 4 }}>artifact #{f.evidence_artifacts?.[0]?.id || f.evidence_artifact_id}</small> : null}
+                      </td>
                     </tr>
                   );
                 })}

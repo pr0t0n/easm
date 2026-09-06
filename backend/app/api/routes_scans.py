@@ -418,6 +418,8 @@ def _finding_source_module(finding: Finding, details: dict) -> str:
     tool = str(finding.tool or "").strip().lower()
     if source == "bas" or tool == "bas-agent":
         return "bas"
+    if tool in {"zap-api", "schemathesis", "openapi-requests", "api-requests"} or details.get("api_tested_via"):
+        return "api"
     if details.get("learning_source"):
         return "learning"
     if tool in {"github-osint", "google-dork", "pastebin", "osint", "shodan"}:
@@ -427,8 +429,11 @@ def _finding_source_module(finding: Finding, details: dict) -> str:
     return "pentest"
 
 
-def _finding_source_label(source: str) -> str:
+def _finding_source_label(source: str, tool: str | None = None) -> str:
+    if source == "api" and str(tool or "").strip().lower() == "zap-api":
+        return "API/ZAP"
     return {
+        "api": "API",
         "bas": "BAS",
         "learning": "Aprendizado",
         "osint": "OSINT",
@@ -463,6 +468,18 @@ def _finding_kind_label(kind: str) -> str:
 
 
 def _finding_observation_summary(finding: Finding, details: dict) -> str:
+    if str(finding.tool or "").strip().lower() == "zap-api" or details.get("api_tested_via"):
+        parts = []
+        if details.get("api_tested_via"):
+            parts.append(f"via {details.get('api_tested_via')}")
+        if details.get("imported_url_count") is not None:
+            parts.append(f"{details.get('imported_url_count')} URLs importadas")
+        if details.get("alert_count") is not None:
+            parts.append(f"{details.get('alert_count')} alertas")
+        if details.get("zap_scan_type"):
+            parts.append(str(details.get("zap_scan_type")))
+        if parts:
+            return "API: " + " · ".join(str(part) for part in parts)[:980]
     key_findings = details.get("key_findings") if isinstance(details.get("key_findings"), list) else []
     lines = [str(item).strip() for item in key_findings if str(item).strip()]
     if lines:
@@ -5054,7 +5071,10 @@ def list_findings_paginated(
         query = query.filter(ScanJob.access_group_id == int(access_group_id))
 
     # ── Evidence gate filter (T1 / M3) ──────────────────────────────────────
-    _VALID_VSTATUS = {"confirmed", "candidate", "hypothesis", "refuted", "none"}
+    _VALID_VSTATUS = {
+        "blocked", "candidate", "confirmed", "hypothesis", "inconclusive",
+        "invalid_evidence", "needs_human_review", "not_applicable", "refuted", "none",
+    }
     if verification_status:
         _vs = verification_status.strip().lower()
         if _vs in _VALID_VSTATUS:
@@ -5140,7 +5160,7 @@ def list_findings_paginated(
     from app.services.vuln_family import classify_family as _cf_count, family_label as _fl_count
     severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
     kind_counts = {"validated_risk": 0, "candidate_risk": 0, "bas_observation": 0, "observation": 0, "false_positive": 0}
-    source_counts = {"bas": 0, "pentest": 0, "learning": 0, "osint": 0, "manual": 0}
+    source_counts = {"api": 0, "bas": 0, "pentest": 0, "learning": 0, "osint": 0, "manual": 0}
     family_counts: dict[str, dict] = {}
     for _f in rows:
         _sev = str(_f.severity or "info").lower()
@@ -5172,6 +5192,25 @@ def list_findings_paginated(
             _slot[_sev] += 1
 
     rows = rows[offset:offset + limit]
+    evidence_artifacts_by_finding: dict[int, list[dict]] = {}
+    finding_ids = [finding.id for finding in rows]
+    if finding_ids:
+        for artifact in (
+            db.query(EvidenceArtifact)
+            .filter(EvidenceArtifact.finding_id.in_(finding_ids))
+            .order_by(EvidenceArtifact.created_at.desc())
+            .all()
+        ):
+            evidence_artifacts_by_finding.setdefault(artifact.finding_id, []).append({
+                "id": artifact.id,
+                "artifact_type": artifact.artifact_type,
+                "validation_status": artifact.validation_status,
+                "tool_name": artifact.tool_name,
+                "target": artifact.target,
+                "identity_key": artifact.identity_key,
+                "workspace_path": artifact.workspace_path,
+                "created_at": artifact.created_at.isoformat() if artifact.created_at else None,
+            })
 
     from app.services.vuln_family import classify_family, family_label, family_description, clean_finding_title, descriptive_cve_title
     from app.services.framework_mapping import attack_for_family
@@ -5201,6 +5240,19 @@ def list_findings_paginated(
             or family_description(_fam)
             or ""
         )
+        _source_module = _finding_source_module(finding, details)
+        _kind = _finding_kind(finding, details, lifecycle_status.get(finding.id, "open"))
+        _api_scan_observability = {
+            "visible": bool(details.get("api_tested_via") or str(finding.tool or "").strip().lower() == "zap-api"),
+            "tested_via": details.get("api_tested_via"),
+            "zap_scan_type": details.get("zap_scan_type"),
+            "openapi_url": details.get("openapi_url"),
+            "imported_url_count": details.get("imported_url_count"),
+            "alert_count": details.get("alert_count"),
+            "source_tool": details.get("source_tool") or finding.tool,
+            "evidence_artifact_id": details.get("evidence_artifact_id"),
+            "evidence_artifact_path": details.get("evidence_artifact_path"),
+        }
         items.append(
             {
                 "id": finding.id,
@@ -5213,10 +5265,10 @@ def list_findings_paginated(
                 "title": _finding_display_title(finding, details),
                 "vuln_family": _fam,
                 "vuln_family_label": family_label(_fam),
-                "finding_kind": _finding_kind(finding, details, lifecycle_status.get(finding.id, "open")),
-                "finding_kind_label": _finding_kind_label(_finding_kind(finding, details, lifecycle_status.get(finding.id, "open"))),
-                "source_module": _finding_source_module(finding, details),
-                "source_label": _finding_source_label(_finding_source_module(finding, details)),
+                "finding_kind": _kind,
+                "finding_kind_label": _finding_kind_label(_kind),
+                "source_module": _source_module,
+                "source_label": _finding_source_label(_source_module, finding.tool),
                 "observation_summary": _finding_observation_summary(finding, details),
                 "technical_description": _desc,
                 "mitre_attack": attack_for_family(_fam),
@@ -5251,10 +5303,19 @@ def list_findings_paginated(
                 "recommendation": finding.recommendation,
                 "lifecycle_status": lifecycle_status.get(finding.id, "open"),
                 "details": details,
+                "api_scan_observability": _api_scan_observability,
+                "evidence_artifact_id": details.get("evidence_artifact_id"),
+                "evidence_artifacts": evidence_artifacts_by_finding.get(finding.id) or [],
+                "finding_class": details.get("finding_class"),
+                "method": details.get("method") or details.get("http_method"),
+                "primary_identity_key": details.get("primary_identity_key"),
+                "secondary_identity_key": details.get("secondary_identity_key"),
+                "primary_status_code": details.get("primary_status_code"),
+                "secondary_status_code": details.get("secondary_status_code"),
+                "object_attribution": details.get("object_attribution"),
                 "age": age,
                 "fair": fair,
                 "created_at": finding.created_at,
-                # ── Evidence gate / M3 ───────────────────────────────────────
                 "verification_status": finding.verification_status,
                 "finding_url": finding.url,
             }
