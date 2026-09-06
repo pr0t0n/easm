@@ -402,6 +402,14 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
         "inputs": "URL", "outputs": "findings",
         "prerequisites": "katana/hakrawler crawl done",
     },
+    "api-skill-top20": {
+        "category": "vuln", "phase": "P16",
+        "description": "Requests-based API Top 20 skill runner for BOLA, BFLA, auth, JWT/OAuth, injection, SSRF, XXE, mass assignment, rate limits, logic abuse, shadow APIs, CORS, GraphQL and upload handling.",
+        "when_to_use": "Run alongside zap-api whenever an OpenAPI/Swagger API scan is enabled, with anonymous plus optional authenticated A/B contexts.",
+        "inputs": "API base URL, discovered endpoints, OpenAPI/Swagger ingestion, optional authorized credentials",
+        "outputs": "per-skill API findings, observability metadata, request/response evidence",
+        "prerequisites": "authorized scope and API scan enabled",
+    },
     "wfuzz": {
         "category": "vuln", "phase": "P04|P15|P16",
         "description": "Web app fuzzer for parameters, headers, paths, methods.",

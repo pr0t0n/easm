@@ -34,6 +34,8 @@ function mitreStr(m) {
 function apiObservationLabel(obs = {}) {
   if (!obs.visible) return "";
   const parts = [];
+  if (obs.api_skill_priority != null) parts.push(`#${obs.api_skill_priority}`);
+  if (obs.api_skill_name) parts.push(obs.api_skill_name);
   if (obs.tested_via) parts.push(String(obs.tested_via).toUpperCase());
   if (obs.imported_url_count != null) parts.push(`${obs.imported_url_count} URLs`);
   if (obs.alert_count != null) parts.push(`${obs.alert_count} alertas`);
@@ -223,6 +225,7 @@ export default function VulnerabilitiesPage() {
                   <div className="sk-eyebrow">Observabilidade API</div>
                   <div className="vuln-experiment-grid">
                     <div><b>Executor</b><span>{apiObs.tested_via || f.tool || "—"}</span></div>
+                    <div><b>Skill</b><span>{apiObs.api_skill_name || apiObs.api_skill_id || "—"}</span></div>
                     <div><b>Tipo</b><span>{apiObs.zap_scan_type || "—"}</span></div>
                     <div><b>URLs importadas</b><span className="sk-mono">{apiObs.imported_url_count ?? "—"}</span></div>
                     <div><b>Alertas brutos</b><span className="sk-mono">{apiObs.alert_count ?? "—"}</span></div>

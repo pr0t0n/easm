@@ -1,0 +1,362 @@
+catalog_id: api_security_top20
+version: 1.0.0
+phase_id: P16
+tool_name: api-skill-top20
+execution_model: requests_safe_api_probe
+default_limits:
+  max_endpoints_per_skill: 30
+  max_requests_per_skill: 60
+  timeout_seconds: 10
+  mutating_requests_require_allow_mutations: true
+skills:
+  - id: skill.api.bola_idor
+    priority: 1
+    name: BOLA / IDOR Testing
+    objective: Validar acesso indevido a objetos de outros usuários por manipulação de IDs, UUIDs, account_id, user_id, tenant_id e identificadores equivalentes.
+    typical_criticality: critical
+    owasp: API1:2023
+    categories: [authorization, object_access]
+    requires_authorization: true
+    requires_two_identities_for_confirmation: true
+    safe_methods: [GET, HEAD]
+    selectors:
+      path_keywords: [id, uuid, account, user, tenant, customer, order, invoice, profile, document]
+      parameter_keywords: [id, uuid, account_id, user_id, tenant_id, customer_id, order_id, invoice_id, owner_id]
+    evidence_required: [positive_identity_response, negative_identity_response, object_attribution]
+    finding:
+      vuln_family: broken_access_control
+      finding_class: bola_idor
+      severity: critical
+  - id: skill.api.bfla_privilege_escalation
+    priority: 2
+    name: BFLA / Privilege Escalation Testing
+    objective: Verificar se usuários de baixo privilégio conseguem acessar funções administrativas ou restritas.
+    typical_criticality: critical
+    owasp: API5:2023
+    categories: [authorization, privilege]
+    requires_authorization: true
+    safe_methods: [GET, HEAD, OPTIONS]
+    selectors:
+      path_keywords: [admin, internal, manage, management, role, roles, permission, permissions, approval, approve, backoffice, operator, root]
+      parameter_keywords: [role, permission, scope, admin, is_admin]
+    evidence_required: [low_privilege_response, denied_or_absent_control]
+    finding:
+      vuln_family: broken_access_control
+      finding_class: bfla_privilege_escalation
+      severity: critical
+  - id: skill.api.broken_authentication
+    priority: 3
+    name: Broken Authentication Testing
+    objective: Testar falhas de autenticação, ausência de autenticação, bypass, tokens inválidos, expirados ou reutilizáveis.
+    typical_criticality: critical
+    owasp: API2:2023
+    categories: [authentication]
+    requires_authorization: false
+    safe_methods: [GET, HEAD]
+    selectors:
+      path_keywords: [auth, login, session, token, me, profile, account, userinfo, refresh]
+      parameter_keywords: [token, access_token, refresh_token, session, authorization]
+    evidence_required: [anonymous_response, invalid_token_response, authenticated_baseline]
+    finding:
+      vuln_family: broken_authentication
+      finding_class: broken_authentication
+      severity: critical
+  - id: skill.api.jwt_security
+    priority: 4
+    name: JWT Security Testing
+    objective: Validar assinatura, algoritmo, alg, kid, expiração, iss, aud, claims, manipulação de token e validação inadequada.
+    typical_criticality: high
+    owasp: API2:2023
+    categories: [authentication, token]
+    requires_authorization: true
+    local_analysis: true
+    safe_methods: [GET]
+    selectors:
+      path_keywords: [auth, token, jwt, session, userinfo, me]
+      parameter_keywords: [jwt, token, access_token, id_token]
+    evidence_required: [decoded_header, decoded_claims, validation_gap]
+    finding:
+      vuln_family: jwt_security
+      finding_class: jwt_claim_or_header_weakness
+      severity: high
+  - id: skill.api.oauth_oidc_security
+    priority: 5
+    name: OAuth2 / OIDC Security Testing
+    objective: Testar scopes, redirect URI, token exchange, PKCE, audience, refresh token, state, nonce e configurações incorretas.
+    typical_criticality: high
+    owasp: API2:2023
+    categories: [authentication, oauth]
+    requires_authorization: false
+    safe_methods: [GET]
+    selectors:
+      path_keywords: [oauth, oidc, openid, authorize, callback, redirect, token, jwks, well-known]
+      parameter_keywords: [client_id, redirect_uri, response_type, scope, state, nonce, code_challenge]
+    evidence_required: [oidc_metadata, redirect_or_pkce_gap]
+    finding:
+      vuln_family: oauth_oidc
+      finding_class: oauth_oidc_misconfiguration
+      severity: high
+  - id: skill.api.sql_injection
+    priority: 6
+    name: SQL Injection Testing
+    objective: Identificar parâmetros vulneráveis a SQL Injection em query, body, headers, cookies e path.
+    typical_criticality: critical
+    owasp: API8:2023
+    categories: [injection, database]
+    requires_authorization: false
+    safe_methods: [GET]
+    selectors:
+      path_keywords: [search, filter, query, report, user, order, product, exam, certificate]
+      parameter_keywords: [id, q, query, search, filter, where, order, sort, cpf, email, username]
+    payloads: ["'", "\"", "1'"]
+    evidence_required: [baseline_response, injected_response, sql_error_or_differential]
+    finding:
+      vuln_family: sql_injection
+      finding_class: sql_injection_error_or_differential
+      severity: critical
+  - id: skill.api.nosql_injection
+    priority: 7
+    name: NoSQL Injection Testing
+    objective: Validar MongoDB e outros bancos NoSQL contra operadores manipulados, type confusion e query injection.
+    typical_criticality: high
+    owasp: API8:2023
+    categories: [injection, database]
+    requires_authorization: false
+    safe_methods: [GET]
+    selectors:
+      path_keywords: [search, filter, query, user, login, auth, account]
+      parameter_keywords: [id, q, query, search, filter, username, email]
+    payloads: ["[$ne]", "[$gt]", "[$regex]"]
+    evidence_required: [baseline_response, injected_response, nosql_error_or_differential]
+    finding:
+      vuln_family: nosql_injection
+      finding_class: nosql_operator_injection
+      severity: high
+  - id: skill.api.command_injection
+    priority: 8
+    name: Command Injection Testing
+    objective: Identificar entrada controlada pelo usuário chegando a comandos de sistema ou shell.
+    typical_criticality: critical
+    owasp: API8:2023
+    categories: [injection, command]
+    requires_authorization: false
+    safe_methods: [GET]
+    selectors:
+      path_keywords: [ping, trace, lookup, dns, export, import, convert, run, execute, command, report]
+      parameter_keywords: [cmd, command, exec, host, hostname, ip, domain, file, path, url]
+    payloads: [";", "|", "&&"]
+    evidence_required: [baseline_response, injected_response, shell_error_or_rejection_gap]
+    finding:
+      vuln_family: command_injection
+      finding_class: command_injection_signal
+      severity: critical
+  - id: skill.api.ssrf
+    priority: 9
+    name: SSRF Testing
+    objective: Testar parâmetros que fazem requisições para URLs, hosts internos, serviços cloud, callbacks, webhooks e imports.
+    typical_criticality: critical
+    owasp: API7:2023
+    categories: [ssrf]
+    requires_authorization: false
+    safe_methods: [GET]
+    selectors:
+      path_keywords: [fetch, proxy, import, webhook, callback, url, image, avatar, remote, metadata]
+      parameter_keywords: [url, uri, redirect, next, callback, webhook, target, image, host, endpoint]
+    payloads: [https://example.invalid/]
+    evidence_required: [baseline_response, url_payload_response, rejection_or_fetch_signal]
+    finding:
+      vuln_family: ssrf
+      finding_class: ssrf_input_accepted
+      severity: high
+  - id: skill.api.xxe_xml_parser
+    priority: 10
+    name: XXE / XML Parser Testing
+    objective: Validar processamento XML inseguro, entidades externas, DTDs e comportamento do parser.
+    typical_criticality: high
+    owasp: API8:2023
+    categories: [injection, xml]
+    requires_authorization: false
+    safe_methods: [OPTIONS, HEAD]
+    selectors:
+      path_keywords: [xml, soap, import, upload, parse, document, feed]
+      parameter_keywords: [xml, file, document, payload]
+    evidence_required: [xml_surface, parser_behavior]
+    finding:
+      vuln_family: xxe
+      finding_class: xml_parser_surface
+      severity: high
+  - id: skill.api.mass_assignment
+    priority: 11
+    name: Mass Assignment / Property Authorization
+    objective: Verificar se campos não autorizados podem ser enviados ou modificados, como role, admin, status, price e owner_id.
+    typical_criticality: high
+    owasp: API3:2023
+    categories: [authorization, property]
+    requires_authorization: true
+    mutating_confirmation_requires_fixture: true
+    safe_methods: [GET, HEAD, OPTIONS]
+    selectors:
+      path_keywords: [user, profile, account, settings, order, product, price, role, status]
+      parameter_keywords: [role, admin, is_admin, status, price, owner_id, tenant_id, permission, balance, credit]
+    evidence_required: [writable_property_surface, readback_or_fixture]
+    finding:
+      vuln_family: mass_assignment
+      finding_class: mass_assignment_candidate
+      severity: high
+  - id: skill.api.bopla
+    priority: 12
+    name: Broken Object Property Level Authorization
+    objective: Validar se propriedades sensíveis de um objeto podem ser lidas ou alteradas sem autorização adequada.
+    typical_criticality: high
+    owasp: API3:2023
+    categories: [authorization, property, data_exposure]
+    requires_authorization: true
+    safe_methods: [GET]
+    selectors:
+      path_keywords: [user, profile, account, customer, order, exam, certificate]
+      parameter_keywords: [fields, include, expand, select, projection]
+    evidence_required: [sensitive_property_response, field_level_context]
+    finding:
+      vuln_family: property_level_authorization
+      finding_class: sensitive_property_exposure
+      severity: high
+  - id: skill.api.rate_limit_resource_consumption
+    priority: 13
+    name: Rate Limit / Resource Consumption Testing
+    objective: Avaliar ausência ou bypass de throttling, abuso de recursos, endpoints caros e operações repetitivas.
+    typical_criticality: medium
+    owasp: API4:2023
+    categories: [availability, rate_limit]
+    requires_authorization: false
+    safe_methods: [GET, HEAD]
+    max_repeated_requests: 3
+    selectors:
+      path_keywords: [login, auth, search, export, report, otp, sms, email, resend, verify]
+      parameter_keywords: [q, search, email, cpf, token, code]
+    evidence_required: [repeated_status_codes, rate_limit_headers]
+    finding:
+      vuln_family: resource_consumption
+      finding_class: rate_limit_absent_signal
+      severity: medium
+  - id: skill.api.business_logic_abuse
+    priority: 14
+    name: Business Logic Abuse Testing
+    objective: Testar quebra de fluxo, repetição de transações, alteração de preço, quantidade, cupom, aprovação e sequência de etapas.
+    typical_criticality: critical
+    owasp: API6:2023
+    categories: [business_logic]
+    requires_authorization: true
+    mutating_confirmation_requires_fixture: true
+    safe_methods: [GET, HEAD, OPTIONS]
+    selectors:
+      path_keywords: [order, payment, checkout, cart, coupon, approval, approve, transaction, exam, certificate, assign]
+      parameter_keywords: [price, amount, quantity, discount, coupon, status, step, approval]
+    evidence_required: [business_endpoint_surface, fixture_or_mutation_plan]
+    finding:
+      vuln_family: business_logic
+      finding_class: business_logic_abuse_candidate
+      severity: high
+  - id: skill.api.replay_idempotency
+    priority: 15
+    name: Replay Attack / Idempotency Testing
+    objective: Validar se operações sensíveis podem ser repetidas por reutilização da mesma requisição, token ou identificador.
+    typical_criticality: high
+    owasp: API4:2023
+    categories: [business_logic, replay]
+    requires_authorization: true
+    mutating_confirmation_requires_fixture: true
+    safe_methods: [GET, HEAD, OPTIONS]
+    selectors:
+      path_keywords: [payment, checkout, transfer, otp, resend, verify, approve, order, transaction]
+      parameter_keywords: [idempotency_key, nonce, token, code, transaction_id, payment_id]
+    evidence_required: [state_changing_request, idempotency_control]
+    finding:
+      vuln_family: replay_idempotency
+      finding_class: replay_or_idempotency_candidate
+      severity: high
+  - id: skill.api.inventory_shadow_api
+    priority: 16
+    name: API Inventory / Shadow API Discovery
+    objective: Descobrir endpoints não documentados, versões antigas, APIs internas, privadas, administrativas ou esquecidas.
+    typical_criticality: high
+    owasp: API9:2023
+    categories: [inventory, shadow_api]
+    requires_authorization: false
+    safe_methods: [GET, HEAD, OPTIONS]
+    selectors:
+      path_keywords: [api, v1, v2, v3, beta, legacy, old, internal, private, admin, debug, swagger, openapi]
+      parameter_keywords: []
+    evidence_required: [documented_endpoint_set, observed_endpoint_set, undocumented_or_deprecated_endpoint]
+    finding:
+      vuln_family: shadow_api
+      finding_class: undocumented_or_deprecated_api
+      severity: medium
+  - id: skill.api.sensitive_data_exposure
+    priority: 17
+    name: Sensitive Data Exposure Testing
+    objective: Detectar PII, tokens, segredos, chaves, dados internos, stack traces, informações excessivas e campos sensíveis em respostas.
+    typical_criticality: high
+    owasp: API3:2023
+    categories: [data_exposure]
+    requires_authorization: false
+    safe_methods: [GET]
+    selectors:
+      path_keywords: [user, profile, account, token, config, debug, error, exam, certificate, report]
+      parameter_keywords: [cpf, email, token, key, fields, include]
+    evidence_required: [response_field_names, sensitive_pattern]
+    finding:
+      vuln_family: sensitive_data_exposure
+      finding_class: sensitive_data_or_stack_trace
+      severity: high
+  - id: skill.api.cors_misconfiguration
+    priority: 18
+    name: CORS Misconfiguration Testing
+    objective: Avaliar Access-Control-Allow-Origin, credentials, origins refletidos, wildcard e políticas excessivamente permissivas.
+    typical_criticality: medium
+    owasp: API8:2023
+    categories: [cors, misconfiguration]
+    requires_authorization: false
+    safe_methods: [OPTIONS, GET]
+    selectors:
+      path_keywords: [api, auth, user, account, profile, graphql]
+      parameter_keywords: []
+    evidence_required: [origin_probe_response, cors_headers]
+    finding:
+      vuln_family: cors_misconfiguration
+      finding_class: permissive_cors
+      severity: medium
+  - id: skill.api.graphql_security
+    priority: 19
+    name: GraphQL Security Testing
+    objective: Testar introspection, excessive query depth, batching, aliases, authorization, enumeração, mutations e resource exhaustion.
+    typical_criticality: high
+    owasp: API8:2023
+    categories: [graphql]
+    requires_authorization: false
+    safe_methods: [POST]
+    selectors:
+      path_keywords: [graphql, gql, graphiql]
+      parameter_keywords: [query, operationName, variables]
+    evidence_required: [graphql_endpoint, introspection_or_error_signal]
+    finding:
+      vuln_family: graphql_security
+      finding_class: graphql_introspection_or_exposure
+      severity: high
+  - id: skill.api.file_upload_content_handling
+    priority: 20
+    name: File Upload / Content Handling Testing
+    objective: Validar upload inseguro, MIME spoofing, extensão, path traversal, sobrescrita, conteúdo ativo e processamento de arquivos.
+    typical_criticality: high
+    owasp: API8:2023
+    categories: [file_upload, content_handling]
+    requires_authorization: false
+    mutating_confirmation_requires_fixture: true
+    safe_methods: [OPTIONS, HEAD]
+    selectors:
+      path_keywords: [upload, file, image, avatar, document, import, attachment, media]
+      parameter_keywords: [file, upload, image, avatar, document, attachment]
+    evidence_required: [upload_surface, content_validation_policy]
+    finding:
+      vuln_family: file_upload
+      finding_class: upload_surface_requires_fixture
+      severity: high

@@ -641,7 +641,7 @@ def apply_phase_tool_metadata(
     if reason:
         result.setdefault("gate_reason", reason)
         result.setdefault("blocked_reason", reason)
-    if str(tool_name or "").strip().lower() == "zap-api":
+    if str(tool_name or "").strip().lower() in {"zap-api", "api-skill-top20"}:
         api_config = dict(result.get("api_scan_config") or {})
         spec_url = str(result.get("openapi_url") or result.get("swagger_url") or api_config.get("spec_url") or "").strip()
         if spec_url:
@@ -788,6 +788,116 @@ def _seed_api_scan_work_item(
         )[:4000],
     ))
     return 1, 0, 0
+
+
+def _seed_api_top20_skill_work_items(
+    db: Session,
+    job: ScanJob,
+    state: dict[str, Any],
+    clean_targets: list[str],
+    authorized_scope: list[str],
+    *,
+    source: str,
+) -> tuple[int, int, int]:
+    api_config = dict(state.get("api_scan_config") or {})
+    if not api_config.get("enabled"):
+        return 0, 0, 0
+    target = _api_scan_base_target(job, state, clean_targets)
+    if not target:
+        return 0, 0, 1
+    target_host = str(urlparse(target).hostname or "").strip().lower()
+    if authorized_scope and not is_host_in_scope(target_host, authorized_scope):
+        return 0, 0, 1
+    try:
+        from app.services.api_skill_top20_runner import load_api_top20_skills
+
+        catalog = load_api_top20_skills()
+        skills = [dict(item) for item in list(catalog.get("skills") or []) if isinstance(item, dict)]
+    except Exception as exc:
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="api-skill-top20",
+            level="WARNING",
+            message=f"api_top20_catalog_unavailable error={exc!s}"[:2000],
+        ))
+        return 0, 0, 1
+    created = 0
+    existing = 0
+    skipped = 0
+    base_priority = max(1, PHASE_PRIORITY.get("P16", 45) - 10)
+    for skill in skills:
+        skill_id = str(skill.get("id") or "").strip()
+        if not skill_id:
+            skipped += 1
+            continue
+        slug = re.sub(r"[^a-z0-9]+", "-", skill_id.lower()).strip("-")
+        item_target = f"{target}#api-top20-{slug}"[:500]
+        metadata = apply_phase_tool_metadata({
+            "source": source,
+            "engine": "api_skill_top20_orchestrator",
+            "api_scan_config": api_config,
+            "api_skill_id": skill_id,
+            "api_skill_name": skill.get("name"),
+            "api_skill_priority": skill.get("priority"),
+            "api_skill_catalog": catalog.get("catalog_id"),
+            "api_skill_catalog_version": catalog.get("version"),
+            "execution_target": target,
+            "openapi_url": _api_scan_spec_url(state),
+            "swagger_url": _api_scan_spec_url(state),
+            "skill_ids": [skill_id],
+            "skill_id": skill_id,
+            "applicability": _tool_applicability_decision("P16", "api-skill-top20", target, state, at="enqueue"),
+        }, "P16", "api-skill-top20", source=source, decision_source="api_top20_yaml_catalog")
+        status = "queued" if metadata.get("applicability", {}).get("applicable") else "skipped"
+        last_error = None if status == "queued" else f"skipped:applicability:{metadata.get('applicability', {}).get('reason') or 'not_applicable'}"
+        current = db.query(ScanWorkItem).filter(
+            ScanWorkItem.scan_job_id == job.id,
+            ScanWorkItem.execution_context == "external",
+            ScanWorkItem.phase_id == "P16",
+            ScanWorkItem.tool_name == "api-skill-top20",
+            ScanWorkItem.target == item_target,
+        ).first()
+        if current:
+            current_meta = dict(current.item_metadata or {})
+            current_meta.update(metadata)
+            current.item_metadata = current_meta
+            if current.status in {"blocked", "skipped", "queued", "retry"}:
+                current.status = status
+                current.last_error = last_error
+                if status == "queued":
+                    current.lease_until = None
+            current.updated_at = datetime.now()
+            existing += 1
+            continue
+        item = ScanWorkItem(
+            scan_job_id=job.id,
+            execution_context="external",
+            phase_id="P16",
+            target=item_target,
+            tool_name="api-skill-top20",
+            profile="api_skill_top20",
+            resource_class=resource_class_for_tool("api-skill-top20"),
+            priority=base_priority + int(skill.get("priority") or 99),
+            status=status,
+            last_error=last_error,
+            max_attempts=2,
+            item_metadata=metadata,
+            created_at=datetime.now(),
+            updated_at=datetime.now(),
+        )
+        db.add(item)
+        db.flush()
+        created += 1
+    db.add(ScanLog(
+        scan_job_id=job.id,
+        source="api-skill-top20",
+        level="INFO",
+        message=(
+            f"api_top20_seed created={created} existing={existing} skipped={skipped} "
+            f"target={target} skills={len(skills)} spec_url={_api_scan_spec_url(state)}"
+        )[:4000],
+    ))
+    return created, existing, skipped
 
 
 def initial_status_for_phase(phase_id: str) -> str:
@@ -1989,10 +2099,11 @@ def work_item_applicability_decision(
 ) -> dict[str, Any]:
     metadata = dict(item.item_metadata or {})
     if not _is_batch_target(item.target):
+        target = str(metadata.get("execution_target") or item.target or "")
         return _tool_applicability_decision(
             str(item.phase_id or ""),
             str(item.tool_name or ""),
-            str(item.target or ""),
+            target,
             dict(state or {}),
             at=at,
         )
@@ -3189,6 +3300,18 @@ def enqueue_scan_work_items(
     created += api_created
     existing += api_existing
     skipped += api_skipped
+
+    api_skill_created, api_skill_existing, api_skill_skipped = _seed_api_top20_skill_work_items(
+        db,
+        job,
+        state,
+        clean_targets,
+        authorized_scope,
+        source=source,
+    )
+    created += api_skill_created
+    existing += api_skill_existing
+    skipped += api_skill_skipped
 
     # ── Pass 2: create / update batch work items ─────────────────────────────
     for (phase_id, tool), tset in batch_accumulator.items():

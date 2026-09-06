@@ -4820,7 +4820,20 @@ def run_offensive_operator_scan(
             quality_gate_hard_block_is_futile,
             run_scan_quality_gate,
         )
+        from app.services.finding_deduplicator import run_p21_finding_deduplication
 
+        _dedup_result = run_p21_finding_deduplication(db, job)
+        if int(_dedup_result.get("removed") or 0):
+            db.add(ScanLog(
+                scan_job_id=job.id,
+                source="p21-dedup",
+                level="INFO",
+                message=(
+                    f"p21_finding_dedup removed={_dedup_result.get('removed')} "
+                    f"merged_groups={_dedup_result.get('merged_groups')}"
+                )[:2000],
+            ))
+            db.flush()
         reconcile_tool_run_ledger(db, job)
         _quality_gate = run_scan_quality_gate(db, job)
     except Exception as exc:  # noqa: BLE001

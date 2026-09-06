@@ -5320,7 +5320,20 @@ def dispatch_scan_work_items(
                         quality_gate_hard_block_is_futile,
                         run_scan_quality_gate,
                     )
+                    from app.services.finding_deduplicator import run_p21_finding_deduplication
 
+                    _dedup_result = run_p21_finding_deduplication(db, job)
+                    if int(_dedup_result.get("removed") or 0):
+                        db.add(ScanLog(
+                            scan_job_id=scan_id,
+                            source="p21-dedup",
+                            level="INFO",
+                            message=(
+                                f"p21_finding_dedup removed={_dedup_result.get('removed')} "
+                                f"merged_groups={_dedup_result.get('merged_groups')}"
+                            )[:2000],
+                        ))
+                        db.flush()
                     reconcile_tool_run_ledger(db, job)
                     _quality_gate = run_scan_quality_gate(db, job)
                 except Exception as exc:  # noqa: BLE001
@@ -6061,7 +6074,7 @@ def execute_scan_work_item(item_id: int):
             "report-snapshot-builder",
         }
         if (
-            _norm_item_tool in {"bl-test", "code-analyzer", "semgrep", "zap-api"}
+            _norm_item_tool in {"bl-test", "code-analyzer", "semgrep", "zap-api", "api-skill-top20"}
             or _norm_item_tool in _PHASE_CONTROL_TOOL_NAMES
             or _norm_item_tool.startswith("skill-probe")
         ):
@@ -6079,6 +6092,7 @@ def execute_scan_work_item(item_id: int):
                 "api_scan_config": dict(_item_meta.get("api_scan_config") or {}),
                 "openapi_url": _item_meta.get("openapi_url"),
                 "swagger_url": _item_meta.get("swagger_url"),
+                "api_skill_id": _item_meta.get("api_skill_id"),
             }
             result = execute_tool_with_workers(
                 item.tool_name,
@@ -6160,7 +6174,7 @@ def execute_scan_work_item(item_id: int):
                 "evidence_path": _stdout_full_path,
             }
             item.updated_at = now_done
-            if _norm_item_tool == "zap-api" and job:
+            if _norm_item_tool in {"zap-api", "api-skill-top20"} and job:
                 state = dict(job.state_data or {})
                 api_config = dict(state.get("api_scan_config") or {})
                 api_runs = list(state.get("api_scan_observability_runs") or [])
@@ -6168,10 +6182,16 @@ def execute_scan_work_item(item_id: int):
                     "work_item_id": item.id,
                     "status": terminal,
                     "target": item.target,
+                    "tool": item.tool_name,
+                    "api_skill_id": _item_meta.get("api_skill_id"),
                     "openapi_url": _parsed_result.get("openapi_url"),
                     "scan_policy": _parsed_result.get("scan_policy"),
                     "import_source": _parsed_result.get("import_source"),
                     "rewritten_spec": dict(_parsed_result.get("rewritten_spec") or {}),
+                    "skills_total": int(_parsed_result.get("skills_total") or 0),
+                    "endpoint_count": int(_parsed_result.get("endpoint_count") or 0),
+                    "identity_count": int(_parsed_result.get("identity_count") or 0),
+                    "skill_results": list(_parsed_result.get("skill_results") or [])[:20],
                     "imported_url_count": int(_parsed_result.get("imported_url_count") or 0),
                     "alert_count": int(_parsed_result.get("alert_count") or 0),
                     "finding_count": len(_findings_extracted),
@@ -6184,8 +6204,8 @@ def execute_scan_work_item(item_id: int):
                     "enabled": True,
                     "latest_status": terminal,
                     "spec_url": summary.get("openapi_url") or api_config.get("spec_url") or "",
-                    "scanner": "OWASP ZAP",
-                    "activity": "openapi_dast",
+                    "scanner": "API Top 20 Skills" if _norm_item_tool == "api-skill-top20" else "OWASP ZAP",
+                    "activity": "api_skill_top20" if _norm_item_tool == "api-skill-top20" else "openapi_dast",
                     "latest": summary,
                 }
                 job.state_data = state
@@ -6195,8 +6215,9 @@ def execute_scan_work_item(item_id: int):
                     level="INFO",
                     message=(
                         f"api_scan_finish item={item.id} status={terminal} target={item.target} "
-                        f"spec_url={summary.get('openapi_url')} imported_urls={summary['imported_url_count']} "
-                        f"alerts={summary['alert_count']} findings={summary['finding_count']} "
+                        f"tool={item.tool_name} spec_url={summary.get('openapi_url')} "
+                        f"imported_urls={summary['imported_url_count']} alerts={summary['alert_count']} "
+                        f"skills={summary['skills_total']} endpoints={summary['endpoint_count']} findings={summary['finding_count']} "
                         f"active_error={summary['active_error']}"
                     )[:4000],
                 ))

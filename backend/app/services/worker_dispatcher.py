@@ -216,6 +216,29 @@ def execute_tool_with_workers(
         _persist_result_artifact(scan_id, result, skill_contract, auth_context)
         return result
 
+    if norm_tool == "api-skill-top20":
+        from app.services.api_skill_top20_runner import run_api_top20_for_scan
+
+        api_skill_id = str((skill_contract or {}).get("api_skill_id") or "").strip() or None
+        result = run_api_top20_for_scan(
+            int(scan_id or 0),
+            target,
+            api_skill_id=api_skill_id,
+        )
+        if skill_id:
+            result.setdefault("skill_id", skill_id)
+            result.setdefault("skill_contract", skill_contract or {})
+            result.setdefault("evidence_required", evidence_required or [])
+        if auth_context:
+            result.setdefault("auth_context", auth_context)
+        if adapter_contract:
+            result.setdefault("mcp_adapter_contract", adapter_contract)
+        result.setdefault("source_agent_id", "backend")
+        result.setdefault("source_agent_name", "Backend API Top 20 Skill Runner")
+        result.setdefault("worker_group", "risk_assessment")
+        _persist_result_artifact(scan_id, result, skill_contract, auth_context)
+        return result
+
     if norm_tool.startswith("skill-probe"):
         # Bridges a hand-authored skill's markdown prose to bounded, LLM-planned
         # HTTP execution for skills with no dedicated Python test function —

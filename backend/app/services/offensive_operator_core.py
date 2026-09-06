@@ -311,6 +311,7 @@ def default_phase_contracts(skills_root: Path | str | None = None) -> dict[str, 
           "nuclei-graphql",         # HackerOne: 25 GraphQL introspection / API disclosure reports
           "nuclei-exposure",        # HackerOne: hardcoded API keys, token leaks in API responses
           "nuclei-swagger",
+          "api-skill-top20",
           "zap-api"]),              # Swagger/OpenAPI exposure → API schema dump for auth bypass
         ("P17", "Exploit Validation", "Reproduce validated exploit paths safely via nuclei + manual",
          ["skill.vuln.sqli"], ["nuclei"],
@@ -640,6 +641,7 @@ def default_tool_catalog() -> list[ToolCatalogEntry]:
         entry("nuclei-misconfiguration", "nuclei_misconfiguration", ["security_misconfiguration", "information_disclosure"], "nuclei_parser"),
         entry("nuclei-file-upload", "nuclei_file_upload", ["file_upload", "web_validation"], "nuclei_parser"),
         entry("nuclei-swagger", "nuclei_swagger", ["openapi_scan", "api_spec_exposure"], "nuclei_parser"),
+        entry("api-skill-top20", "api_skill_top20", ["api_validation", "openapi_scan", "skill_validation"], "api_skill_top20_parser"),
         # Cloud/S3 Exposure — 15 reports: open buckets, AWS metadata, GCP/Azure
         entry("nuclei-cloud", "nuclei_cloud", ["cloud_exposure", "s3_audit"], "nuclei_parser"),
         # Deserialization — 13 reports: Java, PHP, Python unsafe deserialize

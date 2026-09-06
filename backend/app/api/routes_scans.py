@@ -5250,6 +5250,9 @@ def list_findings_paginated(
             "imported_url_count": details.get("imported_url_count"),
             "alert_count": details.get("alert_count"),
             "source_tool": details.get("source_tool") or finding.tool,
+            "api_skill_id": details.get("api_skill_id"),
+            "api_skill_name": details.get("api_skill_name"),
+            "api_skill_priority": details.get("api_skill_priority"),
             "evidence_artifact_id": details.get("evidence_artifact_id"),
             "evidence_artifact_path": details.get("evidence_artifact_path"),
         }
