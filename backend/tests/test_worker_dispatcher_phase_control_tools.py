@@ -126,6 +126,45 @@ def test_execute_tool_with_workers_fails_zap_api_when_no_endpoint_was_imported()
     assert result["error"] == "400 Client Error"
 
 
+def test_execute_tool_with_workers_routes_api_top20_with_mcp_adapter_contract():
+    fake_result = {
+        "status": "success",
+        "exit_code": 0,
+        "findings_extracted": [],
+        "parsed_result": {"skills_total": 1},
+    }
+    contract = {
+        "mcp_request_id": "wi-200",
+        "phase_id": "P16",
+        "skill_id": "skill.api.bola_idor",
+        "tool_name": "api-skill-top20",
+        "profile": "api_skill_top20",
+        "target": "https://api.example.com",
+        "expected_evidence": ["stdout", "parsed_result"],
+    }
+
+    with patch("app.services.api_skill_top20_runner.run_api_top20_for_scan", return_value=dict(fake_result)) as mock_run, \
+         patch("app.services.worker_dispatcher._resolve_auth_context", return_value={}), \
+         patch("app.services.worker_dispatcher._persist_result_artifact"), \
+         patch("app.services.worker_dispatcher.execute_via_kali") as mock_kali:
+        result = execute_tool_with_workers(
+            "api-skill-top20",
+            "https://api.example.com",
+            scan_id=13,
+            skill_id="skill.api.bola_idor",
+            skill_contract={
+                "api_skill_id": "skill.api.bola_idor",
+                "mcp_adapter_contract": contract,
+            },
+        )
+
+    mock_run.assert_called_once_with(13, "https://api.example.com", api_skill_id="skill.api.bola_idor")
+    mock_kali.assert_not_called()
+    assert result["status"] == "success"
+    assert result["source_agent_name"] == "Backend API Top 20 Skill Runner"
+    assert result["mcp_adapter_contract"]["mcp_request_id"] == "wi-200"
+
+
 def test_execute_tool_with_workers_blocks_phase_control_tool_without_scan_id():
     with patch("app.services.worker_dispatcher._resolve_auth_context", return_value={}):
         result = execute_tool_with_workers("report-snapshot-builder", "https://valid.com", scan_id=None)

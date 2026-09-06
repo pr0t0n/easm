@@ -6093,6 +6093,7 @@ def execute_scan_work_item(item_id: int):
                 "openapi_url": _item_meta.get("openapi_url"),
                 "swagger_url": _item_meta.get("swagger_url"),
                 "api_skill_id": _item_meta.get("api_skill_id"),
+                "mcp_adapter_contract": execution,
             }
             result = execute_tool_with_workers(
                 item.tool_name,

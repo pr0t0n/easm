@@ -172,9 +172,73 @@ def load_all_md_skills() -> dict[str, dict[str, Any]]:
     return result
 
 
+@lru_cache(maxsize=1)
+def load_all_runtime_skills() -> dict[str, dict[str, Any]]:
+    result = dict(load_all_md_skills())
+    try:
+        from app.services.api_skill_top20_runner import load_api_top20_skills
+
+        catalog = load_api_top20_skills()
+    except Exception:
+        return result
+    catalog_path = str(catalog.get("catalog_path") or "")
+    for row in list(catalog.get("skills") or []):
+        if not isinstance(row, dict):
+            continue
+        skill_id = str(row.get("id") or "").strip()
+        if not skill_id:
+            continue
+        evidence_required = [
+            str(value)
+            for value in list(row.get("evidence_required") or [])
+            if str(value).strip()
+        ]
+        skill = {
+            "skill_id": skill_id,
+            "name": str(row.get("name") or skill_id),
+            "version": str(catalog.get("version") or "1.0.0"),
+            "category": "api_security",
+            "phase_ids": ["P16"],
+            "supported_target_types": ["api", "url"],
+            "risk_level": str(row.get("typical_criticality") or "medium").lower(),
+            "noise_level": "low",
+            "requires_authorization": True,
+            "required_tools": ["api-skill-top20"],
+            "optional_tools": ["zap-api"],
+            "fallback_tools": [],
+            "evidence_required": evidence_required,
+            "exit_criteria": {
+                "confirmed": "positive_control_and_negative_control_observed",
+                "refuted": "baseline_and_probe_show_no_security_delta",
+                "blocked": "required_identity_or_fixture_missing",
+            },
+            "retry_policy": {"max_attempts": 2, "backoff_seconds": 30},
+            "attack_chain_opportunities": [
+                str(value)
+                for value in list(row.get("categories") or [])
+                if str(value).strip()
+            ],
+            "safety_rules": dict(row.get("guardrails") or {}),
+            "source_file": catalog_path,
+            "id": skill_id,
+            "playbook": ["api-skill-top20", "zap-api"],
+            "phases": ["P16"],
+            "description": str(row.get("objective") or row.get("name") or skill_id),
+            "triggers": [
+                str(value)
+                for value in list(row.get("selectors", {}).get("parameter_names") or [])
+                if str(value).strip()
+            ][:20],
+            "api_skill": row,
+            "api_skill_catalog": str(catalog.get("catalog_id") or "api_security_top20"),
+        }
+        result[skill_id] = skill
+    return result
+
+
 def resolve_skill_for_phase(phase_id: str) -> list[dict[str, Any]]:
     """Return all .md skills that declare the given phase_id (e.g. 'P01')."""
-    skills = load_all_md_skills()
+    skills = load_all_runtime_skills()
     return [
         skill for skill in skills.values()
         if phase_id.upper() in [p.upper() for p in skill.get("phase_ids") or []]
@@ -182,8 +246,8 @@ def resolve_skill_for_phase(phase_id: str) -> list[dict[str, Any]]:
 
 
 def get_skill_by_id(skill_id: str) -> dict[str, Any] | None:
-    """Look up a skill by its skill_id from the .md library."""
-    return load_all_md_skills().get(skill_id)
+    """Look up a skill by its skill_id from the runtime library."""
+    return load_all_runtime_skills().get(skill_id)
 
 
 PHASE_ALIASES_BY_GROUP: dict[str, list[str]] = {

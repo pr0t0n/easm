@@ -4,6 +4,8 @@ from app.services.api_skill_top20_runner import Endpoint, _select_endpoints, loa
 from app.services.offensive_operator_core import PHASE_CONTRACTS
 from app.services.pentest_coverage_service import _work_item_matches_api_skill
 from app.services.scan_work_queue import work_item_applicability_decision
+from app.services.skill_rag_indexer import query_skills_by_phase, query_skills_by_tool
+from app.services.skill_runtime import get_skill_by_id, load_all_runtime_skills
 
 
 def test_api_top20_catalog_has_twenty_ordered_skills():
@@ -75,3 +77,15 @@ def test_api_top20_applicability_uses_execution_target_not_queue_suffix():
     decision = work_item_applicability_decision(item, {}, at="dispatch")
 
     assert decision["target"] == "https://api.example.test"
+
+
+def test_api_top20_yaml_skills_are_runtime_and_rag_visible():
+    skills = load_all_runtime_skills()
+    api_skill = get_skill_by_id("skill.api.bola_idor")
+    tool_docs = query_skills_by_tool("api-skill-top20")
+    phase_docs = query_skills_by_phase("P16")
+
+    assert len([sid for sid in skills if sid.startswith("skill.api.")]) == 20
+    assert api_skill and api_skill["required_tools"] == ["api-skill-top20"]
+    assert len([doc for doc in tool_docs if doc["skill_id"].startswith("skill.api.")]) == 20
+    assert any(doc["skill_id"] == "skill.api.bola_idor" for doc in phase_docs)

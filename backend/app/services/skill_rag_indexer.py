@@ -1,4 +1,4 @@
-"""Skill RAG indexer — indexes skills/*.md into pgvector (rag_knowledge_store).
+"""Skill RAG indexer — indexes runtime skills into pgvector (rag_knowledge_store).
 
 Substitui a escrita em knowledge_store.json por inserção direta no PostgreSQL
 via rag_repository. Cada skill vira um documento RAG com embedding semântico
@@ -10,7 +10,7 @@ import logging
 import threading
 from typing import Any
 
-from app.services.skill_runtime import load_all_md_skills
+from app.services.skill_runtime import load_all_runtime_skills
 
 logger = logging.getLogger(__name__)
 _INDEX_LOCK = threading.Lock()
@@ -40,12 +40,20 @@ def _build_rag_document(skill: dict[str, Any]) -> dict[str, Any]:
         try:
             from pathlib import Path
 
-            # Index the actual operational methodology, not only its labels.
-            # RAG retrieval can therefore reason about preconditions, evidence,
-            # safety rules, negative controls and exit criteria.
             text_parts.append(Path(source_file).read_text(encoding="utf-8"))
         except OSError:
             logger.warning("skill_rag_indexer: cannot read source_file=%s", source_file)
+    api_skill = skill.get("api_skill")
+    if isinstance(api_skill, dict):
+        text_parts.append(str(api_skill.get("objective") or ""))
+        text_parts.append(" ".join(str(value) for value in list(api_skill.get("owasp") or [])))
+        text_parts.append(" ".join(str(value) for value in list(api_skill.get("categories") or [])))
+        selectors = api_skill.get("selectors") if isinstance(api_skill.get("selectors"), dict) else {}
+        for value in selectors.values():
+            if isinstance(value, list):
+                text_parts.append(" ".join(str(item) for item in value))
+            else:
+                text_parts.append(str(value))
 
     return {
         "id": f"skill:{skill_id}",
@@ -72,8 +80,8 @@ def _build_rag_document(skill: dict[str, Any]) -> dict[str, Any]:
 
 
 def index_skills_to_knowledge_store() -> dict[str, Any]:
-    """Load all skills from .md files and upsert them into rag_knowledge_store."""
-    skills = load_all_md_skills()
+    """Load all runtime skills and upsert them into rag_knowledge_store."""
+    skills = load_all_runtime_skills()
     if not skills:
         logger.warning("skill_rag_indexer: no skills found in skills/ directory")
         return {"indexed": 0, "errors": 0, "total_in_store": 0}
@@ -160,7 +168,7 @@ def ensure_skill_index_ready(*, force: bool = False) -> dict[str, Any]:
             current = 0
         finally:
             db.close()
-        expected = len(load_all_md_skills())
+        expected = len(load_all_runtime_skills())
         if not force and expected > 0 and current >= expected:
             return {"indexed": 0, "errors": 0, "already_ready": True, "skill_documents": current}
         return index_skills_to_knowledge_store()
@@ -203,7 +211,7 @@ def query_skills_by_phase(phase_id: str) -> list[dict[str, Any]]:
 
 
 def query_skills_by_tool(tool_name: str) -> list[dict[str, Any]]:
-    skills = load_all_md_skills()
+    skills = load_all_runtime_skills()
     tool_lower = tool_name.lower()
     return [
         _build_rag_document(skill)
