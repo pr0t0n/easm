@@ -216,7 +216,7 @@ def execute_tool_with_workers(
         _persist_result_artifact(scan_id, result, skill_contract, auth_context)
         return result
 
-    if norm_tool == "api-skill-top20":
+    if norm_tool == "api-skill-top20" and not settings.mcp_execute_tools_via_mcp:
         from app.services.api_skill_top20_runner import run_api_top20_for_scan
 
         api_skill_id = str((skill_contract or {}).get("api_skill_id") or "").strip() or None
@@ -297,7 +297,7 @@ def execute_tool_with_workers(
         _persist_result_artifact(scan_id, result, skill_contract, auth_context)
         return result
 
-    if not profile_for_tool(norm_tool):
+    if not profile_for_tool(norm_tool) and norm_tool != "api-skill-top20":
         return {
             "tool": tool_name,
             "target": target,
@@ -313,7 +313,12 @@ def execute_tool_with_workers(
         }
 
     if settings.mcp_execute_tools_via_mcp:
-        if not mcp_client.kali_tools_available_sync():
+        mcp_available = (
+            mcp_client.tool_available_sync(norm_tool)
+            if norm_tool == "api-skill-top20"
+            else mcp_client.kali_tools_available_sync()
+        )
+        if not mcp_available:
             result = {
                 "tool": tool_name,
                 "target": target,

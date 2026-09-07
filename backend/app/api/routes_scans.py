@@ -7,7 +7,7 @@ import re
 from typing import Any
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Response, status
 from sqlalchemy import case as sa_case, func, or_, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -69,6 +69,31 @@ from app.services.tool_context_registry import dashboard_bas_variables
 
 router = APIRouter(prefix="/api", tags=["scans"])
 vector_store = FalsePositiveVectorStore()
+
+
+@router.post("/internal/mcp/api-skill-top20")
+def run_api_top20_from_mcp(
+    payload: dict[str, Any] = Body(default_factory=dict),
+    x_mcp_internal_token: str = Header(default="", alias="X-MCP-Internal-Token"),
+):
+    if x_mcp_internal_token != settings.mcp_internal_token:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="invalid_mcp_internal_token")
+    try:
+        scan_id = int(str(payload.get("scan_id")))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="scan_id_required")
+    target = str(payload.get("target") or "").strip()
+    if not target:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="target_required")
+    api_skill_id = str(payload.get("api_skill_id") or "").strip() or None
+    from app.services.api_skill_top20_runner import run_api_top20_for_scan
+
+    result = run_api_top20_for_scan(scan_id, target, api_skill_id=api_skill_id)
+    result["execution_path"] = "mcp_to_backend_api_skill"
+    result["mcp_used"] = True
+    result["source_agent_id"] = "mcp_server"
+    result["source_agent_name"] = "MCP API Top 20 Skill Bridge"
+    return result
 
 
 def _canonical_phase_names() -> dict[str, str]:
@@ -3809,7 +3834,11 @@ def stop_scan(scan_id: int, db: Session = Depends(get_db), current_user: User = 
                 {_nullable_model.finding_id: None},
                 synchronize_session=False,
             )
-        for _dependent_model in (FindingAdjudication, ValidationWire, FindingIntelligenceSnapshot, RetestRun):
+        db.query(ValidationWire).filter(ValidationWire.finding_id.in_(finding_ids)).update(
+            {ValidationWire.adjudication_id: None},
+            synchronize_session=False,
+        )
+        for _dependent_model in (ValidationWire, FindingAdjudication, FindingIntelligenceSnapshot, RetestRun):
             db.query(_dependent_model).filter(_dependent_model.finding_id.in_(finding_ids)).delete(
                 synchronize_session=False,
             )

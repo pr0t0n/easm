@@ -150,6 +150,12 @@ class MCPClient:
             logger.warning("MCP Kali tool availability check failed: %s", exc)
             return False
 
+    def tool_available_sync(self, tool_name: str) -> bool:
+        requested = str(tool_name or "").strip()
+        if not requested:
+            return False
+        return requested in {str(item.get("name") or "") for item in self.list_tools_sync()}
+
     async def query_knowledge(
         self,
         query: str,
@@ -295,9 +301,28 @@ class MCPClient:
         if str(result.get("status") or "").lower() == "error":
             result.setdefault("tool", requested)
             result.setdefault("profile", profile_name)
-            result.setdefault("execution_path", "mcp_to_kali")
+            result.setdefault(
+                "execution_path",
+                "mcp_to_backend_api_skill" if requested.lower() == "api-skill-top20" else "mcp_to_kali",
+            )
+            if requested.lower() == "api-skill-top20":
+                result.setdefault("mcp_used", True)
             result.setdefault("target", normalized_target)
             return result
+        if requested.lower() == "api-skill-top20":
+            bridged = dict(result)
+            bridged.setdefault("tool", requested)
+            bridged.setdefault("profile", selected_name)
+            bridged.setdefault("target", normalized_target)
+            bridged.setdefault("execution_path", "mcp_to_backend_api_skill")
+            bridged.setdefault("mcp_used", True)
+            if skill_context:
+                bridged.setdefault("skill_context", dict(skill_context))
+                if skill_context.get("skill_id"):
+                    bridged.setdefault("skill_id", skill_context.get("skill_id"))
+            if normalized_target != original_target:
+                bridged.setdefault("original_target", original_target)
+            return bridged
 
         legacy = normalize_kali_result(
             tool_name=requested,
@@ -305,7 +330,7 @@ class MCPClient:
             scan_mode="unit",
             result=result,
         )
-        legacy["execution_path"] = "mcp_to_kali"
+        legacy["execution_path"] = result.get("execution_path") or "mcp_to_kali"
         legacy["profile"] = result.get("profile") or profile_name
         legacy["raw_mcp_status"] = result.get("status")
         if skill_context:

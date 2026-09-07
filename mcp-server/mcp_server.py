@@ -40,6 +40,8 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 KALI_RUNNER_URL = os.getenv("KALI_RUNNER_URL", "http://kali_runner:8088").rstrip("/")
+BACKEND_INTERNAL_URL = os.getenv("BACKEND_INTERNAL_URL", "http://backend:8000").rstrip("/")
+MCP_INTERNAL_TOKEN = os.getenv("MCP_INTERNAL_TOKEN", "scriptkiddo-mcp-internal")
 MCP_PORT = int(os.getenv("MCP_PORT", "3000"))
 TERMINAL_STATES = {"done", "failed", "timeout", "skipped"}
 
@@ -47,6 +49,7 @@ _KALI_POLL_TIMEOUT = httpx.Timeout(connect=5.0, read=5.0, write=5.0, pool=5.0)
 _KALI_RESULT_TIMEOUT = httpx.Timeout(connect=5.0, read=60.0, write=5.0, pool=5.0)
 
 kali_client: httpx.AsyncClient | None = None
+backend_client: httpx.AsyncClient | None = None
 kali_profiles: dict[str, dict[str, Any]] = {}
 tool_aliases: dict[str, str] = {}
 _kali_catalog_refreshed_monotonic = 0.0
@@ -244,6 +247,46 @@ def _mcp_tool_descriptor(profile_name: str, spec: dict[str, Any]) -> dict[str, A
     }
 
 
+def _api_top20_tool_descriptor() -> dict[str, Any]:
+    return {
+        "name": "api-skill-top20",
+        "description": "API Top 20 skill runner via backend RAG and skill contracts",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string"},
+                "scan_id": {"type": "string"},
+                "timeout": {"type": "integer"},
+                "skill_context": {"type": "object"},
+            },
+            "required": ["target", "scan_id"],
+        },
+        "metadata": {
+            "tool": "api-skill-top20",
+            "category": "api-security",
+            "phase": "P16",
+            "timeout": 1800,
+            "execution_path": "mcp_to_backend_api_skill",
+            "context": {
+                "capabilities": ["risk_assessment"],
+                "target_types": ["url"],
+                "evidence_outputs": ["structured_json", "security_findings"],
+                "requires_scheme": ["http", "https"],
+                "requires_env": [],
+                "parser": "api_top20_skill_runner",
+                "safe_execution": {
+                    "destructive_actions_allowed": False,
+                    "data_extraction_allowed": False,
+                    "operator_approval_required": False,
+                },
+            },
+            "capabilities": ["risk_assessment"],
+            "target_types": ["url"],
+            "evidence_outputs": ["structured_json", "security_findings"],
+        },
+    }
+
+
 async def _refresh_kali_catalog() -> None:
     global kali_profiles, tool_aliases, _kali_catalog_refreshed_monotonic
     if kali_client is None:
@@ -289,7 +332,7 @@ async def _refresh_kali_catalog() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global kali_client
+    global kali_client, backend_client
     kali_client = httpx.AsyncClient(
         base_url=KALI_RUNNER_URL,
         timeout=httpx.Timeout(connect=5.0, read=30.0, write=15.0, pool=5.0),
@@ -299,10 +342,21 @@ async def lifespan(app: FastAPI):
             keepalive_expiry=30.0,
         ),
     )
+    backend_client = httpx.AsyncClient(
+        base_url=BACKEND_INTERNAL_URL,
+        timeout=httpx.Timeout(connect=5.0, read=1800.0, write=30.0, pool=30.0),
+        limits=httpx.Limits(
+            max_connections=20,
+            max_keepalive_connections=10,
+            keepalive_expiry=30.0,
+        ),
+    )
     await _refresh_kali_catalog()
     yield
     if kali_client is not None:
         await kali_client.aclose()
+    if backend_client is not None:
+        await backend_client.aclose()
 
 
 app = FastAPI(
@@ -338,6 +392,7 @@ async def health() -> dict[str, Any]:
         "rag_enabled": False,
         "rag_backend": "pgvector",
         "kali_connected": kali_healthy,
+        "backend_connected": backend_client is not None,
         "kali_profiles_loaded": len(kali_profiles),
     }
 
@@ -350,11 +405,13 @@ async def health() -> dict[str, Any]:
 async def list_mcp_tools() -> dict[str, Any]:
     if not kali_profiles and kali_client is not None:
         await _refresh_kali_catalog()
+    tools = [_api_top20_tool_descriptor()]
+    tools.extend(
+        _mcp_tool_descriptor(profile_name, spec)
+        for profile_name, spec in sorted(kali_profiles.items())
+    )
     return {
-        "tools": [
-            _mcp_tool_descriptor(profile_name, spec)
-            for profile_name, spec in sorted(kali_profiles.items())
-        ]
+        "tools": tools
     }
 
 
@@ -411,6 +468,49 @@ async def _run_kali_profile(profile_name: str, parameters: dict[str, Any]) -> di
     result = dict(result_response.json())
     result.setdefault("dispatch_task_id", job_id)
     result.setdefault("execution_path", "mcp_to_kali")
+    return result
+
+
+async def _run_backend_api_top20(parameters: dict[str, Any]) -> dict[str, Any]:
+    if backend_client is None:
+        raise HTTPException(status_code=503, detail="Backend not available")
+    skill_context = dict(parameters.get("skill_context") or {})
+    skill_contract = dict(skill_context.get("skill_contract") or {})
+    payload = {
+        "scan_id": parameters.get("scan_id"),
+        "target": parameters.get("original_target") or parameters.get("target"),
+        "api_skill_id": skill_contract.get("api_skill_id") or skill_context.get("skill_id"),
+    }
+    last_exc: Exception | None = None
+    response: httpx.Response | None = None
+    for attempt in range(3):
+        try:
+            response = await backend_client.post(
+                "/api/internal/mcp/api-skill-top20",
+                headers={"X-MCP-Internal-Token": MCP_INTERNAL_TOKEN},
+                json=payload,
+            )
+            if response.status_code < 500:
+                break
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            last_exc = exc
+            if attempt >= 2:
+                raise
+            await asyncio.sleep(0.5 * (attempt + 1))
+        except httpx.TransportError as exc:
+            last_exc = exc
+            if attempt >= 2:
+                raise HTTPException(status_code=503, detail=str(last_exc))
+            await asyncio.sleep(0.5 * (attempt + 1))
+    if response is None:
+        raise HTTPException(status_code=503, detail=str(last_exc or "backend_api_top20_unavailable"))
+    response.raise_for_status()
+    result = dict(response.json())
+    result.setdefault("profile", "api-skill-top20")
+    result.setdefault("tool", "api-skill-top20")
+    result.setdefault("execution_path", "mcp_to_backend_api_skill")
+    result.setdefault("mcp_used", True)
     return result
 
 
@@ -542,6 +642,20 @@ async def submit_mcp_contract(request: MCPExecutionRequest) -> dict[str, Any]:
         if not request.expected_evidence:
             contract.update(status="blocked", error="expected_evidence_required")
             return contract
+        if str(request.tool_name or "").strip().lower() == "api-skill-top20":
+            raw = await _run_backend_api_top20(
+                {
+                    "target": request.target,
+                    "scan_id": request.arguments.get("scan_id"),
+                    "skill_context": {
+                        "skill_id": request.skill_id,
+                        "skill_contract": dict(request.arguments.get("skill_contract") or {}),
+                    },
+                }
+            )
+            contract.update(raw)
+            contract.update(status=raw.get("status") or "success", profile="api-skill-top20")
+            return contract
         if kali_client is None:
             contract.update(status="blocked", error="kali_runner_not_available")
             return contract
@@ -623,6 +737,20 @@ async def execute_mcp_contract(request: MCPExecutionRequest) -> dict[str, Any]:
         if not request.expected_evidence:
             contract.update(status="blocked", error="expected_evidence_required")
             return contract
+        if str(request.tool_name or "").strip().lower() == "api-skill-top20":
+            raw = await _run_backend_api_top20(
+                {
+                    "target": request.target,
+                    "scan_id": request.arguments.get("scan_id"),
+                    "skill_context": {
+                        "skill_id": request.skill_id,
+                        "skill_contract": dict(request.arguments.get("skill_contract") or {}),
+                    },
+                }
+            )
+            contract.update(raw)
+            contract.update(status=raw.get("status") or "success", profile="api-skill-top20")
+            return contract
         if kali_client is None:
             contract.update(status="blocked", error="kali_runner_not_available")
             return contract
@@ -675,6 +803,8 @@ async def execute_mcp_contract(request: MCPExecutionRequest) -> dict[str, Any]:
 async def call_mcp_tool(tool_name: str, parameters: dict[str, Any]) -> dict[str, Any]:
     if not parameters.get("target"):
         raise HTTPException(status_code=400, detail="target is required")
+    if str(tool_name or "").strip().lower() == "api-skill-top20":
+        return await _run_backend_api_top20(parameters)
     profile_name = tool_aliases.get(tool_name, tool_name)
     if profile_name not in kali_profiles:
         await _refresh_kali_catalog()

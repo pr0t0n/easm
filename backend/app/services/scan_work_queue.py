@@ -647,6 +647,19 @@ def apply_phase_tool_metadata(
         if spec_url:
             result["openapi_url"] = spec_url
             result["swagger_url"] = spec_url
+    if result.get("skill_id") and not result.get("mcp_adapter_contract"):
+        try:
+            from app.services.operational_strategy import build_mcp_adapter_contract
+
+            result["mcp_adapter_contract"] = build_mcp_adapter_contract(
+                strategy=dict(result.get("operational_strategy") or {}),
+                capability=str(phase_id or ""),
+                skill_id=str(result.get("skill_id") or ""),
+                tools=[str(tool_name or "")],
+                evidence_required=list(result.get("expected_evidence") or []),
+            )
+        except Exception:
+            pass
     return result
 
 
@@ -824,6 +837,7 @@ def _seed_api_top20_skill_work_items(
     created = 0
     existing = 0
     skipped = 0
+    consultations: list[dict[str, Any]] = []
     base_priority = max(1, PHASE_PRIORITY.get("P16", 45) - 10)
     for skill in skills:
         skill_id = str(skill.get("id") or "").strip()
@@ -850,6 +864,37 @@ def _seed_api_top20_skill_work_items(
         }, "P16", "api-skill-top20", source=source, decision_source="api_top20_yaml_catalog")
         status = "queued" if metadata.get("applicability", {}).get("applicable") else "skipped"
         last_error = None if status == "queued" else f"skipped:applicability:{metadata.get('applicability', {}).get('reason') or 'not_applicable'}"
+        applicability = dict(metadata.get("applicability") or {})
+        consultations.append({
+            "consultation_id": hashlib.sha256(json.dumps({
+                "scan_id": job.id,
+                "phase_id": "P16",
+                "target": target,
+                "skill_id": skill_id,
+                "tool": "api-skill-top20",
+            }, sort_keys=True, default=str).encode()).hexdigest()[:16],
+            "phase_id": "P16",
+            "target": target,
+            "skill_id": skill_id,
+            "consulted": True,
+            "selected": status == "queued",
+            "selection_threshold": SKILL_SELECTION_THRESHOLD,
+            "applicability_score": float(applicability.get("score") or 0.0),
+            "applicability_decisions": list(applicability.get("skill_decisions") or [applicability]),
+            "source": source,
+            "decision_source": "api_top20_yaml_catalog",
+            "contract_required": True,
+            "candidate_tools": ["api-skill-top20"],
+            "recommended_tools": ["api-skill-top20"],
+            "learning_sources": [],
+            "learning_techniques": [],
+            "learning_used": False,
+            "reason": (
+                f"Skill {skill_id} consultada para P16; selecionada={status == 'queued'} "
+                "via catalogo API Top 20."
+            ),
+            "created_at": datetime.now().isoformat(),
+        })
         current = db.query(ScanWorkItem).filter(
             ScanWorkItem.scan_job_id == job.id,
             ScanWorkItem.execution_context == "external",
@@ -888,6 +933,7 @@ def _seed_api_top20_skill_work_items(
         db.add(item)
         db.flush()
         created += 1
+    _append_skill_consultations_to_state(db, job, consultations)
     db.add(ScanLog(
         scan_job_id=job.id,
         source="api-skill-top20",
@@ -1746,6 +1792,44 @@ def _state_value_present_for_target(value: Any, target: str) -> bool:
 
 def _tool_evidence_decision(tool_name: str, target: str, state: dict[str, Any]) -> dict[str, Any]:
     tool = str(tool_name or "").strip().lower()
+    if tool in {"zap-api", "api-skill-top20"}:
+        api_config = dict((state or {}).get("api_scan_config") or {})
+        ingestion = api_config.get("ingestion") if isinstance(api_config.get("ingestion"), dict) else {}
+        spec_candidates = [
+            api_config.get("spec_url"),
+            api_config.get("swagger_url"),
+            api_config.get("openapi_url"),
+            ingestion.get("spec_url"),
+        ]
+        matched_api_keys = [
+            key
+            for key in ("openapi_urls", "swagger_urls", "api_specs", "openapi_specs")
+            if _state_value_present_for_target((state or {}).get(key), target)
+        ]
+        if any(_state_value_present_for_target(candidate, target) for candidate in spec_candidates):
+            matched_api_keys.append("api_scan_config.spec_url")
+        try:
+            ingested_endpoints = int(ingestion.get("endpoints") or 0)
+        except Exception:
+            ingested_endpoints = 0
+        if bool(api_config.get("enabled")) and ingested_endpoints > 0:
+            matched_api_keys.append("api_scan_config.ingestion")
+        if matched_api_keys:
+            return {
+                "required": True,
+                "present": True,
+                "matched_keys": list(dict.fromkeys(matched_api_keys)),
+                "missing_keys": [],
+                "reason": f"required_evidence_present:{','.join(dict.fromkeys(matched_api_keys))}",
+            }
+        if tool == "api-skill-top20" and bool(api_config.get("enabled")):
+            return {
+                "required": True,
+                "present": False,
+                "matched_keys": [],
+                "missing_keys": ["api_scan_config.spec_url", "api_scan_config.ingestion"],
+                "reason": "required_evidence_absent:api_scan_config.spec_url,api_scan_config.ingestion",
+            }
     clauses = TOOL_EVIDENCE_CONTRACTS.get(tool) or []
     if not clauses:
         return {
@@ -1905,7 +1989,10 @@ def validate_skill_applicability(
         )
         return decision
 
-    if _requires_http_surface(phase_id, tool) and ctx["preflight_known"]:
+    api_evidence_decision = _tool_evidence_decision(tool_l, target, state) if tool_l in {"zap-api", "api-skill-top20"} else None
+    api_evidence_present = bool(api_evidence_decision and api_evidence_decision.get("required") and api_evidence_decision.get("present"))
+
+    if _requires_http_surface(phase_id, tool) and ctx["preflight_known"] and not api_evidence_present:
         if ctx["preflight_status"] == "runner_connectivity_blocked" and not ctx["has_http"]:
             decision.update(applicable=False, score=0.0, reason="runner_connectivity_blocked")
             return decision
@@ -1942,7 +2029,7 @@ def validate_skill_applicability(
             )
             return decision
 
-    evidence_decision = _tool_evidence_decision(tool_l, target, state)
+    evidence_decision = api_evidence_decision or _tool_evidence_decision(tool_l, target, state)
     decision["evidence"] = evidence_decision
     if evidence_decision.get("required") and not evidence_decision.get("present"):
         decision.update(

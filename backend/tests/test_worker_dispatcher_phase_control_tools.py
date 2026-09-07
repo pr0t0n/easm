@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+from app.services.mcp_client import MCPClient
 from app.services.worker_dispatcher import _PHASE_CONTROL_TOOLS, execute_tool_with_workers
 
 
@@ -132,6 +133,8 @@ def test_execute_tool_with_workers_routes_api_top20_with_mcp_adapter_contract():
         "exit_code": 0,
         "findings_extracted": [],
         "parsed_result": {"skills_total": 1},
+        "execution_path": "mcp_to_backend_api_skill",
+        "mcp_used": True,
     }
     contract = {
         "mcp_request_id": "wi-200",
@@ -146,6 +149,8 @@ def test_execute_tool_with_workers_routes_api_top20_with_mcp_adapter_contract():
     with patch("app.services.api_skill_top20_runner.run_api_top20_for_scan", return_value=dict(fake_result)) as mock_run, \
          patch("app.services.worker_dispatcher._resolve_auth_context", return_value={}), \
          patch("app.services.worker_dispatcher._persist_result_artifact"), \
+         patch("app.services.worker_dispatcher.mcp_client.tool_available_sync", return_value=True) as mock_available, \
+         patch("app.services.worker_dispatcher.mcp_client.execute_kali_tool_sync", return_value=dict(fake_result)) as mock_mcp, \
          patch("app.services.worker_dispatcher.execute_via_kali") as mock_kali:
         result = execute_tool_with_workers(
             "api-skill-top20",
@@ -158,10 +163,13 @@ def test_execute_tool_with_workers_routes_api_top20_with_mcp_adapter_contract():
             },
         )
 
-    mock_run.assert_called_once_with(13, "https://api.example.com", api_skill_id="skill.api.bola_idor")
+    mock_run.assert_not_called()
+    mock_available.assert_called_once_with("api-skill-top20")
+    mock_mcp.assert_called_once()
     mock_kali.assert_not_called()
     assert result["status"] == "success"
-    assert result["source_agent_name"] == "Backend API Top 20 Skill Runner"
+    assert result["execution_path"] == "mcp_to_backend_api_skill"
+    assert result["mcp_used"] is True
     assert result["mcp_adapter_contract"]["mcp_request_id"] == "wi-200"
 
 
@@ -171,3 +179,37 @@ def test_execute_tool_with_workers_blocks_phase_control_tool_without_scan_id():
 
     assert result["status"] == "blocked"
     assert result["error"] == "phase_control_scan_id_required"
+
+
+def test_mcp_client_preserves_api_top20_bridge_result():
+    client = MCPClient("http://mcp.example")
+    raw = {
+        "status": "success",
+        "exit_code": 0,
+        "parsed_result": {"skills_total": 1},
+        "findings_extracted": [],
+        "execution_path": "mcp_to_backend_api_skill",
+        "mcp_used": True,
+    }
+
+    with patch.object(
+        client,
+        "list_tools_sync",
+        return_value=[{"name": "api-skill-top20", "metadata": {"timeout": 1800}}],
+    ), patch.object(client, "call_tool_sync", return_value=dict(raw)) as mock_call:
+        result = client.execute_kali_tool_sync(
+            "api-skill-top20",
+            "https://api.example.com",
+            scan_id=13,
+            skill_context={
+                "skill_id": "skill.api.bola_idor",
+                "skill_contract": {"api_skill_id": "skill.api.bola_idor"},
+            },
+        )
+
+    mock_call.assert_called_once()
+    assert result["status"] == "success"
+    assert result["parsed_result"]["skills_total"] == 1
+    assert result["execution_path"] == "mcp_to_backend_api_skill"
+    assert result["mcp_used"] is True
+    assert result["skill_id"] == "skill.api.bola_idor"

@@ -6,6 +6,7 @@ from app.services.pentest_coverage_service import _work_item_matches_api_skill
 from app.services.scan_work_queue import work_item_applicability_decision
 from app.services.skill_rag_indexer import query_skills_by_phase, query_skills_by_tool
 from app.services.skill_runtime import get_skill_by_id, load_all_runtime_skills
+from app.workers.tasks import SCAN_PARALLEL_QUEUE, _work_item_execution_queue
 
 
 def test_api_top20_catalog_has_twenty_ordered_skills():
@@ -79,6 +80,60 @@ def test_api_top20_applicability_uses_execution_target_not_queue_suffix():
     assert decision["target"] == "https://api.example.test"
 
 
+def test_zap_api_applicability_accepts_api_scan_config_spec_url():
+    item = SimpleNamespace(
+        phase_id="P16",
+        tool_name="zap-api",
+        target="https://api.example.test",
+        item_metadata={},
+    )
+    state = {
+        "api_scan_config": {
+            "enabled": True,
+            "allow_mutations": True,
+            "spec_url": "https://api.example.test/openapi.json",
+            "ingestion": {"endpoints": 146},
+        }
+    }
+
+    decision = work_item_applicability_decision(item, state, at="dispatch")
+
+    assert decision["applicable"] is True
+    assert "api_scan_config.spec_url" in decision["evidence"]["matched_keys"]
+
+
+def test_api_top20_applicability_accepts_api_scan_config_spec_url_without_http_preflight():
+    item = SimpleNamespace(
+        phase_id="P16",
+        tool_name="api-skill-top20",
+        target="https://api.example.test#api-top20-skill-api-bola-idor",
+        item_metadata={"execution_target": "https://api.example.test"},
+    )
+    state = {
+        "preflight": {
+            "targets": {
+                "https://api.example.test": {
+                    "status": "no_http_response",
+                    "http": [],
+                    "open_ports": [443],
+                }
+            }
+        },
+        "api_scan_config": {
+            "enabled": True,
+            "allow_mutations": True,
+            "spec_url": "https://api.example.test/openapi.json",
+            "ingestion": {"endpoints": 146},
+        },
+    }
+
+    decision = work_item_applicability_decision(item, state, at="dispatch")
+
+    assert decision["applicable"] is True
+    assert decision["target"] == "https://api.example.test"
+    assert "api_scan_config.spec_url" in decision["evidence"]["matched_keys"]
+
+
 def test_api_top20_yaml_skills_are_runtime_and_rag_visible():
     skills = load_all_runtime_skills()
     api_skill = get_skill_by_id("skill.api.bola_idor")
@@ -89,3 +144,9 @@ def test_api_top20_yaml_skills_are_runtime_and_rag_visible():
     assert api_skill and api_skill["required_tools"] == ["api-skill-top20"]
     assert len([doc for doc in tool_docs if doc["skill_id"].startswith("skill.api.")]) == 20
     assert any(doc["skill_id"] == "skill.api.bola_idor" for doc in phase_docs)
+
+
+def test_api_top20_work_items_route_to_parallel_queue():
+    item = SimpleNamespace(tool_name="api-skill-top20", phase_id="P16")
+
+    assert _work_item_execution_queue(item, "unit") == SCAN_PARALLEL_QUEUE

@@ -1388,6 +1388,16 @@ def _rehydrate_stale_work_item_pollers(
     }
 
 
+def _work_item_execution_queue(item, mode: str = "unit") -> str:
+    tool = str(getattr(item, "tool_name", "") or "").strip().lower()
+    if tool == "api-skill-top20":
+        return SCAN_PARALLEL_QUEUE
+    from app.workers.worker_groups import phase_queue
+
+    phase_id = str(getattr(item, "phase_id", "") or "")
+    return phase_queue(phase_id, mode=mode) if phase_id else SCAN_PARALLEL_QUEUE
+
+
 def _rehydrate_orphaned_dispatched_work_items(
     db: Session,
     scan_id: int,
@@ -1408,7 +1418,6 @@ def _rehydrate_orphaned_dispatched_work_items(
     from datetime import datetime, timedelta
     from app.models.models import ScanLog, ScanWorkItem
     from app.services.scan_work_queue import _redis_client
-    from app.workers.worker_groups import phase_queue
 
     now = datetime.now()
     cutoff = now - timedelta(seconds=max(30, int(stale_after_seconds)))
@@ -1453,7 +1462,7 @@ def _rehydrate_orphaned_dispatched_work_items(
                     continue
             except Exception:
                 pass
-        queue = phase_queue(str(item.phase_id or ""), mode=mode)
+        queue = _work_item_execution_queue(item, mode)
         execute_scan_work_item.apply_async(args=[int(item.id)], queue=queue)
         scheduled += 1
         grace_until = now + timedelta(seconds=max(300, int(stale_after_seconds) * 2))
@@ -4602,7 +4611,6 @@ def dispatch_scan_work_items(
         finalize_orphaned_blocked_work_items,
         work_queue_counts,
     )
-    from app.workers.worker_groups import phase_queue
 
     _pending_key = f"dispatch_pending:{int(scan_id)}"
     if _dispatch_token:
@@ -4793,15 +4801,15 @@ def dispatch_scan_work_items(
                 pass  # Priority scoring failure is non-fatal
 
         _scan_mode = "scheduled" if str(getattr(job, "mode", "") or "").lower() == "scheduled" else "unit"
-        _phase_by_item = dict(
-            db.query(ScanWorkItem.id, ScanWorkItem.phase_id)
+        _items_by_id = {
+            int(row.id): row
+            for row in db.query(ScanWorkItem)
             .filter(ScanWorkItem.id.in_(item_ids))
             .all()
-        ) if item_ids else {}
+        } if item_ids else {}
         _dispatch_queues: dict[str, int] = {}
         for item_id in item_ids:
-            _phase_id = str(_phase_by_item.get(item_id) or "")
-            _queue = phase_queue(_phase_id, mode=_scan_mode) if _phase_id else SCAN_PARALLEL_QUEUE
+            _queue = _work_item_execution_queue(_items_by_id.get(int(item_id)), _scan_mode)
             _dispatch_queues[_queue] = _dispatch_queues.get(_queue, 0) + 1
             execute_scan_work_item.apply_async(args=[item_id], queue=_queue)
         if _dispatch_queues:
@@ -6171,7 +6179,10 @@ def execute_scan_work_item(item_id: int):
                 "parsed_result": _parsed_result,
                 "findings_extracted": _findings_extracted,
                 "finished_at": now_done.isoformat(),
-                "execution_path": "backend_local",
+                "execution_path": result.get("execution_path") or "backend_local",
+                "mcp_used": bool(result.get("mcp_used")),
+                "source_agent_id": result.get("source_agent_id"),
+                "source_agent_name": result.get("source_agent_name"),
                 "evidence_path": _stdout_full_path,
             }
             item.updated_at = now_done
@@ -6241,7 +6252,8 @@ def execute_scan_work_item(item_id: int):
                         "phase_id": item.phase_id,
                         "target": item.target,
                         "tool_name": item.tool_name,
-                        "execution_path": "backend_local",
+                        "execution_path": result.get("execution_path") or "backend_local",
+                        "mcp_used": bool(result.get("mcp_used")),
                     },
                     created_at=now_done,
                 ))
@@ -6251,7 +6263,7 @@ def execute_scan_work_item(item_id: int):
                 level="INFO",
                 message=(
                     f"work_item_finish id={item.id} phase={item.phase_id} target={item.target} "
-                    f"tool={item.tool_name} status={terminal} execution_path=backend_local"
+                    f"tool={item.tool_name} status={terminal} execution_path={result.get('execution_path') or 'backend_local'}"
                 ),
             ))
             db.commit()
@@ -6280,7 +6292,7 @@ def execute_scan_work_item(item_id: int):
                     )
             if terminal == "retry" and _is_post_scan_revalidation(item, job):
                 schedule_post_scan_validation_wire(item.id, countdown=30)
-            return {"id": item.id, "status": terminal, "execution_path": "backend_local"}
+            return {"id": item.id, "status": terminal, "execution_path": result.get("execution_path") or "backend_local"}
 
         # Never pass timeout to the kali runner — the profile's own timeout is
         # the authoritative limit. A backend-side value kills long-running tools.
