@@ -123,7 +123,7 @@ def test_api_top20_runner_reports_complete_endpoint_coverage(monkeypatch):
         bola,
         endpoints,
         [Identity(key="anonymous", role="", headers={}, cookies={})],
-        {"max_endpoints_per_skill": 0, "max_requests_per_skill": 0, "max_requests_hard_cap": 100, "timeout_seconds": 1},
+        {"timeout_seconds": 1},
         True,
     )
 
@@ -190,7 +190,7 @@ def test_api_top20_auth_skill_tests_anonymous_exposure_without_credentials(monke
         bfla,
         [endpoint],
         [Identity(key="anonymous", role="", headers={}, cookies={})],
-        {"max_endpoints_per_skill": 10, "max_requests_per_skill": 10, "timeout_seconds": 1},
+        {"timeout_seconds": 1},
         True,
     )
 
@@ -223,7 +223,7 @@ def test_api_top20_bola_without_second_identity_still_creates_anonymous_candidat
         bola,
         [endpoint],
         [Identity(key="anonymous", role="", headers={}, cookies={})],
-        {"max_endpoints_per_skill": 10, "max_requests_per_skill": 10, "timeout_seconds": 1},
+        {"timeout_seconds": 1},
         True,
     )
 

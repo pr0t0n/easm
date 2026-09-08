@@ -143,8 +143,6 @@ port_service_scan:
   category: bas
   phase: BAS_INTERNAL
   description: "BAS: TCP-connect scan for BAS-required TCP ports, tunneled through the BAS agent. Runs unconditionally as every BAS schedule's mandatory CMDB pre-req."
-  # -sT (TCP connect scan) required: proxychains only intercepts connect(),
-  # never nmap's default raw-socket SYN scan (-sS).
   cmd: ["proxychains4", "-f", "{env_BAS_PROXYCHAINS_CONF}",
         "nmap", "-Pn", "-sT", "-T4", "--max-retries", "1", "--host-timeout", "5s", "--open",
         "-p", "22,80,88,389,443,445,464,636,3389,3268,3269",

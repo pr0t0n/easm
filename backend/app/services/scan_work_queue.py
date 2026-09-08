@@ -3185,7 +3185,6 @@ def work_queue_profile_policy(
     *,
     max_optional_per_phase: int | None = None,
 ) -> dict[str, Any]:
-    """Resolve the phase/tool budget used by the persistent work queue."""
     from app.services.scan_profiles import phases_for_scan_level, scan_profile
 
     current = dict(state or {})
@@ -3196,13 +3195,8 @@ def work_queue_profile_policy(
         "scan_level": profile.get("id"),
         "depth": profile.get("depth"),
         "allowed_phases": set(allowed) if allowed is not None else None,
-        "tool_depth_limit": max(1, int(profile.get("tool_depth_limit") or 1)),
         "complete_phase_tool_coverage": bool(profile.get("complete_phase_tool_coverage")),
-        "optional_override": (
-            max(0, int(max_optional_per_phase))
-            if max_optional_per_phase is not None
-            else None
-        ),
+        "optional_override": None,
     }
 
 
@@ -3229,19 +3223,13 @@ def enqueue_scan_work_items(
         max_optional_per_phase=max_optional_per_phase,
     )
     allowed_phases = queue_policy["allowed_phases"]
-    tool_depth_limit = int(queue_policy["tool_depth_limit"])
     state["execution_plan_contract"] = {
         "version": 2,
         "scan_level": queue_policy.get("scan_level"),
         "depth": queue_policy.get("depth"),
-        "tool_depth_limit_per_phase": tool_depth_limit,
         "complete_phase_tool_coverage": bool(queue_policy.get("complete_phase_tool_coverage")),
         "allowed_phases": sorted(allowed_phases) if allowed_phases else "P01-P22",
-        "selection_policy": (
-            "required_plus_all_applicable_optional"
-            if queue_policy.get("complete_phase_tool_coverage") and queue_policy["optional_override"] is None
-            else "required_plus_ranked_optional_with_applicability"
-        ),
+        "selection_policy": "required_plus_all_applicable_optional",
         "updated_at": datetime.now().isoformat(),
     }
     state["target_query"] = str(getattr(job, "target_query", "") or state.get("target_query") or "")
@@ -3325,14 +3313,7 @@ def enqueue_scan_work_items(
                 continue
             required = list((PHASE_CONTRACTS.get(phase_id) or {}).get("required_tools") or [])
             optional = [tool for tool in tools if tool not in set(required)]
-            optional_budget = (
-                int(queue_policy["optional_override"])
-                if queue_policy["optional_override"] is not None
-                else len(optional)
-                if queue_policy.get("complete_phase_tool_coverage")
-                else max(0, tool_depth_limit - len(required))
-            )
-            selected = list(dict.fromkeys(required + optional[:optional_budget]))
+            selected = list(dict.fromkeys(required + optional))
             selected, missing_for_modules = _filter_tools_by_kali_modules(selected, module_status)
             for missing_tool in missing_for_modules:
                 module_id = _tool_module_id(missing_tool) or "unknown"

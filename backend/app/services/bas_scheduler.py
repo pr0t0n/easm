@@ -532,14 +532,6 @@ def _port_scan_chunks(target: str) -> list[str]:
 
 
 def _port_scan_max_wait(target: str) -> int:
-    """How long to let the mandatory port_service_scan pre-req run before
-    giving up. execute_via_kali's own default (1800s) is what a single
-    proxychains-tunneled nmap invocation was silently capped to regardless
-    of the profile's own declared timeout -- fine for a single host, but a
-    real /20 (~4094 hosts) was still under 10% done at that mark (confirmed
-    live 2026-08-28). Scales with the target's host count instead of
-    assuming one size fits every network mask; capped so a genuinely dead
-    dispatch doesn't hang forever."""
     try:
         network = ipaddress.ip_network(str(target or "").strip(), strict=False)
     except ValueError:

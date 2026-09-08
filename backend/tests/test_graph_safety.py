@@ -5,7 +5,7 @@ estar fora do ar, lento ou devolver lixo. Quando isso acontece, o supervisor
 NÃO pode travar nem explodir — tem que cair num fallback determinístico e
 seguir. Estes testes travam esse contrato.
 
-(Os outros sub-itens do P21 — terminação/max_iterations e bloqueio de pivot
+(Os outros sub-itens do P21 — terminação por drenagem e bloqueio de pivot
 fora de escopo — dependem do harness de grafo/Attack Path, P14/P11/P15.)
 """
 from __future__ import annotations

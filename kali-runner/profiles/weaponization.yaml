@@ -29,11 +29,8 @@ nmap_vuln_scripts:
   category: vuln
   phase: WEAPONIZATION_SIMULATION
   description: "Nmap NSE vuln category — maps detected services to known CVEs (article §8: nmap --script vuln)."
-  # Article: 'nmap --script vuln example.com'. We add -sV to ensure scripts have
-  # service context, --top-ports 200 to bound runtime, -T4 aggressive timing,
-  # --max-retries 2 to avoid hanging on filtered ports.
   cmd: ["nmap", "-sV", "--script", "vuln", "-Pn", "-T4",
-        "--top-ports", "200", "--max-retries", "2", "{host}"]
+        "-p-", "--max-retries", "2", "{host}"]
   timeout: 900
   parser: raw
 
@@ -46,7 +43,7 @@ nmap_vuln_scripts_batch:
   target_type: targets_file
   description: "Batch nmap NSE vuln scan across multiple hosts via -iL."
   cmd: ["nmap", "-sV", "--script", "vuln", "-Pn", "-T4",
-        "--top-ports", "100", "--max-retries", "1", "--open",
+        "-p-", "--max-retries", "1", "--open",
         "-oG", "-", "-iL", "{target_file}"]
   timeout: 1200
   parser: raw

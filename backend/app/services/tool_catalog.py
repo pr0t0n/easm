@@ -133,7 +133,7 @@ TOOL_CATALOG: dict[str, dict[str, Any]] = {
     "nmap": {
         "category": "recon", "phase": "P02",
         "description": "Service/version detection, scripting engine (NSE).",
-        "when_to_use": "Deep scan on ports surfaced by naabu; or full --top-ports for prod.",
+        "when_to_use": "Deep scan on ports surfaced by naabu or full port coverage for prod.",
         "inputs": "host:port list", "outputs": "service banners + NSE findings",
         "prerequisites": "open port list",
     },

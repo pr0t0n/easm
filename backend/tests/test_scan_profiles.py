@@ -11,6 +11,7 @@ def test_recon_profile_limits_phase_coverage_and_depth() -> None:
     assert profile["depth"] == "low"
     assert phases_for_scan_level("asm") == set(profile["phase_ids"])
     assert "P12" not in phases_for_scan_level("asm")
+    assert profile["complete_phase_tool_coverage"] is True
 
 
 def test_full_profile_runs_all_phases_with_medium_depth() -> None:
@@ -18,7 +19,6 @@ def test_full_profile_runs_all_phases_with_medium_depth() -> None:
 
     assert profile["depth"] == "medium"
     assert phases_for_scan_level("full") is None
-    assert profile["tool_depth_limit"] < scan_profile("aggressive")["tool_depth_limit"]
     assert profile["complete_phase_tool_coverage"] is True
 
 
@@ -40,20 +40,16 @@ def test_work_queue_uses_profile_phase_and_tool_depth_policy() -> None:
 
     assert "P12" not in recon["allowed_phases"]
     assert full["allowed_phases"] is None
-    assert recon["tool_depth_limit"] == 2
-    assert full["tool_depth_limit"] == 6
-    assert aggressive["tool_depth_limit"] == 12
-    assert recon["complete_phase_tool_coverage"] is False
+    assert recon["complete_phase_tool_coverage"] is True
     assert full["complete_phase_tool_coverage"] is True
     assert aggressive["complete_phase_tool_coverage"] is True
 
 
-def test_explicit_optional_override_is_preserved_for_special_callers() -> None:
+def test_explicit_optional_override_does_not_reduce_coverage() -> None:
     policy = work_queue_profile_policy(
         {"scan_level": "aggressive"},
         max_optional_per_phase=3,
     )
 
-    assert policy["tool_depth_limit"] == 12
-    assert policy["optional_override"] == 3
+    assert policy["optional_override"] is None
     assert policy["complete_phase_tool_coverage"] is True

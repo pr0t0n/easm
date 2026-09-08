@@ -56,7 +56,6 @@ def test_supervisor_prompt_includes_bas_catalog() -> None:
     contract = build_supervisor_prompt_contract(
         target="https://example.test",
         objective="Validate detection controls",
-        max_iterations=3,
         active_skills=[
             {
                 "id": "vuln-injection",

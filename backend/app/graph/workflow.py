@@ -2235,8 +2235,7 @@ def initial_state(
     )
     normalized_scan_level = normalize_scan_level(scan_level)
     profile = scan_profile(normalized_scan_level)
-    max_iterations = int(profile.get("max_iterations") or 45)
-    mission_contract = build_autonomous_mission_contract(max_iterations=max_iterations)
+    mission_contract = build_autonomous_mission_contract()
     return {
         "trace_id": trace_id,
         "scan_id": scan_id,
@@ -2277,7 +2276,6 @@ def initial_state(
             "prompt_contract": build_supervisor_prompt_contract(
                 target=primary_target,
                 objective=f"Assess external attack surface and exploitable risk for {primary_target}",
-                max_iterations=max_iterations,
                 active_skills=initial_skills,
             ),
             "mission_contract": mission_contract,
@@ -2295,7 +2293,6 @@ def initial_state(
         "completed_capabilities": [],
         "capability_ledger": {},
         "loop_iteration": 0,
-        "max_iterations": max_iterations,
         "objective_met": False,
         "termination_reason": "",
         "routing_next_node": "skill_selector",
@@ -2346,7 +2343,7 @@ def initial_state(
             "last_findings_total": 0,
             "no_progress_iterations": 0,
             "approaching_limit": False,
-            "remaining_iterations": max_iterations,
+            "remaining_iterations": None,
         },
         "tool_runtime": {},
         "validation_backlog": [],

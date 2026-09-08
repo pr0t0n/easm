@@ -167,7 +167,6 @@ You coordinate autonomous, directed worker agents. Each worker has its own missi
 Target: {target}
 Objective: {objective}
 Authorized Scope: {authorized_targets}
-Max Iterations: {max_iterations}
 
 ## COGNITIVE FRAMEWORK
 For each action, follow KNOW → THINK → TEST → VALIDATE → ADAPT:
@@ -251,7 +250,6 @@ tools available MUST be retried.
 ## CIRCUIT BREAKER
 - 5 consecutive tool failures → log and pause 60s.
 - 3 iterations with no new findings → pivot strategy (change tools/approach).
-- Budget approaching limit (≤2 iterations remaining) → force governance + executive_analyst.
 
 ## TERMINATION POLICY
 {termination_policy}
@@ -261,7 +259,6 @@ tools available MUST be retried.
 def build_supervisor_prompt_contract(
     target: str,
     objective: str,
-    max_iterations: int,
     active_skills: list[dict[str, Any]] | None = None,
     authorized_targets: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -325,7 +322,6 @@ def build_supervisor_prompt_contract(
         target=str(target or ""),
         objective=str(objective or f"Assess exploitable vulnerabilities for {target}"),
         authorized_targets=", ".join(scope) if scope else str(target),
-        max_iterations=int(max_iterations),
         skills_summary=skills_summary or "  (no skills loaded yet — will be selected post-discovery)",
         worker_missions=worker_missions,
         accepted_vulnerability_learning=accepted_vulnerability_learning,
@@ -339,11 +335,10 @@ def build_supervisor_prompt_contract(
         "target": str(target or ""),
         "objective": str(objective or f"Assess exploitable vulnerabilities for {target}"),
         "authorized_targets": scope,
-        "max_iterations": int(max_iterations),
         "principles": CYBER_AUTOAGENT_PROMPT_PRINCIPLES,
         "cognitive_loop": CYBER_AUTOAGENT_PROMPT_PRINCIPLES["cognitive_loop"],
         "expected_loop": ["know", "think", "test", "validate", "adapt"],
-        "autonomy_contract": build_autonomous_mission_contract(max_iterations=max_iterations),
+        "autonomy_contract": build_autonomous_mission_contract(),
         "system_prompt": prompt.strip(),
         "worker_missions": worker_missions,
         "accepted_vulnerability_learning": accepted_vulnerability_learning,
@@ -397,10 +392,7 @@ def evaluate_execution_quality(final_state: dict[str, Any]) -> dict[str, Any]:
 
     objective_met = bool(final_state.get("objective_met"))
     termination_reason = str(final_state.get("termination_reason") or "")
-    outcome_score = (
-        1.0 if objective_met
-        else (0.75 if termination_reason in {"max_iterations_reached", "forced_finalize_guardrail"} else 0.5)
-    )
+    outcome_score = 1.0 if objective_met else (0.75 if termination_reason == "forced_finalize_guardrail" else 0.5)
 
     weights = CYBER_AUTOAGENT_RUBRIC["weights"]
     overall = (

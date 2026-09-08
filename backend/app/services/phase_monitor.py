@@ -1274,7 +1274,6 @@ def build_phase_monitor(db: Session, scan: ScanJob) -> dict[str, Any]:
             "steps_done": max(int(metrics.get("steps_done", 0) or 0), ledger_completed_count),
             "steps_success": max(int(metrics.get("steps_success", 0) or 0), sum(1 for entry in phase_ledger.values() if str(entry.get("status") or "").lower() == "completed")),
             "loop_iteration": int(state.get("loop_iteration", 0) or 0),
-            "max_iterations": int(state.get("max_iterations", 0) or 0),
             "findings_total": len(findings),
             "tool_runs_total": max(len(runs), sum(int(v.get("attempts", 0) or 0) for v in tool_stats.values())),
             "tools_installed_used_ratio": round(coverage_ratio_installed, 3),

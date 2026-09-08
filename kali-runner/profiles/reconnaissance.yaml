@@ -165,8 +165,8 @@ naabu_top1000:
   tool: naabu
   category: recon
   phase: RECONNAISSANCE
-  description: "Fast TCP port scan top-1000 (article §1 subfinder | naabu pipeline equivalent)."
-  cmd: ["naabu", "-host", "{host_ip}", "-top-ports", "1000", "-silent", "-rate", "1000"]
+  description: "Full TCP port scan (article §1 subfinder | naabu pipeline equivalent)."
+  cmd: ["naabu", "-host", "{host_ip}", "-p", "1-65535", "-silent", "-rate", "1000"]
   timeout: 600
   parser: lines
 
@@ -177,10 +177,8 @@ naabu_top1000_batch:
   category: recon
   phase: RECONNAISSANCE
   target_type: targets_file
-  description: "Conservative batch TCP scan; avoids resolver/NAT exhaustion on large WAF/CDN estates."
-  cmd: ["naabu", "-list", "{target_file}", "-top-ports", "1000", "-silent", "-rate", "200", "-c", "10"]
-  # Runner silence watchdog is 50% of timeout. A 1200s budget gives a 600s
-  # no-output window, required when the final open port appears early.
+  description: "Full batch TCP scan across authorized discovered hosts."
+  cmd: ["naabu", "-list", "{target_file}", "-p", "1-65535", "-silent", "-rate", "200", "-c", "10"]
   timeout: 1200
   parser: lines
 
@@ -188,10 +186,8 @@ nmap_service_detect:
   tool: nmap
   category: recon
   phase: RECONNAISSANCE
-  description: "Bounded ASM service/version discovery for the P02 gate. Deeper NSE scripts run in later vulnerability phases."
-  # P02 is a gate for crawling/fingerprinting. Keep it fast and bounded on
-  # public/WAF targets; heavyweight NSE checks belong to P09/P11/P18.
-  cmd: ["nmap", "-sV", "--version-light", "-Pn", "--open", "--top-ports", "200", "-T4",
+  description: "Full service/version discovery for the P02 gate."
+  cmd: ["nmap", "-sV", "--version-light", "-Pn", "--open", "-p-", "-T4",
         "--max-retries", "1", "--max-rtt-timeout", "2s", "--host-timeout", "240s", "{host}"]
   timeout: 300
   parser: raw
@@ -203,13 +199,10 @@ nmap_service_detect_batch:
   category: recon
   phase: RECONNAISSANCE
   target_type: targets_file
-  description: "Bounded batch service detection across multiple hosts via -iL."
-  cmd: ["nmap", "-sV", "--version-light", "-Pn", "--top-ports", "200", "-T4",
+  description: "Full batch service detection across multiple hosts via -iL."
+  cmd: ["nmap", "-sV", "--version-light", "-Pn", "-p-", "-T4",
         "--max-retries", "1", "--max-rtt-timeout", "2s", "--host-timeout", "240s",
         "--open", "-oG", "-", "-iL", "{target_file}"]
-  # Nmap buffers grepable output until hosts complete. The runner's silence
-  # watchdog fires at 50% of this value, so 300s killed a legitimate 56-host
-  # batch after 150s even though each host has a 240s bound.
   timeout: 1200
   parser: raw
 

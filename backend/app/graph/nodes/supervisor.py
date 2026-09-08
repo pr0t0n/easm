@@ -537,8 +537,6 @@ def _mark_capability_runtime(state: AgentState, capability: str, source: str, ev
 
 def _update_execution_guardrails(state: AgentState) -> None:
     ctrl = dict(state.get("execution_control") or {})
-    max_iterations = int(state.get("max_iterations", 12))
-    iteration = int(state.get("loop_iteration", 0))
     findings_total = len(state.get("vulnerabilidades_encontradas") or [])
     last_total = int(ctrl.get("last_findings_total", 0))
     no_progress = int(ctrl.get("no_progress_iterations", 0))
@@ -550,16 +548,10 @@ def _update_execution_guardrails(state: AgentState) -> None:
 
     ctrl["last_findings_total"] = findings_total
     ctrl["no_progress_iterations"] = no_progress
-    ctrl["approaching_limit"] = iteration >= max(1, int(max_iterations * 0.85))
-    ctrl["remaining_iterations"] = max(0, max_iterations - iteration)
+    ctrl["approaching_limit"] = False
+    ctrl["remaining_iterations"] = None
     ctrl["paused"] = bool(ctrl.get("paused", False))
 
-    if ctrl["approaching_limit"]:
-        _append_note(
-            state,
-            f"Orçamento de iterações próximo do limite ({iteration}/{max_iterations}).",
-            phase="execution-control",
-        )
     if no_progress >= 3:
         _append_todo(state, "Pivotar estratégia por estagnação de evidências", priority="high")
         ctrl["paused"] = True
@@ -1549,14 +1541,7 @@ def supervisor_node(state: AgentState) -> AgentState:
     except Exception:
         pass
 
-    # Kill switch: proteção contra loops infinitos
     state["loop_iteration"] = int(state.get("loop_iteration", 0)) + 1
-    max_iterations = int(state.get("max_iterations", 12))
-    if state["loop_iteration"] > max_iterations:
-        state["routing_next_node"] = END
-        state["termination_reason"] = "max_iterations_reached"
-        state["objective_met"] = True
-        return state
 
     _update_execution_guardrails(state)
     # Advance kill-chain BEFORE refreshing skills so the stage gate is current.
@@ -1608,8 +1593,6 @@ def supervisor_node(state: AgentState) -> AgentState:
 
     next_node = "END"
     termination_reason = str(state.get("termination_reason") or "")
-    ctrl = dict(state.get("execution_control") or {})
-    remaining = int(ctrl.get("remaining_iterations", max_iterations))
 
     if pending_validation:
         _register_delegation_task(
@@ -1620,14 +1603,8 @@ def supervisor_node(state: AgentState) -> AgentState:
         )
 
     next_tactic: dict[str, Any] | None = None
-    # Kill-chain has absolute priority: while the pentest has not walked
-    # RECON → VULN_ANALYSIS → EXPLOITATION (i.e. stage != terminal), the
-    # supervisor MUST keep pursuing pentest work — objective_met cannot
-    # short-circuit it. You cannot finalize a report on exploitation that
-    # was never reached. Only `remaining <= 2` (hard iteration budget)
-    # forces finalize.
     _kc_terminal = str(state.get("kill_chain_stage") or "").upper() in {"ACTIONS_ON_OBJECTIVES"}
-    if remaining > 2 and (not _kc_terminal or not state.get("objective_met")):
+    if not _kc_terminal or not state.get("objective_met"):
         next_tactic = _next_pentest_tactic(state)
 
     if next_tactic:
@@ -1668,7 +1645,7 @@ def supervisor_node(state: AgentState) -> AgentState:
             if coverage_mode_active
             else None
         )
-        if coverage_gap_node and int(state.get("loop_iteration", 0)) < max_iterations - 2:
+        if coverage_gap_node:
             _append_note(
                 state,
                 f"Segunda passada (coverage_mode=true): {coverage_gap_node} ainda tem profiles sem rodar.",
@@ -1980,7 +1957,7 @@ def supervisor_node(state: AgentState) -> AgentState:
 
     state["logs_terminais"].append(
         "Supervisor: "
-        f"iter={state['loop_iteration']}/{max_iterations} "
+        f"iter={state['loop_iteration']} "
         f"confidence={confidence} "
         f"high_signals={high_signals} "
         f"skills={len(state.get('active_skills') or [])} "

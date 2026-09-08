@@ -20,7 +20,6 @@ from app.services.scan_scope import authorized_scope_for_scan, is_host_in_scope
 
 
 DEFAULT_TIMEOUT_SECONDS = 10
-DEFAULT_MAX_REQUESTS_HARD_CAP = 5000
 MAX_BODY_CHARS = 160_000
 READ_METHODS = {"GET", "HEAD", "OPTIONS"}
 STATIC_RE = re.compile(r"\.(?:js|css|png|jpe?g|gif|svg|woff2?|ico|map|webp|pdf)(?:\?|$)", re.I)
@@ -536,11 +535,7 @@ def _finding(skill: dict[str, Any], endpoint: str, evidence: str, identity_key: 
 
 
 def _run_endpoint_skill(skill: dict[str, Any], endpoints: list[Endpoint], identities: list[Identity], limits: dict[str, Any], allow_mutations: bool) -> dict[str, Any]:
-    configured_max_endpoints = int(limits.get("max_endpoints_per_skill") or 0)
-    configured_max_requests = int(limits.get("max_requests_per_skill") or 0)
-    hard_cap = int(limits.get("max_requests_hard_cap") or DEFAULT_MAX_REQUESTS_HARD_CAP)
-    max_endpoints = configured_max_endpoints
-    max_requests = configured_max_requests if configured_max_requests > 0 else hard_cap
+    max_endpoints = 0
     timeout = int(limits.get("timeout_seconds") or DEFAULT_TIMEOUT_SECONDS)
     all_matching = _select_endpoints(skill, endpoints, 0)
     selected = _select_endpoints(skill, endpoints, max_endpoints)
@@ -557,7 +552,7 @@ def _run_endpoint_skill(skill: dict[str, Any], endpoints: list[Endpoint], identi
             "coverage_complete": selected_count >= matched_count,
             "coverage_gap_reason": None if selected_count >= matched_count else "endpoint_limit_reached",
             "attempts": 0,
-            "request_limit": max_requests,
+            "request_limit": None,
             "findings": findings,
             "observations": [],
         }
@@ -573,15 +568,9 @@ def _run_endpoint_skill(skill: dict[str, Any], endpoints: list[Endpoint], identi
     with requests.Session() as session:
         requests.packages.urllib3.disable_warnings()  # type: ignore[attr-defined]
         for ep in selected:
-            if attempts >= max_requests:
-                blocked_reasons.add("request_limit_reached")
-                break
             skill_id = str(skill.get("id") or "")
             active_identities = identities if skill.get("requires_authorization") else identities[:1]
             for identity in active_identities:
-                if attempts >= max_requests:
-                    blocked_reasons.add("request_limit_reached")
-                    break
                 if skill_id == "skill.api.cors_misconfiguration":
                     attempts += 1
                     result = _request(session, "OPTIONS" if ep.method != "GET" else "GET", ep.url, identity, headers={"Origin": "https://attacker.example"}, timeout=timeout)
@@ -607,9 +596,6 @@ def _run_endpoint_skill(skill: dict[str, Any], endpoints: list[Endpoint], identi
                     codes = []
                     header_names: set[str] = set()
                     for _ in range(int(skill.get("max_repeated_requests") or 3)):
-                        if attempts >= max_requests:
-                            blocked_reasons.add("request_limit_reached")
-                            break
                         method = _probe_method(skill, ep)
                         attempts += 1
                         result = _request(session, method, ep.url, identity, timeout=timeout)
@@ -651,7 +637,7 @@ def _run_endpoint_skill(skill: dict[str, Any], endpoints: list[Endpoint], identi
                 elif skill_id in {"skill.api.sql_injection", "skill.api.command_injection", "skill.api.ssrf"} and response is not None and ep.parameters:
                     payload = str((skill.get("payloads") or ["'"])[0])
                     mutated = _replace_first_query_value(ep.url, payload)
-                    if mutated and attempts < max_requests:
+                    if mutated:
                         attempts += 1
                         probe = _request(session, "GET", mutated, identity, timeout=timeout)
                         observations.append(_response_observation(skill, ep, identity, "GET", probe))
@@ -671,7 +657,7 @@ def _run_endpoint_skill(skill: dict[str, Any], endpoints: list[Endpoint], identi
                             findings.append(_finding(skill, ep.url, "Parâmetro de URL aceitou payload externo sem rejeição explícita.", identity.key, evidence_extra=extra))
                 elif skill_id == "skill.api.nosql_injection" and response is not None and ep.parameters:
                     mutated = _replace_first_query_value(ep.url, "1", str((skill.get("payloads") or ["[$ne]"])[0]))
-                    if mutated and attempts < max_requests:
+                    if mutated:
                         attempts += 1
                         probe = _request(session, "GET", mutated, identity, timeout=timeout)
                         observations.append(_response_observation(skill, ep, identity, "GET", probe))
@@ -694,10 +680,10 @@ def _run_endpoint_skill(skill: dict[str, Any], endpoints: list[Endpoint], identi
         "selected_endpoint_count": selected_count,
         "matched_endpoint_count": matched_count,
         "skipped_endpoint_count": max(0, matched_count - selected_count),
-        "coverage_complete": selected_count >= matched_count and "request_limit_reached" not in blocked_reasons,
-        "coverage_gap_reason": "request_limit_reached" if "request_limit_reached" in blocked_reasons else (None if selected_count >= matched_count else "endpoint_limit_reached"),
+        "coverage_complete": selected_count >= matched_count,
+        "coverage_gap_reason": None if selected_count >= matched_count else "endpoint_limit_reached",
         "attempts": attempts,
-        "request_limit": max_requests,
+        "request_limit": None,
         "blocked_reason": ",".join(sorted(blocked_reasons)) or None,
         "findings": findings,
         "observations": observations,

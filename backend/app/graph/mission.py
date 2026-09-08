@@ -963,15 +963,12 @@ PHASE_CONTRACTS: dict[str, dict[str, Any]] = _build_mission_phase_contracts() or
 }
 
 
-def build_autonomous_mission_contract(max_iterations: int) -> dict[str, Any]:
+def build_autonomous_mission_contract() -> dict[str, Any]:
     return {
         "mode": "autonomous-supervisor",
-        "max_iterations": int(max_iterations),
         "loop": ["know", "think", "test", "validate", "adapt"],
         "phases": PENTEST_PHASES,
         "execution_control": {
-            "approaching_limit_ratio": 0.85,
-            "force_finalize_remaining": 2,
             "pause_on_stagnation": True,
             "stagnation_threshold": 3,
         },

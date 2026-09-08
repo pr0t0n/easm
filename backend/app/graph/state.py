@@ -76,7 +76,6 @@ class AgentState(TypedDict):
     completed_capabilities: list[str]       # Capacidades já executadas no ciclo atual
     capability_ledger: dict[str, Any]       # Registro explícito de capacidades exercidas
     loop_iteration: int                      # Iteração atual do supervisor
-    max_iterations: int                      # Orçamento máximo de iterações
     objective_met: bool                      # Flag de término de operação
     termination_reason: str                  # Motivo de término da operação
     routing_next_node: str                   # Próximo nó escolhido pelo supervisor
