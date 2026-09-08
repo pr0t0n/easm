@@ -4,8 +4,9 @@ phase_id: P16
 tool_name: api-skill-top20
 execution_model: requests_safe_api_probe
 default_limits:
-  max_endpoints_per_skill: 30
-  max_requests_per_skill: 60
+  max_endpoints_per_skill: 0
+  max_requests_per_skill: 0
+  max_requests_hard_cap: 5000
   timeout_seconds: 10
   mutating_requests_require_allow_mutations: true
 skills:

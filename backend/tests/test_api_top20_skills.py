@@ -58,6 +58,28 @@ def test_api_top20_selector_uses_path_and_parameter_keywords():
     assert [endpoint.url for endpoint in selected] == ["https://api.example.test/api/users/123"]
 
 
+def test_api_top20_selector_zero_limit_selects_all_matching_endpoints():
+    catalog = load_api_top20_skills()
+    bola = next(skill for skill in catalog["skills"] if skill["id"] == "skill.api.bola_idor")
+    endpoints = [
+        Endpoint(
+            method="GET",
+            url=f"https://api.example.test/api/users/{index}",
+            normalized_url="https://api.example.test/api/users/{id}",
+            parameters=[],
+            tags=["api"],
+            source_tool="api-spec",
+            documented=True,
+            metadata={},
+        )
+        for index in range(45)
+    ]
+
+    selected = _select_endpoints(bola, endpoints, 0)
+
+    assert len(selected) == 45
+
+
 def test_api_top20_selector_allows_safe_head_or_options_probe_for_unsafe_surface():
     catalog = load_api_top20_skills()
     upload = next(skill for skill in catalog["skills"] if skill["id"] == "skill.api.file_upload_content_handling")
@@ -77,6 +99,39 @@ def test_api_top20_selector_allows_safe_head_or_options_probe_for_unsafe_surface
     selected = _select_endpoints(upload, endpoints, 10)
 
     assert [endpoint.url for endpoint in selected] == ["https://api.example.test/api/documents/upload"]
+
+
+def test_api_top20_runner_reports_complete_endpoint_coverage(monkeypatch):
+    catalog = load_api_top20_skills()
+    bola = next(skill for skill in catalog["skills"] if skill["id"] == "skill.api.bola_idor")
+    monkeypatch.setattr(api_runner.requests, "Session", lambda: FakeSession(FakeResponse(status_code=200)))
+    endpoints = [
+        Endpoint(
+            method="GET",
+            url=f"https://api.example.test/api/users/{index}",
+            normalized_url="https://api.example.test/api/users/{id}",
+            parameters=[],
+            tags=["api"],
+            source_tool="api-spec",
+            documented=True,
+            metadata={},
+        )
+        for index in range(45)
+    ]
+
+    result = _run_endpoint_skill(
+        bola,
+        endpoints,
+        [Identity(key="anonymous", role="", headers={}, cookies={})],
+        {"max_endpoints_per_skill": 0, "max_requests_per_skill": 0, "max_requests_hard_cap": 100, "timeout_seconds": 1},
+        True,
+    )
+
+    assert result["matched_endpoint_count"] == 45
+    assert result["selected_endpoint_count"] == 45
+    assert result["skipped_endpoint_count"] == 0
+    assert result["coverage_complete"] is True
+    assert result["attempts"] == 45
 
 
 def test_api_top20_reanchors_reused_inventory_to_current_target_scheme():

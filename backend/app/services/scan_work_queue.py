@@ -3197,6 +3197,7 @@ def work_queue_profile_policy(
         "depth": profile.get("depth"),
         "allowed_phases": set(allowed) if allowed is not None else None,
         "tool_depth_limit": max(1, int(profile.get("tool_depth_limit") or 1)),
+        "complete_phase_tool_coverage": bool(profile.get("complete_phase_tool_coverage")),
         "optional_override": (
             max(0, int(max_optional_per_phase))
             if max_optional_per_phase is not None
@@ -3234,8 +3235,13 @@ def enqueue_scan_work_items(
         "scan_level": queue_policy.get("scan_level"),
         "depth": queue_policy.get("depth"),
         "tool_depth_limit_per_phase": tool_depth_limit,
+        "complete_phase_tool_coverage": bool(queue_policy.get("complete_phase_tool_coverage")),
         "allowed_phases": sorted(allowed_phases) if allowed_phases else "P01-P22",
-        "selection_policy": "required_plus_ranked_optional_with_applicability",
+        "selection_policy": (
+            "required_plus_all_applicable_optional"
+            if queue_policy.get("complete_phase_tool_coverage") and queue_policy["optional_override"] is None
+            else "required_plus_ranked_optional_with_applicability"
+        ),
         "updated_at": datetime.now().isoformat(),
     }
     state["target_query"] = str(getattr(job, "target_query", "") or state.get("target_query") or "")
@@ -3322,6 +3328,8 @@ def enqueue_scan_work_items(
             optional_budget = (
                 int(queue_policy["optional_override"])
                 if queue_policy["optional_override"] is not None
+                else len(optional)
+                if queue_policy.get("complete_phase_tool_coverage")
                 else max(0, tool_depth_limit - len(required))
             )
             selected = list(dict.fromkeys(required + optional[:optional_budget]))

@@ -19,6 +19,7 @@ def test_full_profile_runs_all_phases_with_medium_depth() -> None:
     assert profile["depth"] == "medium"
     assert phases_for_scan_level("full") is None
     assert profile["tool_depth_limit"] < scan_profile("aggressive")["tool_depth_limit"]
+    assert profile["complete_phase_tool_coverage"] is True
 
 
 def test_aggressive_profile_is_not_normalized_to_full() -> None:
@@ -42,6 +43,9 @@ def test_work_queue_uses_profile_phase_and_tool_depth_policy() -> None:
     assert recon["tool_depth_limit"] == 2
     assert full["tool_depth_limit"] == 6
     assert aggressive["tool_depth_limit"] == 12
+    assert recon["complete_phase_tool_coverage"] is False
+    assert full["complete_phase_tool_coverage"] is True
+    assert aggressive["complete_phase_tool_coverage"] is True
 
 
 def test_explicit_optional_override_is_preserved_for_special_callers() -> None:
@@ -52,3 +56,4 @@ def test_explicit_optional_override_is_preserved_for_special_callers() -> None:
 
     assert policy["tool_depth_limit"] == 12
     assert policy["optional_override"] == 3
+    assert policy["complete_phase_tool_coverage"] is True

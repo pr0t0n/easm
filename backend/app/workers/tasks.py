@@ -6246,6 +6246,8 @@ def execute_scan_work_item(item_id: int):
                     "endpoint_count": int(_parsed_result.get("endpoint_count") or 0),
                     "identity_count": int(_parsed_result.get("identity_count") or 0),
                     "skill_results": _skill_results,
+                    "endpoint_coverage_complete": bool(_parsed_result.get("endpoint_coverage_complete", True)),
+                    "endpoint_coverage_gaps": list(_parsed_result.get("endpoint_coverage_gaps") or [])[:20],
                     "api_skill_execution_outcome": _execution_outcome,
                     "response_observation_count": int(_parsed_result.get("response_observation_count") or len(_response_observations)),
                     "anonymous_exposure_candidates": int(_parsed_result.get("anonymous_exposure_candidates") or 0),
