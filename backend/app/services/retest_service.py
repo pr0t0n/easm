@@ -1,13 +1,66 @@
 """Reteste de findings usando artefatos/validações existentes."""
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime
 from typing import Any
 
+import requests
 from sqlalchemy.orm import Session
 
 from app.models.models import EvidenceArtifact, Finding, RetestRun, ScanAuthSession, ScanIdentity, ScanJob, ValidationRun
 from app.services.artifact_store import create_request_response_artifact, replay_artifact_pair
+
+
+def _run_api_skill_anonymous_retest(db: Session, artifact: EvidenceArtifact, finding: Finding) -> dict[str, Any]:
+    request_data = dict(artifact.exploit_request or artifact.baseline_request or {})
+    method = str(request_data.get("method") or "GET").upper()
+    url = str(request_data.get("url") or artifact.target or finding.url or "")
+    metadata = dict(artifact.artifact_metadata or {})
+    expected_status = int(metadata.get("expected_status_code") or 0)
+    expected_hash = str(metadata.get("expected_body_sha256") or "")
+    if method not in {"GET", "HEAD", "OPTIONS"}:
+        return {"ok": False, "confirmed": False, "error": "mutation_retest_requires_family_validator"}
+    if not url.startswith("http"):
+        return {"ok": False, "confirmed": False, "error": "artifact_has_no_replayable_url"}
+    try:
+        response = requests.request(
+            method,
+            url,
+            headers={"User-Agent": "ValidCyber-API-SkillTop20-Retest/1.0", "Accept": "application/json, text/plain, */*"},
+            timeout=20,
+            verify=False,
+            allow_redirects=False,
+        )
+        body = response.text or ""
+        body_hash = hashlib.sha256(body[:160_000].encode("utf-8", errors="ignore")).hexdigest()
+        status_match = expected_status > 0 and int(response.status_code) == expected_status
+        hash_match = bool(expected_hash and body_hash == expected_hash)
+        still_exposed = int(response.status_code) in range(200, 300)
+        confirmed = bool(still_exposed and status_match and (not expected_hash or hash_match))
+        refuted = bool(expected_status and int(response.status_code) in {401, 403, 404, 405})
+        replay = {
+            "ok": True,
+            "confirmed": confirmed,
+            "refuted": refuted,
+            "status_code": int(response.status_code),
+            "content_type": response.headers.get("content-type", ""),
+            "body_sha256": body_hash,
+            "body_length": len(body),
+            "expected_status_code": expected_status,
+            "expected_body_sha256": expected_hash,
+            "status_match": status_match,
+            "body_hash_match": hash_match,
+            "anonymous_access_still_observable": still_exposed,
+        }
+    except Exception as exc:
+        replay = {"ok": False, "confirmed": False, "refuted": False, "error": type(exc).__name__, "detail": str(exc)[:500]}
+    metadata.setdefault("retests", []).append({"created_at": datetime.now().isoformat(), "result": replay})
+    artifact.artifact_metadata = metadata
+    artifact.validation_status = "confirmed" if replay.get("confirmed") else "refuted" if replay.get("refuted") else "candidate"
+    db.add(artifact)
+    db.flush()
+    return replay
 
 
 def create_retest(db: Session, scan: ScanJob, finding: Finding) -> RetestRun:
@@ -71,6 +124,33 @@ def run_retest(db: Session, retest: RetestRun) -> dict[str, Any]:
             diff_summary="no_prior_artifact",
             metadata={"finding_id": finding.id},
         )
+    if bool((artifact.artifact_metadata or {}).get("api_skill_top20_anonymous_exposure")):
+        replay = _run_api_skill_anonymous_retest(db, artifact, finding)
+        replay_executed = bool(replay.get("ok"))
+        new_status = "confirmed" if replay.get("confirmed") else ("refuted" if replay.get("refuted") else "inconclusive")
+        retest.status = "completed"
+        retest.new_status = new_status
+        retest.artifact_id = artifact.id
+        retest.summary = {
+            "confirmed": "anonymous_api_exposure_still_observable",
+            "refuted": "anonymous_api_exposure_not_reproduced",
+            "inconclusive": "anonymous_api_exposure_not_replayable",
+        }[new_status]
+        retest.completed_at = datetime.now()
+        finding.retest_status = new_status
+        details = dict(finding.details or {})
+        details["latest_retest"] = {
+            "retest_id": retest.id,
+            "status": new_status,
+            "completed_at": retest.completed_at.isoformat(),
+            "api_skill_top20_retest": True,
+            "anonymous_access_still_observable": bool(replay.get("anonymous_access_still_observable")),
+        }
+        finding.details = details
+        db.add(retest)
+        db.add(finding)
+        db.flush()
+        return {"ok": replay_executed, "retest_id": retest.id, "new_status": new_status, "replay": replay}
     materials: dict[str, tuple[dict[str, str], dict[str, str]]] = {}
     if artifact.identity_key:
         material_rows = (

@@ -47,6 +47,13 @@ SENSITIVE_PATH_TOKENS = {
 }
 ANONYMOUS_ACCESS_STATUSES = set(range(200, 300))
 ANONYMOUS_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+STRONG_ANONYMOUS_EXPOSURE_TOKENS = {
+    "cpf", "cnpj", "ssn", "certificate", "document", "invoice", "payment", "transfer",
+    "token", "session", "password", "secret", "user-cpf", "candidatecpf",
+}
+WEAK_OPERATIONAL_TOKENS = {
+    "health", "status", "ping", "version", "time", "server-hour", "server_hour", "clock",
+}
 
 
 @dataclass
@@ -353,6 +360,20 @@ def _sensitive_endpoint_reasons(skill: dict[str, Any], endpoint: Endpoint) -> li
     return matched[:12]
 
 
+def _anonymous_exposure_profile(skill: dict[str, Any], endpoint: Endpoint, reasons: list[str], status_code: int) -> dict[str, Any]:
+    text = _endpoint_signal_text(endpoint)
+    strong = sorted(token for token in STRONG_ANONYMOUS_EXPOSURE_TOKENS if token in text or token in reasons)
+    weak = sorted(token for token in WEAK_OPERATIONAL_TOKENS if token in text)
+    skill_id = str(skill.get("id") or "")
+    if weak and not strong:
+        return {"severity": "medium", "confidence": 35, "confidence_score": 35, "risk_score": 5, "signal_strength": "weak_operational_endpoint", "strong_reasons": strong, "weak_reasons": weak}
+    if strong:
+        severity = "high" if status_code in ANONYMOUS_ACCESS_STATUSES else "medium"
+        confidence = 72 if skill_id in {"skill.api.bola_idor", "skill.api.bopla"} else 65
+        return {"severity": severity, "confidence": confidence, "confidence_score": confidence, "risk_score": 8 if severity == "high" else 5, "signal_strength": "strong_sensitive_endpoint", "strong_reasons": strong, "weak_reasons": weak}
+    return {"severity": "medium", "confidence": 50, "confidence_score": 50, "risk_score": 5, "signal_strength": "generic_sensitive_endpoint", "strong_reasons": strong, "weak_reasons": weak}
+
+
 def _response_observation(skill: dict[str, Any], endpoint: Endpoint, identity: Identity, method: str, result: dict[str, Any]) -> dict[str, Any]:
     observation = {
         "skill_id": skill.get("id"),
@@ -393,15 +414,23 @@ def _anonymous_exposure_finding(skill: dict[str, Any], endpoint: Endpoint, resul
     reasons = _sensitive_endpoint_reasons(skill, endpoint)
     if not reasons:
         return None
-    severity = "high" if status_code in ANONYMOUS_ACCESS_STATUSES else "medium"
+    profile = _anonymous_exposure_profile(skill, endpoint, reasons, status_code)
+    severity = str(profile.get("severity") or "medium")
     evidence = f"Endpoint sensível acessível sem autenticação retornou HTTP {status_code}; requer reteste com identidade/fixture para confirmação."
     extra = _response_evidence(result, method)
     extra.update({
         "anonymous_access": True,
         "sensitive_reasons": reasons,
         "confirmation_gap": "identity_or_fixture_required",
+        "api_skill_signal_strength": profile.get("signal_strength"),
+        "api_skill_confidence_score": profile.get("confidence"),
+        "api_skill_risk_score": profile.get("risk_score"),
+        "strong_reasons": profile.get("strong_reasons"),
+        "weak_reasons": profile.get("weak_reasons"),
     })
-    return _finding(skill, endpoint.url, evidence, "anonymous", severity=severity, verification_status="candidate", evidence_extra=extra)
+    finding = _finding(skill, endpoint.url, evidence, "anonymous", severity=severity, verification_status="candidate", evidence_extra=extra)
+    finding["risk_score"] = int(profile.get("risk_score") or finding.get("risk_score") or 5)
+    return finding
 
 
 def _replace_first_query_value(url: str, payload: str, operator_suffix: str = "") -> str | None:
@@ -678,6 +707,16 @@ def run_api_top20_for_scan(scan_id: int, target: str, *, api_skill_id: str | Non
         scope = authorized_scope_for_scan(db, job.id)
         endpoints = _collect_endpoints(db, job, scope)
         identities = _collect_identities(db, job)
+        reused_inventory_scan_ids = sorted({
+            int(ep.metadata.get("reused_from_scan_id"))
+            for ep in endpoints
+            if ep.metadata.get("reused_from_scan_id")
+        })
+        ingestion = dict(api_config.get("ingestion") or {})
+        inventory_source = "reused_api_spec_snapshot" if reused_inventory_scan_ids else "current_scan_inventory"
+        spec_fallback_reason = ""
+        if reused_inventory_scan_ids and ingestion.get("ok") is False:
+            spec_fallback_reason = "api_spec_unavailable_using_previous_inventory"
         limits = dict(catalog.get("default_limits") or {})
         allow_mutations = bool(api_config.get("allow_mutations"))
         all_findings: list[dict[str, Any]] = []
@@ -720,6 +759,10 @@ def run_api_top20_for_scan(scan_id: int, target: str, *, api_skill_id: str | Non
             "identity_count": len(identities),
             "execution_contexts": [identity.key for identity in identities],
             "allow_mutations": allow_mutations,
+            "api_spec_ingestion": ingestion,
+            "inventory_source": inventory_source,
+            "reused_inventory_scan_ids": reused_inventory_scan_ids,
+            "spec_fallback_reason": spec_fallback_reason,
             "skill_results": skill_results,
             "finding_count": len(all_findings),
             "response_observation_count": len(all_observations),

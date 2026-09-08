@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -2547,6 +2547,74 @@ def _persist_finding_evidence_artifact(
     raw_stdout: str | None,
 ) -> None:
     try:
+        if tool_col == "api-skill-top20" and bool(details.get("anonymous_access")):
+            from app.services.artifact_store import create_request_response_artifact
+
+            retention_days = 30
+            method = str(details.get("method") or "GET").upper()
+            response_fingerprint = dict(details.get("response_fingerprint") or {})
+            artifact = create_request_response_artifact(
+                db,
+                job,
+                target=finding_url or domain_col,
+                tool_name=tool_col,
+                phase_id=str(details.get("phase_id") or getattr(source_item, "phase_id", "") or "P16"),
+                skill_id=str(details.get("api_skill_id") or ""),
+                identity_key=str(details.get("identity_key") or "anonymous"),
+                baseline_request={
+                    "method": method,
+                    "url": finding_url or domain_col,
+                    "identity": "anonymous",
+                    "headers": {"Accept": "application/json, text/plain, */*"},
+                },
+                baseline_response={
+                    "status_code": response_fingerprint.get("status_code") or details.get("http_status"),
+                    "content_type": response_fingerprint.get("content_type"),
+                    "body_sha256": response_fingerprint.get("body_sha256"),
+                    "body_length": response_fingerprint.get("body_length"),
+                },
+                exploit_request={
+                    "method": method,
+                    "url": finding_url or domain_col,
+                    "identity": "anonymous",
+                    "headers": {"Accept": "application/json, text/plain, */*"},
+                },
+                exploit_response={
+                    "status_code": response_fingerprint.get("status_code") or details.get("http_status"),
+                    "content_type": response_fingerprint.get("content_type"),
+                    "body_sha256": response_fingerprint.get("body_sha256"),
+                    "body_length": response_fingerprint.get("body_length"),
+                },
+                diff_summary=str(details.get("evidence") or "")[:4000],
+                validation_status="candidate",
+                confidence_score=int(details.get("api_skill_confidence_score") or 50),
+                metadata={
+                    "api_skill_top20_anonymous_exposure": True,
+                    "api_skill_id": details.get("api_skill_id"),
+                    "expected_status_code": response_fingerprint.get("status_code") or details.get("http_status"),
+                    "expected_body_sha256": response_fingerprint.get("body_sha256"),
+                    "signal_strength": details.get("api_skill_signal_strength"),
+                    "retention_days": retention_days,
+                    "expires_at": (datetime.now() + timedelta(days=retention_days)).isoformat(),
+                    "retention_policy": "delete_after_retest_or_expiry",
+                },
+            )
+            details["evidence_artifact_id"] = artifact.id
+            details["evidence_artifact_path"] = artifact.workspace_path
+            details["evidence_retention"] = {
+                "retention_days": retention_days,
+                "expires_at": artifact.artifact_metadata.get("expires_at"),
+                "policy": artifact.artifact_metadata.get("retention_policy"),
+            }
+            finding.confidence_score = int(details.get("api_skill_confidence_score") or finding.confidence_score or 50)
+            finding.risk_score = int(details.get("api_skill_risk_score") or finding.risk_score or 5)
+            finding.details = details
+            try:
+                flag_modified(finding, "details")
+            except Exception:
+                pass
+            db.add(finding)
+            return
         from app.services.evidence_contract_service import create_artifact_from_tool_result
         from app.services.artifact_store import write_artifact_file
 

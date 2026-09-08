@@ -153,6 +153,53 @@ def replay_artifact(db: Session, artifact: EvidenceArtifact, *, timeout: int = 2
     return replay
 
 
+def expire_retained_artifact_payloads(db: Session, *, now: datetime | None = None, limit: int = 500) -> int:
+    current = now or datetime.now()
+    rows = (
+        db.query(EvidenceArtifact)
+        .filter(EvidenceArtifact.artifact_metadata.isnot(None))
+        .order_by(EvidenceArtifact.created_at.asc())
+        .limit(max(1, int(limit)))
+        .all()
+    )
+    expired = 0
+    for artifact in rows:
+        metadata = dict(artifact.artifact_metadata or {})
+        expires_at_raw = str(metadata.get("expires_at") or "").strip()
+        policy = str(metadata.get("retention_policy") or "").strip()
+        if policy != "delete_after_retest_or_expiry" or not expires_at_raw:
+            continue
+        try:
+            expires_at = datetime.fromisoformat(expires_at_raw)
+        except ValueError:
+            continue
+        if expires_at > current or metadata.get("retention_expired_at"):
+            continue
+        path = str(artifact.workspace_path or metadata.get("artifact_path") or "").strip()
+        if path:
+            try:
+                candidate = Path(path)
+                if candidate.exists() and candidate.is_file():
+                    candidate.unlink()
+            except OSError:
+                pass
+        artifact.baseline_request = {}
+        artifact.exploit_request = {}
+        artifact.baseline_response_ref = None
+        artifact.exploit_response_ref = None
+        artifact.payload = ""
+        artifact.diff_summary = "retention_expired"
+        artifact.workspace_path = None
+        metadata["retention_expired_at"] = current.isoformat()
+        metadata["artifact_path"] = ""
+        artifact.artifact_metadata = metadata
+        db.add(artifact)
+        expired += 1
+    if expired:
+        db.flush()
+    return expired
+
+
 def replay_artifact_pair(
     db: Session,
     artifact: EvidenceArtifact,

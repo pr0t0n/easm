@@ -74,6 +74,10 @@ def _is_transient_worker_error(exc: BaseException | str) -> bool:
             "transaction has been rolled back",
             "PendingRollbackError",
             "SSL SYSCALL error",
+            "HTTPStatusError",
+            "503 Service Unavailable",
+            "502 Bad Gateway",
+            "504 Gateway Timeout",
         )
     )
 
@@ -6133,6 +6137,20 @@ def execute_scan_work_item(item_id: int):
                     "read timed out",
                 )):
                     terminal = "retry"
+            if _norm_item_tool == "api-skill-top20" and terminal == "failed" and item.attempts < item.max_attempts:
+                _api_skill_error = _local_error.lower()
+                if any(token in _api_skill_error for token in (
+                    "503 service unavailable",
+                    "502 bad gateway",
+                    "504 gateway timeout",
+                    "httpstatuserror",
+                    "mcp_server",
+                    "mcp service unavailable",
+                    "read timed out",
+                    "connection reset",
+                    "connection refused",
+                )):
+                    terminal = "retry"
             if terminal == "failed" and item.attempts < item.max_attempts and _work_item_tool_is_required(item):
                 terminal = "retry"
             if terminal == "failed" and not _local_error:
@@ -6190,6 +6208,30 @@ def execute_scan_work_item(item_id: int):
                 state = dict(job.state_data or {})
                 api_config = dict(state.get("api_scan_config") or {})
                 api_runs = list(state.get("api_scan_observability_runs") or [])
+                _response_observations = list(_parsed_result.get("response_observations") or [])
+                _http_status_counts: dict[str, int] = {}
+                _observation_error_counts: dict[str, int] = {}
+                for _observation in _response_observations[:300]:
+                    if not isinstance(_observation, dict):
+                        continue
+                    if _observation.get("ok"):
+                        _status_key = str(int(_observation.get("status_code") or 0))
+                        _http_status_counts[_status_key] = int(_http_status_counts.get(_status_key) or 0) + 1
+                    else:
+                        _error_key = str(_observation.get("error") or "unknown")
+                        _observation_error_counts[_error_key] = int(_observation_error_counts.get(_error_key) or 0) + 1
+                _skill_results = list(_parsed_result.get("skill_results") or [])[:20]
+                _finding_count = len(_findings_extracted)
+                _execution_outcome = ""
+                if _norm_item_tool == "api-skill-top20":
+                    if terminal != "completed":
+                        _execution_outcome = "not_completed"
+                    elif _finding_count > 0:
+                        _execution_outcome = "executed_with_findings"
+                    elif _response_observations:
+                        _execution_outcome = "executed_no_findings"
+                    else:
+                        _execution_outcome = "executed_without_observable_http_responses"
                 summary = {
                     "work_item_id": item.id,
                     "status": terminal,
@@ -6203,10 +6245,19 @@ def execute_scan_work_item(item_id: int):
                     "skills_total": int(_parsed_result.get("skills_total") or 0),
                     "endpoint_count": int(_parsed_result.get("endpoint_count") or 0),
                     "identity_count": int(_parsed_result.get("identity_count") or 0),
-                    "skill_results": list(_parsed_result.get("skill_results") or [])[:20],
+                    "skill_results": _skill_results,
+                    "api_skill_execution_outcome": _execution_outcome,
+                    "response_observation_count": int(_parsed_result.get("response_observation_count") or len(_response_observations)),
+                    "anonymous_exposure_candidates": int(_parsed_result.get("anonymous_exposure_candidates") or 0),
+                    "http_status_counts": _http_status_counts,
+                    "observation_error_counts": _observation_error_counts,
+                    "inventory_source": _parsed_result.get("inventory_source") or "",
+                    "reused_inventory_scan_ids": list(_parsed_result.get("reused_inventory_scan_ids") or []),
+                    "spec_fallback_reason": _parsed_result.get("spec_fallback_reason") or "",
+                    "api_spec_ingestion": dict(_parsed_result.get("api_spec_ingestion") or {}),
                     "imported_url_count": int(_parsed_result.get("imported_url_count") or 0),
                     "alert_count": int(_parsed_result.get("alert_count") or 0),
-                    "finding_count": len(_findings_extracted),
+                    "finding_count": _finding_count,
                     "active_error": _parsed_result.get("active_error") or "",
                     "finished_at": now_done.isoformat(),
                 }

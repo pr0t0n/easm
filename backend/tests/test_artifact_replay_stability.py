@@ -68,3 +68,58 @@ def test_replay_pair_marks_unstable_samples_inconclusive(monkeypatch) -> None:
     assert replay["inconclusive"] is True
     assert replay["confirmed"] is False
     assert replay["baseline"]["unstable"] is True
+
+
+def test_expire_retained_artifact_payloads_scrubs_expired_payload(tmp_path):
+    from datetime import datetime, timedelta
+
+    from app.services import artifact_store as store
+
+    artifact_path = tmp_path / "artifact.json"
+    artifact_path.write_text("sensitive", encoding="utf-8")
+    artifact = SimpleNamespace(
+        id=1,
+        baseline_request={"method": "GET"},
+        exploit_request={"method": "GET"},
+        baseline_response_ref=str(artifact_path),
+        exploit_response_ref=str(artifact_path),
+        payload="body",
+        diff_summary="diff",
+        workspace_path=str(artifact_path),
+        artifact_metadata={
+            "retention_policy": "delete_after_retest_or_expiry",
+            "expires_at": (datetime.now() - timedelta(days=1)).isoformat(),
+            "artifact_path": str(artifact_path),
+        },
+    )
+
+    class _Query:
+        def filter(self, *_args, **_kwargs):
+            return self
+
+        def order_by(self, *_args, **_kwargs):
+            return self
+
+        def limit(self, *_args, **_kwargs):
+            return self
+
+        def all(self):
+            return [artifact]
+
+    class _RetentionDb:
+        def query(self, *_args, **_kwargs):
+            return _Query()
+
+        def add(self, *_args, **_kwargs):
+            return None
+
+        def flush(self):
+            return None
+
+    expired = store.expire_retained_artifact_payloads(_RetentionDb())
+
+    assert expired == 1
+    assert artifact.workspace_path is None
+    assert artifact.baseline_request == {}
+    assert artifact.exploit_request == {}
+    assert artifact_path.exists() is False

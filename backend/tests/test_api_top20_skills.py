@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
 import app.services.api_skill_top20_runner as api_runner
-from app.services.api_skill_top20_runner import Endpoint, Identity, _canonical_endpoint_url, _run_endpoint_skill, _select_endpoints, load_api_top20_skills
+from app.services.api_skill_top20_runner import Endpoint, Identity, _anonymous_exposure_profile, _canonical_endpoint_url, _run_endpoint_skill, _select_endpoints, load_api_top20_skills
 from app.services.offensive_operator_core import PHASE_CONTRACTS
 from app.services.pentest_coverage_service import _work_item_matches_api_skill
 from app.services.scan_work_queue import work_item_applicability_decision
@@ -175,6 +175,48 @@ def test_api_top20_bola_without_second_identity_still_creates_anonymous_candidat
     assert result["blocked_reason"] == "second_identity_required_for_confirmation"
     assert len(result["findings"]) == 1
     assert result["findings"][0]["details"]["anonymous_access"] is True
+
+
+def test_api_top20_weak_operational_anonymous_endpoint_is_not_high_confidence():
+    catalog = load_api_top20_skills()
+    bopla = next(skill for skill in catalog["skills"] if skill["id"] == "skill.api.bopla")
+    endpoint = Endpoint(
+        method="GET",
+        url="https://api.example.test/api/Exam/server-hour",
+        normalized_url="https://api.example.test/api/Exam/server-hour",
+        parameters=[],
+        tags=["api"],
+        source_tool="api-spec",
+        documented=True,
+        metadata={},
+    )
+
+    profile = _anonymous_exposure_profile(bopla, endpoint, ["time", "server-hour"], 200)
+
+    assert profile["severity"] == "medium"
+    assert profile["confidence_score"] == 35
+    assert profile["signal_strength"] == "weak_operational_endpoint"
+
+
+def test_api_top20_sensitive_anonymous_endpoint_keeps_high_risk_profile():
+    catalog = load_api_top20_skills()
+    bola = next(skill for skill in catalog["skills"] if skill["id"] == "skill.api.bola_idor")
+    endpoint = Endpoint(
+        method="GET",
+        url="https://api.example.test/api/Exam/is-certificate-required-by-user-cpf",
+        normalized_url="https://api.example.test/api/Exam/is-certificate-required-by-user-cpf",
+        parameters=[],
+        tags=["api"],
+        source_tool="api-spec",
+        documented=True,
+        metadata={},
+    )
+
+    profile = _anonymous_exposure_profile(bola, endpoint, ["cpf", "certificate"], 200)
+
+    assert profile["severity"] == "high"
+    assert profile["confidence_score"] == 72
+    assert profile["signal_strength"] == "strong_sensitive_endpoint"
 
 
 def test_api_top20_coverage_maps_specific_skill_to_test_class():
