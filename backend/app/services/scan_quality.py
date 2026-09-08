@@ -34,6 +34,7 @@ from app.services.scan_execution_metrics import summarize_work_items
 from app.services.offensive_operator_core import PHASE_CONTRACTS
 from app.services.scan_profiles import scan_profile
 from app.services.loop_agent_telemetry import build_loop_agent_quality_summary
+from app.services.api_skill_coverage import build_api_skill_coverage
 
 
 VERIFIED_STATUSES = {"confirmed", "proven", "validated", "verified", "true_positive"}
@@ -1607,8 +1608,10 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
         },
     }
     total_score = round(sum((c["score"] * c["weight"]) / 100 for c in components.values()), 1)
+    api_skill_coverage = build_api_skill_coverage(db, job, work_items=work_items, state=state)
 
     gaps: list[dict[str, Any]] = []
+    gaps.extend(list(api_skill_coverage.get("gaps") or []))
     gaps.extend(_build_p08_tool_missing_gap(state=state, work_items=work_items, artifacts=artifacts))
     for requirement in list(depth_requirements.get("requirements") or []):
         status = str(requirement.get("status") or "")
@@ -1978,6 +1981,7 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
         "grade": grade,
         "label": label,
         "quality_gate": quality_gate,
+        "api_skill_coverage": api_skill_coverage,
         "business_logic": business_logic,
         "execution_contexts": context_quality,
         "external_preconditions": external_preconditions,
@@ -2247,6 +2251,7 @@ def _persist_quality_state(
         "finding_evidence_lifecycle",
         "operational_observability",
         "loop_agent",
+        "api_skill_coverage",
     ):
         if key in quality:
             state[key] = quality[key]
