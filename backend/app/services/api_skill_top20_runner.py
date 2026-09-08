@@ -36,6 +36,17 @@ RATE_LIMIT_HEADERS = {
     "ratelimit-limit", "x-ratelimit-limit", "x-rate-limit-limit",
     "ratelimit-remaining", "x-ratelimit-remaining", "retry-after",
 }
+SENSITIVE_PATH_TOKENS = {
+    "admin", "internal", "manage", "management", "role", "roles", "permission", "permissions",
+    "approval", "approve", "backoffice", "operator", "root", "account", "accounts", "user",
+    "users", "profile", "customer", "customers", "order", "orders", "invoice", "invoices",
+    "document", "documents", "exam", "certificate", "payment", "checkout", "cart", "coupon",
+    "transaction", "transfer", "otp", "resend", "verify", "settings", "price", "status",
+    "token", "session", "auth", "login", "upload", "file", "attachment", "media", "xml",
+    "soap", "import", "report", "config", "debug", "error",
+}
+ANONYMOUS_ACCESS_STATUSES = set(range(200, 300))
+ANONYMOUS_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 
 
 @dataclass
@@ -109,12 +120,23 @@ def _params_from_url(url: str) -> list[dict[str, str]]:
     return [{"name": str(k), "location": "query", "sample_value": str(v)} for k, v in parse_qsl(parsed.query, keep_blank_values=True)]
 
 
-def _collect_endpoints(db: Any, job: ScanJob, scope: list[str]) -> list[Endpoint]:
-    rows: dict[tuple[str, str], Endpoint] = {}
+def _canonical_endpoint_url(url: str, target_base: str) -> str:
+    if not target_base:
+        return url
+    parsed = urlparse(url)
+    base = urlparse(target_base)
+    if parsed.hostname and base.hostname and parsed.hostname.lower() == base.hostname.lower():
+        return urlunparse((base.scheme or parsed.scheme, base.netloc or parsed.netloc, parsed.path, parsed.params, parsed.query, parsed.fragment))
+    return url
+
+
+def _params_by_endpoint(db: Any, endpoint_ids: list[int]) -> dict[int, list[dict[str, str]]]:
+    if not endpoint_ids:
+        return {}
     param_rows = (
         db.query(OffensiveParameter)
-        .filter(OffensiveParameter.scan_job_id == job.id)
-        .limit(5000)
+        .filter(OffensiveParameter.endpoint_id.in_(endpoint_ids))
+        .limit(10000)
         .all()
     )
     by_endpoint: dict[int, list[dict[str, str]]] = {}
@@ -126,29 +148,68 @@ def _collect_endpoints(db: Any, job: ScanJob, scope: list[str]) -> list[Endpoint
             "type_hint": str(param.type_hint or ""),
             "risk_hint": str(param.risk_hint or ""),
         })
-    for ep in (
+    return by_endpoint
+
+
+def _add_offensive_endpoint(rows: dict[tuple[str, str], Endpoint], ep: OffensiveEndpoint, scope: list[str], by_endpoint: dict[int, list[dict[str, str]]], metadata_extra: dict[str, Any] | None = None, target_base: str = "") -> None:
+    url = _canonical_endpoint_url(str(ep.url or ""), target_base)
+    if not url.startswith(("http://", "https://")) or STATIC_RE.search(url) or not _host_allowed(url, scope):
+        return
+    method = str(ep.method or "GET").upper()
+    key = (method, normalize_url(url))
+    documented = str(ep.source_tool or "").lower() in {"api-spec", "openapi", "swagger", "graphql-spec"}
+    metadata = dict(ep.endpoint_metadata or {})
+    metadata.update(metadata_extra or {})
+    rows.setdefault(key, Endpoint(
+        method=method,
+        url=url,
+        normalized_url=key[1],
+        parameters=by_endpoint.get(int(ep.id), []) + _params_from_url(url),
+        tags=[str(tag).lower() for tag in list(ep.tags or [])],
+        source_tool=str(ep.source_tool or ""),
+        documented=documented,
+        metadata=metadata,
+    ))
+
+
+def _collect_endpoints(db: Any, job: ScanJob, scope: list[str]) -> list[Endpoint]:
+    rows: dict[tuple[str, str], Endpoint] = {}
+    state = dict(job.state_data or {})
+    target_base = _base_url(job, state)
+    offensive_rows = (
         db.query(OffensiveEndpoint)
         .filter(OffensiveEndpoint.scan_job_id == job.id)
         .order_by(OffensiveEndpoint.id.asc())
         .limit(2000)
         .all()
-    ):
-        url = str(ep.url or "")
-        if not url.startswith(("http://", "https://")) or STATIC_RE.search(url) or not _host_allowed(url, scope):
-            continue
-        method = str(ep.method or "GET").upper()
-        key = (method, normalize_url(url))
-        documented = str(ep.source_tool or "").lower() in {"api-spec", "openapi", "swagger", "graphql-spec"}
-        rows[key] = Endpoint(
-            method=method,
-            url=url,
-            normalized_url=key[1],
-            parameters=by_endpoint.get(int(ep.id), []) + _params_from_url(url),
-            tags=[str(tag).lower() for tag in list(ep.tags or [])],
-            source_tool=str(ep.source_tool or ""),
-            documented=documented,
-            metadata=dict(ep.endpoint_metadata or {}),
-        )
+    )
+    by_endpoint = _params_by_endpoint(db, [int(ep.id) for ep in offensive_rows])
+    for ep in offensive_rows:
+        _add_offensive_endpoint(rows, ep, scope, by_endpoint, target_base=target_base)
+    if len(rows) < 5:
+        previous_ids = [
+            int(row[0]) for row in (
+                db.query(ScanJob.id)
+                .filter(ScanJob.id != job.id)
+                .filter(ScanJob.target_query == job.target_query)
+                .filter(ScanJob.access_group_id == job.access_group_id)
+                .order_by(ScanJob.id.desc())
+                .limit(5)
+                .all()
+            )
+        ]
+        if previous_ids:
+            previous_rows = (
+                db.query(OffensiveEndpoint)
+                .filter(OffensiveEndpoint.scan_job_id.in_(previous_ids))
+                .filter(OffensiveEndpoint.source_tool.in_(["api-spec", "openapi", "swagger", "graphql-spec"]))
+                .order_by(OffensiveEndpoint.id.asc())
+                .limit(2000)
+                .all()
+            )
+            previous_params = _params_by_endpoint(db, [int(ep.id) for ep in previous_rows])
+            for ep in previous_rows:
+                _add_offensive_endpoint(rows, ep, scope, previous_params, {"reused_from_scan_id": ep.scan_job_id}, target_base=target_base)
     for req in (
         db.query(ObservedRequest)
         .filter(ObservedRequest.scan_job_id == job.id)
@@ -171,9 +232,8 @@ def _collect_endpoints(db: Any, job: ScanJob, scope: list[str]) -> list[Endpoint
             documented=False,
             metadata={"observed_request_id": req.id, "identity_key": req.identity_key},
         ))
-    state = dict(job.state_data or {})
     for raw in list(state.get("discovered_endpoints") or []) + list(state.get("internal_discovered_endpoints") or []):
-        url = str(raw or "")
+        url = _canonical_endpoint_url(str(raw or ""), target_base)
         if not url.startswith(("http://", "https://")) or STATIC_RE.search(url) or not _host_allowed(url, scope):
             continue
         key = ("GET", normalize_url(url))
@@ -214,7 +274,7 @@ def _select_endpoints(skill: dict[str, Any], endpoints: list[Endpoint], limit: i
     safe_methods = {str(item).upper() for item in list(skill.get("safe_methods") or [])}
     selected: list[Endpoint] = []
     for ep in endpoints:
-        if safe_methods and ep.method.upper() not in safe_methods:
+        if safe_methods and ep.method.upper() not in safe_methods and not safe_methods.intersection({"HEAD", "OPTIONS"}):
             continue
         text = " ".join([
             urlparse(ep.url).path.lower(),
@@ -231,7 +291,11 @@ def _select_endpoints(skill: dict[str, Any], endpoints: list[Endpoint], limit: i
             break
     if selected:
         return selected
-    fallback = [ep for ep in endpoints if API_RE.search(ep.url) and (not safe_methods or ep.method.upper() in safe_methods)]
+    fallback = [
+        ep for ep in endpoints
+        if API_RE.search(ep.url)
+        and (not safe_methods or ep.method.upper() in safe_methods or safe_methods.intersection({"HEAD", "OPTIONS"}))
+    ]
     return fallback[:limit]
 
 
@@ -254,6 +318,90 @@ def _request(session: requests.Session, method: str, url: str, identity: Identit
         return {"ok": True, "response": response, "fingerprint": _fingerprint(response)}
     except Exception as exc:
         return {"ok": False, "error": type(exc).__name__, "detail": str(exc)[:300]}
+
+
+def _probe_method(skill: dict[str, Any], endpoint: Endpoint) -> str:
+    safe_methods = {str(item).upper() for item in list(skill.get("safe_methods") or [])}
+    method = endpoint.method.upper()
+    if method in READ_METHODS and (not safe_methods or method in safe_methods):
+        return method
+    if "HEAD" in safe_methods:
+        return "HEAD"
+    if "OPTIONS" in safe_methods:
+        return "OPTIONS"
+    return "GET"
+
+
+def _endpoint_signal_text(endpoint: Endpoint) -> str:
+    return " ".join([
+        urlparse(endpoint.url).path.lower(),
+        " ".join(endpoint.tags).lower(),
+        " ".join(str(param.get("name") or "").lower() for param in endpoint.parameters),
+    ])
+
+
+def _sensitive_endpoint_reasons(skill: dict[str, Any], endpoint: Endpoint) -> list[str]:
+    selectors = dict(skill.get("selectors") or {})
+    keywords = {
+        str(item).lower().strip()
+        for item in list(selectors.get("path_keywords") or []) + list(selectors.get("parameter_keywords") or [])
+        if str(item).strip()
+    }
+    keywords.update(SENSITIVE_PATH_TOKENS)
+    text = _endpoint_signal_text(endpoint)
+    matched = sorted(keyword for keyword in keywords if keyword and keyword in text)
+    return matched[:12]
+
+
+def _response_observation(skill: dict[str, Any], endpoint: Endpoint, identity: Identity, method: str, result: dict[str, Any]) -> dict[str, Any]:
+    observation = {
+        "skill_id": skill.get("id"),
+        "endpoint": endpoint.url,
+        "method": method,
+        "identity_key": identity.key,
+        "ok": bool(result.get("ok")),
+    }
+    fingerprint = dict(result.get("fingerprint") or {})
+    if fingerprint:
+        observation.update({
+            "http_status": fingerprint.get("status_code"),
+            "content_type": fingerprint.get("content_type"),
+            "body_sha256": fingerprint.get("body_sha256"),
+            "body_length": fingerprint.get("body_length"),
+        })
+    if not result.get("ok"):
+        observation.update({"error": result.get("error"), "detail": result.get("detail")})
+    return observation
+
+
+def _response_evidence(result: dict[str, Any], method: str) -> dict[str, Any]:
+    fingerprint = dict(result.get("fingerprint") or {})
+    return {
+        "method": method,
+        "http_status": fingerprint.get("status_code"),
+        "response_fingerprint": fingerprint,
+    }
+
+
+def _anonymous_exposure_finding(skill: dict[str, Any], endpoint: Endpoint, result: dict[str, Any], method: str) -> dict[str, Any] | None:
+    response = result.get("response")
+    if response is None:
+        return None
+    status_code = int(response.status_code)
+    if status_code not in ANONYMOUS_ACCESS_STATUSES and status_code not in ANONYMOUS_REDIRECT_STATUSES:
+        return None
+    reasons = _sensitive_endpoint_reasons(skill, endpoint)
+    if not reasons:
+        return None
+    severity = "high" if status_code in ANONYMOUS_ACCESS_STATUSES else "medium"
+    evidence = f"Endpoint sensível acessível sem autenticação retornou HTTP {status_code}; requer reteste com identidade/fixture para confirmação."
+    extra = _response_evidence(result, method)
+    extra.update({
+        "anonymous_access": True,
+        "sensitive_reasons": reasons,
+        "confirmation_gap": "identity_or_fixture_required",
+    })
+    return _finding(skill, endpoint.url, evidence, "anonymous", severity=severity, verification_status="candidate", evidence_extra=extra)
 
 
 def _replace_first_query_value(url: str, payload: str, operator_suffix: str = "") -> str | None:
@@ -368,12 +516,16 @@ def _run_endpoint_skill(skill: dict[str, Any], endpoints: list[Endpoint], identi
     selected = _select_endpoints(skill, endpoints, max_endpoints)
     if skill.get("local_analysis"):
         findings = _decoded_jwt_findings(skill, identities, selected[0].url if selected else "")
-        return {"status": "completed", "selected": len(selected), "attempts": 0, "findings": findings}
-    if skill.get("mutating_confirmation_requires_fixture") and not allow_mutations:
-        return {"status": "skipped", "selected": len(selected), "attempts": 0, "blocked_reason": "mutation_fixture_or_allow_mutations_required", "findings": []}
+        return {"status": "completed", "selected": len(selected), "attempts": 0, "findings": findings, "observations": []}
 
     findings: list[dict[str, Any]] = []
+    observations: list[dict[str, Any]] = []
     attempts = 0
+    blocked_reasons: set[str] = set()
+    if skill.get("mutating_confirmation_requires_fixture") and not allow_mutations:
+        blocked_reasons.add("mutation_fixture_or_allow_mutations_required")
+    if skill.get("requires_two_identities_for_confirmation") and len(identities) < 3:
+        blocked_reasons.add("second_identity_required_for_confirmation")
     with requests.Session() as session:
         requests.packages.urllib3.disable_warnings()  # type: ignore[attr-defined]
         for ep in selected:
@@ -381,36 +533,38 @@ def _run_endpoint_skill(skill: dict[str, Any], endpoints: list[Endpoint], identi
                 break
             skill_id = str(skill.get("id") or "")
             active_identities = identities if skill.get("requires_authorization") else identities[:1]
-            if skill.get("requires_two_identities_for_confirmation") and len(identities) < 3:
-                return {"status": "skipped", "selected": len(selected), "attempts": attempts, "blocked_reason": "second_identity_required", "findings": []}
             for identity in active_identities:
-                if identity.key == "anonymous" and skill.get("requires_authorization"):
-                    continue
                 if attempts >= max_requests:
                     break
                 if skill_id == "skill.api.cors_misconfiguration":
                     attempts += 1
                     result = _request(session, "OPTIONS" if ep.method != "GET" else "GET", ep.url, identity, headers={"Origin": "https://attacker.example"}, timeout=timeout)
+                    observations.append(_response_observation(skill, ep, identity, "OPTIONS" if ep.method != "GET" else "GET", result))
                     response = result.get("response")
                     if response is not None:
                         acao = response.headers.get("access-control-allow-origin", "")
                         acac = response.headers.get("access-control-allow-credentials", "")
                         if acao == "*" and str(acac).lower() == "true" or acao == "https://attacker.example":
-                            findings.append(_finding(skill, ep.url, f"CORS permissivo: ACAO={acao!r}, ACAC={acac!r}.", identity.key, evidence_extra={"method": ep.method, "http_status": response.status_code}))
+                            extra = _response_evidence(result, "OPTIONS" if ep.method != "GET" else "GET")
+                            extra.update({"access_control_allow_origin": acao, "access_control_allow_credentials": acac})
+                            findings.append(_finding(skill, ep.url, f"CORS permissivo: ACAO={acao!r}, ACAC={acac!r}.", identity.key, evidence_extra=extra))
                     continue
                 if skill_id == "skill.api.graphql_security":
                     attempts += 1
                     result = _request(session, "POST", ep.url, identity, json_body={"query": "query{__schema{queryType{name}}}"}, timeout=timeout)
+                    observations.append(_response_observation(skill, ep, identity, "POST", result))
                     response = result.get("response")
                     if response is not None and response.status_code == 200 and "__schema" in (response.text or "")[:8000]:
-                        findings.append(_finding(skill, ep.url, "Introspection GraphQL habilitada e retornando schema.", identity.key, verification_status="confirmed", evidence_extra={"method": "POST", "http_status": 200}))
+                        findings.append(_finding(skill, ep.url, "Introspection GraphQL habilitada e retornando schema.", identity.key, verification_status="confirmed", evidence_extra=_response_evidence(result, "POST")))
                     continue
                 if skill_id == "skill.api.rate_limit_resource_consumption":
                     codes = []
                     header_names: set[str] = set()
                     for _ in range(int(skill.get("max_repeated_requests") or 3)):
+                        method = _probe_method(skill, ep)
                         attempts += 1
-                        result = _request(session, ep.method if ep.method in READ_METHODS else "GET", ep.url, identity, timeout=timeout)
+                        result = _request(session, method, ep.url, identity, timeout=timeout)
+                        observations.append(_response_observation(skill, ep, identity, method, result))
                         response = result.get("response")
                         if response is not None:
                             codes.append(response.status_code)
@@ -418,13 +572,20 @@ def _run_endpoint_skill(skill: dict[str, Any], endpoints: list[Endpoint], identi
                     if len(codes) >= 3 and all(code < 400 for code in codes) and not header_names.intersection(RATE_LIMIT_HEADERS):
                         findings.append(_finding(skill, ep.url, f"{len(codes)} requisições repetidas sem headers de rate limit; códigos={codes}.", identity.key, severity="medium"))
                     continue
+                method = _probe_method(skill, ep)
                 attempts += 1
-                baseline = _request(session, ep.method if ep.method in READ_METHODS else "GET", ep.url, identity, timeout=timeout)
+                baseline = _request(session, method, ep.url, identity, timeout=timeout)
+                observations.append(_response_observation(skill, ep, identity, method, baseline))
                 response = baseline.get("response")
                 body = response.text if response is not None else ""
                 status_code = int(response.status_code) if response is not None else 0
+                if identity.key == "anonymous" and skill.get("requires_authorization"):
+                    exposure = _anonymous_exposure_finding(skill, ep, baseline, method)
+                    if exposure:
+                        findings.append(exposure)
+                    continue
                 if skill_id == "skill.api.broken_authentication" and response is not None and status_code == 200 and any(token in ep.url.lower() for token in ("/me", "profile", "account", "userinfo")):
-                    findings.append(_finding(skill, ep.url, "Endpoint sensível retornou 200 sem autenticação.", identity.key, evidence_extra={"method": ep.method, "http_status": status_code}))
+                    findings.append(_finding(skill, ep.url, "Endpoint sensível retornou 200 sem autenticação.", identity.key, evidence_extra=_response_evidence(baseline, method)))
                 elif skill_id in {"skill.api.sensitive_data_exposure", "skill.api.bopla"} and response is not None and status_code == 200:
                     fields: set[str] = set()
                     try:
@@ -433,40 +594,59 @@ def _run_endpoint_skill(skill: dict[str, Any], endpoints: list[Endpoint], identi
                         fields = set()
                     sensitive_fields = sorted(field for field in fields if SENSITIVE_RE.search(field))
                     if sensitive_fields:
-                        findings.append(_finding(skill, ep.url, f"Resposta expõe campos sensíveis: {', '.join(sensitive_fields[:12])}.", identity.key, verification_status="confirmed", evidence_extra={"method": ep.method, "http_status": status_code, "sensitive_fields": sensitive_fields[:30]}))
+                        extra = _response_evidence(baseline, method)
+                        extra.update({"sensitive_fields": sensitive_fields[:30]})
+                        findings.append(_finding(skill, ep.url, f"Resposta expõe campos sensíveis: {', '.join(sensitive_fields[:12])}.", identity.key, verification_status="confirmed", evidence_extra=extra))
                     elif SENSITIVE_RE.search(body[:8000]):
-                        findings.append(_finding(skill, ep.url, "Resposta contém padrão sensível ou stack trace.", identity.key, verification_status="candidate", evidence_extra={"method": ep.method, "http_status": status_code}))
+                        findings.append(_finding(skill, ep.url, "Resposta contém padrão sensível ou stack trace.", identity.key, verification_status="candidate", evidence_extra=_response_evidence(baseline, method)))
                 elif skill_id in {"skill.api.sql_injection", "skill.api.command_injection", "skill.api.ssrf"} and response is not None and ep.parameters:
                     payload = str((skill.get("payloads") or ["'"])[0])
                     mutated = _replace_first_query_value(ep.url, payload)
                     if mutated:
                         attempts += 1
                         probe = _request(session, "GET", mutated, identity, timeout=timeout)
+                        observations.append(_response_observation(skill, ep, identity, "GET", probe))
                         probe_response = probe.get("response")
                         probe_body = probe_response.text if probe_response is not None else ""
                         if skill_id == "skill.api.sql_injection" and SQL_ERROR_RE.search(probe_body[:8000]):
-                            findings.append(_finding(skill, ep.url, "Payload SQL benigno disparou erro de banco na resposta.", identity.key, verification_status="confirmed", evidence_extra={"method": "GET", "payload": payload}))
+                            extra = _response_evidence(probe, "GET")
+                            extra.update({"payload": payload})
+                            findings.append(_finding(skill, ep.url, "Payload SQL benigno disparou erro de banco na resposta.", identity.key, verification_status="confirmed", evidence_extra=extra))
                         elif skill_id == "skill.api.command_injection" and SHELL_ERROR_RE.search(probe_body[:8000]):
-                            findings.append(_finding(skill, ep.url, "Separador de comando gerou erro de shell/comando.", identity.key, verification_status="confirmed", evidence_extra={"method": "GET", "payload": payload}))
+                            extra = _response_evidence(probe, "GET")
+                            extra.update({"payload": payload})
+                            findings.append(_finding(skill, ep.url, "Separador de comando gerou erro de shell/comando.", identity.key, verification_status="confirmed", evidence_extra=extra))
                         elif skill_id == "skill.api.ssrf" and probe_response is not None and probe_response.status_code < 400 and any(token in probe_body.lower() for token in ("fetch", "connect", "resolve", "callback", "webhook")):
-                            findings.append(_finding(skill, ep.url, "Parâmetro de URL aceitou payload externo sem rejeição explícita.", identity.key, evidence_extra={"method": "GET", "payload": payload}))
+                            extra = _response_evidence(probe, "GET")
+                            extra.update({"payload": payload})
+                            findings.append(_finding(skill, ep.url, "Parâmetro de URL aceitou payload externo sem rejeição explícita.", identity.key, evidence_extra=extra))
                 elif skill_id == "skill.api.nosql_injection" and response is not None and ep.parameters:
                     mutated = _replace_first_query_value(ep.url, "1", str((skill.get("payloads") or ["[$ne]"])[0]))
                     if mutated:
                         attempts += 1
                         probe = _request(session, "GET", mutated, identity, timeout=timeout)
+                        observations.append(_response_observation(skill, ep, identity, "GET", probe))
                         probe_response = probe.get("response")
                         probe_body = probe_response.text if probe_response is not None else ""
                         if NOSQL_ERROR_RE.search(probe_body[:8000]):
-                            findings.append(_finding(skill, ep.url, "Operador NoSQL benigno disparou erro de parser/query.", identity.key, verification_status="confirmed", evidence_extra={"method": "GET", "payload": mutated}))
+                            extra = _response_evidence(probe, "GET")
+                            extra.update({"payload": mutated})
+                            findings.append(_finding(skill, ep.url, "Operador NoSQL benigno disparou erro de parser/query.", identity.key, verification_status="confirmed", evidence_extra=extra))
                 elif skill_id in {"skill.api.bfla_privilege_escalation", "skill.api.file_upload_content_handling", "skill.api.xxe_xml_parser", "skill.api.mass_assignment", "skill.api.business_logic_abuse", "skill.api.replay_idempotency"} and response is not None:
                     if status_code in {200, 204} and any(token in ep.url.lower() for token in ("admin", "internal", "upload", "xml", "soap", "approve", "payment", "role")):
-                        findings.append(_finding(skill, ep.url, f"Superfície sensível respondeu HTTP {status_code}; requer fixture/identidade para confirmação.", identity.key, verification_status="candidate", evidence_extra={"method": ep.method, "http_status": status_code}))
+                        findings.append(_finding(skill, ep.url, f"Superfície sensível respondeu HTTP {status_code}; requer fixture/identidade para confirmação.", identity.key, verification_status="candidate", evidence_extra=_response_evidence(baseline, method)))
                 elif skill_id == "skill.api.oauth_oidc_security" and response is not None:
                     text = body[:12000].lower()
                     if status_code == 200 and ("openid" in text or "issuer" in text or "jwks_uri" in text) and ("pkce" not in text and "code_challenge" not in text):
-                        findings.append(_finding(skill, ep.url, "Metadado OAuth/OIDC não evidencia PKCE/code_challenge.", identity.key, evidence_extra={"method": ep.method, "http_status": status_code}))
-    return {"status": "completed", "selected": len(selected), "attempts": attempts, "findings": findings}
+                        findings.append(_finding(skill, ep.url, "Metadado OAuth/OIDC não evidencia PKCE/code_challenge.", identity.key, evidence_extra=_response_evidence(baseline, method)))
+    return {
+        "status": "completed",
+        "selected": len(selected),
+        "attempts": attempts,
+        "blocked_reason": ",".join(sorted(blocked_reasons)) or None,
+        "findings": findings,
+        "observations": observations,
+    }
 
 
 def _shadow_api_findings(skill: dict[str, Any], endpoints: list[Endpoint]) -> list[dict[str, Any]]:
@@ -501,6 +681,7 @@ def run_api_top20_for_scan(scan_id: int, target: str, *, api_skill_id: str | Non
         limits = dict(catalog.get("default_limits") or {})
         allow_mutations = bool(api_config.get("allow_mutations"))
         all_findings: list[dict[str, Any]] = []
+        all_observations: list[dict[str, Any]] = []
         skill_results: list[dict[str, Any]] = []
         if not endpoints:
             return {
@@ -517,6 +698,7 @@ def run_api_top20_for_scan(scan_id: int, target: str, *, api_skill_id: str | Non
             else:
                 result = _run_endpoint_skill(skill, endpoints, identities, limits, allow_mutations)
             all_findings.extend(result.get("findings") or [])
+            all_observations.extend(result.get("observations") or [])
             skill_results.append({
                 "skill_id": skill.get("id"),
                 "name": skill.get("name"),
@@ -540,6 +722,12 @@ def run_api_top20_for_scan(scan_id: int, target: str, *, api_skill_id: str | Non
             "allow_mutations": allow_mutations,
             "skill_results": skill_results,
             "finding_count": len(all_findings),
+            "response_observation_count": len(all_observations),
+            "response_observations": all_observations[:300],
+            "anonymous_exposure_candidates": len([
+                finding for finding in all_findings
+                if dict(finding.get("details") or {}).get("anonymous_access") is True
+            ]),
             "duration_seconds": round(time.time() - started, 3),
         }
         return {

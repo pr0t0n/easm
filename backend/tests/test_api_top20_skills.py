@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
-from app.services.api_skill_top20_runner import Endpoint, _select_endpoints, load_api_top20_skills
+import app.services.api_skill_top20_runner as api_runner
+from app.services.api_skill_top20_runner import Endpoint, Identity, _canonical_endpoint_url, _run_endpoint_skill, _select_endpoints, load_api_top20_skills
 from app.services.offensive_operator_core import PHASE_CONTRACTS
 from app.services.pentest_coverage_service import _work_item_matches_api_skill
 from app.services.scan_work_queue import work_item_applicability_decision
@@ -55,6 +56,125 @@ def test_api_top20_selector_uses_path_and_parameter_keywords():
     selected = _select_endpoints(bola, endpoints, 10)
 
     assert [endpoint.url for endpoint in selected] == ["https://api.example.test/api/users/123"]
+
+
+def test_api_top20_selector_allows_safe_head_or_options_probe_for_unsafe_surface():
+    catalog = load_api_top20_skills()
+    upload = next(skill for skill in catalog["skills"] if skill["id"] == "skill.api.file_upload_content_handling")
+    endpoints = [
+        Endpoint(
+            method="POST",
+            url="https://api.example.test/api/documents/upload",
+            normalized_url="https://api.example.test/api/documents/upload",
+            parameters=[],
+            tags=["api"],
+            source_tool="api-spec",
+            documented=True,
+            metadata={},
+        )
+    ]
+
+    selected = _select_endpoints(upload, endpoints, 10)
+
+    assert [endpoint.url for endpoint in selected] == ["https://api.example.test/api/documents/upload"]
+
+
+def test_api_top20_reanchors_reused_inventory_to_current_target_scheme():
+    url = _canonical_endpoint_url(
+        "http://api.example.test/api/users/123",
+        "https://api.example.test",
+    )
+
+    assert url == "https://api.example.test/api/users/123"
+
+
+class FakeResponse:
+    def __init__(self, status_code=200, text='{"ok":true}', headers=None, json_value=None):
+        self.status_code = status_code
+        self.text = text
+        self.headers = headers or {"content-type": "application/json"}
+        self._json_value = json_value if json_value is not None else {"ok": True}
+
+    def json(self):
+        return self._json_value
+
+
+class FakeSession:
+    def __init__(self, response):
+        self.response = response
+        self.requests = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def request(self, method, url, **kwargs):
+        self.requests.append((method, url, kwargs))
+        return self.response
+
+
+def test_api_top20_auth_skill_tests_anonymous_exposure_without_credentials(monkeypatch):
+    catalog = load_api_top20_skills()
+    bfla = next(skill for skill in catalog["skills"] if skill["id"] == "skill.api.bfla_privilege_escalation")
+    fake_session = FakeSession(FakeResponse(status_code=200))
+    monkeypatch.setattr(api_runner.requests, "Session", lambda: fake_session)
+    endpoint = Endpoint(
+        method="GET",
+        url="https://api.example.test/api/admin/users",
+        normalized_url="https://api.example.test/api/admin/users",
+        parameters=[],
+        tags=["api"],
+        source_tool="api-spec",
+        documented=True,
+        metadata={},
+    )
+
+    result = _run_endpoint_skill(
+        bfla,
+        [endpoint],
+        [Identity(key="anonymous", role="", headers={}, cookies={})],
+        {"max_endpoints_per_skill": 10, "max_requests_per_skill": 10, "timeout_seconds": 1},
+        True,
+    )
+
+    assert result["status"] == "completed"
+    assert result["attempts"] == 1
+    assert len(result["findings"]) == 1
+    details = result["findings"][0]["details"]
+    assert details["anonymous_access"] is True
+    assert details["http_status"] == 200
+    assert details["response_fingerprint"]["body_sha256"]
+    assert result["observations"][0]["http_status"] == 200
+
+
+def test_api_top20_bola_without_second_identity_still_creates_anonymous_candidate(monkeypatch):
+    catalog = load_api_top20_skills()
+    bola = next(skill for skill in catalog["skills"] if skill["id"] == "skill.api.bola_idor")
+    monkeypatch.setattr(api_runner.requests, "Session", lambda: FakeSession(FakeResponse(status_code=200)))
+    endpoint = Endpoint(
+        method="GET",
+        url="https://api.example.test/api/users/123",
+        normalized_url="https://api.example.test/api/users/{id}",
+        parameters=[],
+        tags=["api"],
+        source_tool="api-spec",
+        documented=True,
+        metadata={},
+    )
+
+    result = _run_endpoint_skill(
+        bola,
+        [endpoint],
+        [Identity(key="anonymous", role="", headers={}, cookies={})],
+        {"max_endpoints_per_skill": 10, "max_requests_per_skill": 10, "timeout_seconds": 1},
+        True,
+    )
+
+    assert result["blocked_reason"] == "second_identity_required_for_confirmation"
+    assert len(result["findings"]) == 1
+    assert result["findings"][0]["details"]["anonymous_access"] is True
 
 
 def test_api_top20_coverage_maps_specific_skill_to_test_class():

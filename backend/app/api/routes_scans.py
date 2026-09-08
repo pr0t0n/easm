@@ -3809,6 +3809,43 @@ def stop_scan(scan_id: int, db: Session = Depends(get_db), current_user: User = 
         except Exception:
             continue
 
+    active_statuses = ["dispatched", "running", "submitted"]
+    cancellable_statuses = ["queued", "retry", "blocked", "dispatched", "running", "submitted"]
+    active_by_resource = dict(
+        db.query(ScanWorkItem.resource_class, func.count(ScanWorkItem.id))
+        .filter(ScanWorkItem.scan_job_id == scan_id, ScanWorkItem.status.in_(active_statuses))
+        .group_by(ScanWorkItem.resource_class)
+        .all()
+    )
+    active_item_ids = [
+        int(row[0])
+        for row in db.query(ScanWorkItem.id)
+        .filter(ScanWorkItem.scan_job_id == scan_id, ScanWorkItem.status.in_(active_statuses))
+        .all()
+    ]
+    work_items_cancelled = (
+        db.query(ScanWorkItem)
+        .filter(ScanWorkItem.scan_job_id == scan_id, ScanWorkItem.status.in_(cancellable_statuses))
+        .update(
+            {
+                "status": "cancelled",
+                "lease_until": None,
+                "finished_at": datetime.now(),
+                "updated_at": datetime.now(),
+                "last_error": "scan_stopped",
+            },
+            synchronize_session=False,
+        )
+    )
+    try:
+        from app.services.scan_work_queue import clear_work_item_execute_locks, kali_inflight_release
+
+        clear_work_item_execute_locks(active_item_ids)
+        for resource_class, count in active_by_resource.items():
+            kali_inflight_release(str(resource_class or "light"), int(count or 0))
+    except Exception:
+        pass
+
     _clear_scan_worker_heartbeat(db, scan_id)
     state = dict(job.state_data or {})
     state["execution_epoch"] = int(state.get("execution_epoch") or 0) + 1
@@ -3855,7 +3892,8 @@ def stop_scan(scan_id: int, db: Session = Depends(get_db), current_user: User = 
             message=(
                 f"Scan interrompido manualmente "
                 f"(task_ids={task_ids or ['nao_encontrada']}, kali_runner_cancel={runner_cancel}, "
-                f"findings_removidos={findings_deleted})"
+                f"findings_removidos={findings_deleted}, work_items_cancelados={work_items_cancelled}, "
+                f"slots_liberados={dict(active_by_resource)})"
             ),
         )
     )
@@ -3869,6 +3907,8 @@ def stop_scan(scan_id: int, db: Session = Depends(get_db), current_user: User = 
             "task_ids": task_ids,
             "kali_runner_cancel": runner_cancel,
             "findings_deleted": findings_deleted,
+            "work_items_cancelled": work_items_cancelled,
+            "released_capacity": dict(active_by_resource),
         },
     )
     db.commit()
@@ -3878,6 +3918,8 @@ def stop_scan(scan_id: int, db: Session = Depends(get_db), current_user: User = 
         "revoked_task_ids": task_ids,
         "kali_runner_cancel": runner_cancel,
         "findings_deleted": findings_deleted,
+        "work_items_cancelled": work_items_cancelled,
+        "released_capacity": dict(active_by_resource),
     }
 
 
