@@ -173,6 +173,33 @@ def test_execute_tool_with_workers_routes_api_top20_with_mcp_adapter_contract():
     assert result["mcp_adapter_contract"]["mcp_request_id"] == "wi-200"
 
 
+def test_execute_tool_with_workers_does_not_filter_api_top20_with_discovery_skill():
+    fake_result = {
+        "status": "success",
+        "exit_code": 0,
+        "findings_extracted": [],
+        "parsed_result": {"skills_total": 20},
+        "execution_path": "mcp_to_backend_api_skill",
+        "mcp_used": True,
+    }
+
+    with patch("app.services.worker_dispatcher._resolve_auth_context", return_value={}), \
+         patch("app.services.worker_dispatcher._persist_result_artifact"), \
+         patch("app.services.worker_dispatcher.mcp_client.tool_available_sync", return_value=True), \
+         patch("app.services.worker_dispatcher.mcp_client.execute_kali_tool_sync", return_value=dict(fake_result)) as mock_mcp:
+        result = execute_tool_with_workers(
+            "api-skill-top20",
+            "https://api.example.com",
+            scan_id=27,
+            skill_id="skill.discovery.parameter_discovery",
+            skill_contract={},
+        )
+
+    skill_context = mock_mcp.call_args.kwargs["skill_context"]
+    assert skill_context["skill_id"] == ""
+    assert result["parsed_result"]["skills_total"] == 20
+
+
 def test_execute_tool_with_workers_blocks_phase_control_tool_without_scan_id():
     with patch("app.services.worker_dispatcher._resolve_auth_context", return_value={}):
         result = execute_tool_with_workers("report-snapshot-builder", "https://valid.com", scan_id=None)

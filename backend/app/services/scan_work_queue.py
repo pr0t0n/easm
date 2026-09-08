@@ -813,11 +813,12 @@ def _seed_api_top20_skill_work_items(
     source: str,
 ) -> tuple[int, int, int]:
     api_config = dict(state.get("api_scan_config") or {})
-    if not api_config.get("enabled"):
-        return 0, 0, 0
     target = _api_scan_base_target(job, state, clean_targets)
     if not target:
         return 0, 0, 1
+    evidence = _tool_evidence_decision("api-skill-top20", target, state)
+    if not evidence.get("present"):
+        return 0, 0, 0
     target_host = str(urlparse(target).hostname or "").strip().lower()
     if authorized_scope and not is_host_in_scope(target_host, authorized_scope):
         return 0, 0, 1
@@ -849,7 +850,7 @@ def _seed_api_top20_skill_work_items(
         metadata = apply_phase_tool_metadata({
             "source": source,
             "engine": "api_skill_top20_orchestrator",
-            "api_scan_config": api_config,
+            "api_scan_config": {**api_config, "enabled": bool(api_config.get("enabled") or evidence.get("present"))},
             "api_skill_id": skill_id,
             "api_skill_name": skill.get("name"),
             "api_skill_priority": skill.get("priority"),
@@ -1806,6 +1807,17 @@ def _tool_evidence_decision(tool_name: str, target: str, state: dict[str, Any]) 
             for key in ("openapi_urls", "swagger_urls", "api_specs", "openapi_specs")
             if _state_value_present_for_target((state or {}).get(key), target)
         ]
+        matched_api_keys.extend(
+            key
+            for key in (
+                "discovered_endpoints",
+                "internal_discovered_endpoints",
+                "endpoint_test_targets",
+                "parameterized_endpoints",
+                "object_reference_endpoints",
+            )
+            if _state_value_present_for_target((state or {}).get(key), target)
+        )
         if any(_state_value_present_for_target(candidate, target) for candidate in spec_candidates):
             matched_api_keys.append("api_scan_config.spec_url")
         try:
@@ -1822,13 +1834,13 @@ def _tool_evidence_decision(tool_name: str, target: str, state: dict[str, Any]) 
                 "missing_keys": [],
                 "reason": f"required_evidence_present:{','.join(dict.fromkeys(matched_api_keys))}",
             }
-        if tool == "api-skill-top20" and bool(api_config.get("enabled")):
+        if tool == "api-skill-top20":
             return {
                 "required": True,
                 "present": False,
                 "matched_keys": [],
-                "missing_keys": ["api_scan_config.spec_url", "api_scan_config.ingestion"],
-                "reason": "required_evidence_absent:api_scan_config.spec_url,api_scan_config.ingestion",
+                "missing_keys": ["openapi_urls", "swagger_urls", "discovered_endpoints", "endpoint_test_targets"],
+                "reason": "required_evidence_absent:api_inventory",
             }
     clauses = TOOL_EVIDENCE_CONTRACTS.get(tool) or []
     if not clauses:

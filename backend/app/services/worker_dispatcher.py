@@ -65,6 +65,9 @@ def execute_tool_with_workers(
     backend-local because they do not execute external offensive tooling.
     """
     norm_tool = str(tool_name or "").strip().lower()
+    dispatch_skill_id = str(skill_id or "").strip()
+    if norm_tool == "api-skill-top20" and dispatch_skill_id and not dispatch_skill_id.startswith("skill.api."):
+        dispatch_skill_id = ""
     # Try to surface the current scan_id so evidence and auth context are filed
     # under the same scan, including backend-local tools.
     if scan_id is None:
@@ -340,7 +343,7 @@ def execute_tool_with_workers(
                 targets=targets or None,
                 scan_id=scan_id,
                 skill_context={
-                    "skill_id": skill_id,
+                    "skill_id": dispatch_skill_id,
                     "skill_contract": skill_contract or {},
                     "technique": technique or {},
                     "evidence_required": evidence_required or [],
@@ -361,7 +364,7 @@ def execute_tool_with_workers(
             scan_id=scan_id,
             scan_mode=scan_mode,
             skill_context={
-                "skill_id": skill_id,
+                "skill_id": dispatch_skill_id,
                 "skill_contract": skill_contract or {},
                 "technique": technique or {},
                 "evidence_required": evidence_required or [],

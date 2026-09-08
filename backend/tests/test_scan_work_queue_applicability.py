@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from app.services.endpoint_analysis_pipeline import build_parameterized_surface_state
 from app.services.scan_work_queue import (
     _seed_api_scan_work_item,
+    _seed_api_top20_skill_work_items,
     apply_phase_tool_metadata,
     requeue_evidence_ready_work_items,
     triage_post_p09_injection,
@@ -711,6 +712,55 @@ def test_api_scan_seed_creates_visible_zap_api_work_item() -> None:
     assert item.item_metadata["openapi_url"] == "https://api.example.test/openapi.json"
     assert item.item_metadata["api_observability"]["scanner"] == "OWASP ZAP"
     assert item.item_metadata["api_observability"]["ingested_endpoints"] == 146
+
+
+def test_api_top20_seed_uses_api_inventory_without_zap_config() -> None:
+    added = []
+
+    class Query:
+        def filter(self, *_args, **_kwargs):
+            return self
+
+        def first(self):
+            return None
+
+    class DB:
+        def query(self, *_args, **_kwargs):
+            return Query()
+
+        def add(self, obj):
+            added.append(obj)
+
+        def flush(self):
+            for index, obj in enumerate(added, start=1):
+                if getattr(obj, "id", None) is None:
+                    obj.id = index
+
+    job = SimpleNamespace(id=27, target_query="api.example.test", state_data={})
+    state = {
+        "discovered_endpoints": [
+            "https://api.example.test/api/users/123",
+            "https://api.example.test/api/admin/users",
+        ],
+    }
+
+    created, existing, skipped = _seed_api_top20_skill_work_items(
+        DB(),
+        job,
+        state,
+        ["api.example.test"],
+        ["api.example.test"],
+        source="unit",
+    )
+
+    work_items = [obj for obj in added if obj.__class__.__name__ == "ScanWorkItem"]
+    assert created == 20
+    assert existing == 0
+    assert skipped == 0
+    assert len(work_items) == 20
+    assert all(item.tool_name == "api-skill-top20" for item in work_items)
+    assert all(item.item_metadata["skill_id"].startswith("skill.api.") for item in work_items)
+    assert any(item.item_metadata["api_skill_id"] == "skill.api.bola_idor" for item in work_items)
 
 
 def test_post_p09_triage_keeps_high_cost_tool_when_direct_evidence_exists() -> None:
