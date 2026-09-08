@@ -177,7 +177,7 @@ Attempt 1: `naabu` at rate=1000
 
 Attempt 2 (on timeout/filtered):
 - Reduce rate to 200
-- Try `nmap -p- -T3` as fallback
+- Try `nmap --top-ports 200 -T3` as fallback
 - Log: "naabu_timeout, rate_reduced, fallback=nmap"
 
 # Chaining Opportunities
