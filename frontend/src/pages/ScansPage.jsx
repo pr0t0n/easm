@@ -866,6 +866,8 @@ function QualityPanel({ quality, scan }) {
   const gateRuntime = runtime.quality_gate || {};
   const p21 = runtime.p21_validation || {};
   const agentRuntime = runtime.agent_runtime || {};
+  const skillActivity = quality.skill_activity || {};
+  const surfaceEvidence = quality.surface_evidence || {};
   const gateActions = Array.isArray(gateRuntime.last_actions) ? gateRuntime.last_actions : [];
   const gateHistory = Array.isArray(gateRuntime.history) ? gateRuntime.history : [];
   const fallbackItems = Array.isArray(gateRuntime.fallback_items) ? gateRuntime.fallback_items : [];
@@ -998,6 +1000,22 @@ function QualityPanel({ quality, scan }) {
           <div style={{ fontSize: 11, color: "var(--ink-muted)", marginTop: 2 }}>
             {agentRuntime.mcp_contract_count || 0} MCP · {agentRuntime.agent_success_count || 0} agentes · {agentRuntime.llm_fallback_count || 0} fallback
           </div>
+        </div>
+      </div>
+
+      <div style={{ border: "1px solid var(--line-soft)", borderRadius: 8, padding: "9px 10px", marginBottom: 10, background: "var(--surface-soft)" }}>
+        <div style={{ fontSize: 11, fontWeight: 800, color: "var(--ink-soft)", marginBottom: 7 }}>Profundidade surface-to-evidence</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 6, fontSize: 11, color: "var(--ink-muted)" }}>
+          <div><span style={{ display: "block", color: "var(--ink-soft)" }}>Skills consultadas</span><strong className="sk-mono" style={{ color: "var(--ink)" }}>{skillActivity.consulted || 0}</strong></div>
+          <div><span style={{ display: "block", color: "var(--ink-soft)" }}>Atividades</span><strong className="sk-mono" style={{ color: "var(--ink)" }}>{skillActivity.activities_planned || 0}</strong></div>
+          <div><span style={{ display: "block", color: "var(--ink-soft)" }}>Com evidência</span><strong className="sk-mono" style={{ color: "var(--ink)" }}>{skillActivity.activities_with_evidence || 0}</strong></div>
+          <div><span style={{ display: "block", color: "var(--ink-soft)" }}>Validadas</span><strong className="sk-mono" style={{ color: "var(--ink)" }}>{skillActivity.activities_validated || 0}</strong></div>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 6, marginTop: 8, fontSize: 11, color: "var(--ink-muted)" }}>
+          <div>Endpoints: <strong style={{ color: "var(--ink)" }}>{surfaceEvidence.executed_endpoints || 0}/{surfaceEvidence.endpoints || 0}</strong></div>
+          <div>Métodos: <strong style={{ color: "var(--ink)" }}>{Object.keys(surfaceEvidence.endpoint_methods || {}).length}</strong></div>
+          <div>Headers: <strong style={{ color: "var(--ink)" }}>{surfaceEvidence.routes_with_headers || 0}/{surfaceEvidence.endpoints || 0}</strong></div>
+          <div>JS analisado: <strong style={{ color: "var(--ink)" }}>{surfaceEvidence.js_analyzed || 0}/{surfaceEvidence.js_assets || 0}</strong></div>
         </div>
       </div>
 

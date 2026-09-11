@@ -228,6 +228,7 @@ TOOL_TO_PROFILE: dict[str, str] = {
     "zap-ajax": "zap_ajax_spider",    # AJAX spider for SPAs
     "zap-active": "zap_active_scan",  # full active scan (OWASP Top 10)
     "zap-api": "zap_api_scan",        # OpenAPI/Swagger-driven scan
+    "api-skill-top20": "api_skill_top20",
     "shodan-cli": "shodan_lookup",
     "theharvester": "theharvester_passive",
     "h8mail": "h8mail_breach",
@@ -484,6 +485,12 @@ def execute_via_kali(
         body = post.json()
         job_id = body["job_id"]
     except Exception as exc:  # noqa: BLE001
+        if 'post' in locals() and getattr(post, "status_code", 0) == 400:
+            try:
+                detail = post.text[:2000]
+            except Exception:
+                detail = ""
+            exc = RuntimeError(f"runner_http_400 detail={detail}")
         logger.warning("kali_runner enqueue failed: %s", exc)
         return _kali_failure(tool_name, target, scan_mode, f"enqueue_error: {exc}")
 

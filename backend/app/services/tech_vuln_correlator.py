@@ -474,9 +474,6 @@ TECH_ATTACK_PROFILES: dict[str, list[dict]] = {
         {"tool": "nuclei-cve-2020-1938", "phase": "P09", "priority_boost": -12},
         {"tool": "nuclei-cve-2017-12617", "phase": "P09", "priority_boost": -12},
     ],
-    "iis": [
-        {"tool": "nuclei-iis",         "phase": "P09", "priority_boost": -8},
-    ],
     "exchange": [
         {"tool": "nuclei-exchange",    "phase": "P09", "priority_boost": -12},
         {"tool": "nuclei-cve-2021-26855", "phase": "P09", "priority_boost": -15},

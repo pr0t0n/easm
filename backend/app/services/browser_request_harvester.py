@@ -27,8 +27,11 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import ssl
+from html.parser import HTMLParser
 from typing import Any
-from urllib.parse import parse_qsl
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse
+from urllib.request import HTTPSHandler, Request, build_opener
 
 from sqlalchemy.orm import Session
 
@@ -205,6 +208,106 @@ def _resolve_identity_headers(db: Session, scan: ScanJob, identity_key: str) -> 
     return headers
 
 
+def _field_value(field_name: str, input_type: str) -> str:
+    name = (field_name or "").lower()
+    if input_type == "password" or any(token in name for token in ("pass", "senha", "pwd")):
+        return "PentestInvalid!9z"
+    if any(token in name for token in ("user", "login", "email", "mail", "usuario")):
+        return "pentest.invalid@example.invalid"
+    return "pentest-probe"
+
+
+def _submit_public_forms(page: Any, target: str) -> int:
+    submitted = 0
+    try:
+        forms = page.locator("form")
+        count = min(forms.count(), 10)
+    except Exception:
+        return 0
+    for index in range(count):
+        try:
+            form = forms.nth(index)
+            password_count = form.locator('input[type="password"]').count()
+            if password_count < 1:
+                continue
+            action = str(form.get_attribute("action") or target)
+            if action.startswith("/"):
+                action = urljoin(target, action)
+            if not action.startswith(("http://", "https://")):
+                continue
+            if urlparse(action).hostname != urlparse(target).hostname:
+                continue
+            inputs = form.locator("input,textarea")
+            for field_index in range(min(inputs.count(), 30)):
+                field = inputs.nth(field_index)
+                input_type = str(field.get_attribute("type") or "text").lower()
+                if input_type in {"hidden", "submit", "button", "checkbox", "radio", "file"}:
+                    continue
+                name = str(field.get_attribute("name") or field.get_attribute("id") or "")
+                if not name:
+                    continue
+                field.fill(_field_value(name, input_type))
+            form.locator('input[type="submit"],button[type="submit"],button').first.click(timeout=5000)
+            submitted += 1
+        except Exception:
+            continue
+    return submitted
+
+
+class _FormParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.action = ""
+        self.method = "GET"
+        self.fields: list[tuple[str, str, str]] = []
+        self.in_form = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        values = {key.lower(): value or "" for key, value in attrs}
+        if tag.lower() == "form" and not self.in_form:
+            self.in_form = True
+            self.action = values.get("action", "")
+            self.method = values.get("method", "GET").upper()
+        elif self.in_form and tag.lower() in {"input", "textarea"}:
+            name = values.get("name") or values.get("id")
+            if name:
+                self.fields.append((name, values.get("value", ""), values.get("type", "text").lower()))
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() == "form" and self.in_form:
+            self.in_form = False
+
+
+def _fallback_form_capture(target: str) -> list[dict[str, Any]]:
+    context = ssl._create_unverified_context()
+    opener = build_opener(HTTPSHandler(context=context))
+    request = Request(target, headers={"User-Agent": "ScriptKidd.o browser-request-harvester"})
+    with opener.open(request, timeout=30) as response:
+        html = response.read(200_000).decode("utf-8", "replace")
+        headers = {str(key): str(value) for key, value in response.headers.items()}
+        status = int(response.status)
+    parser = _FormParser()
+    parser.feed(html)
+    if not any(input_type == "password" for _, _, input_type in parser.fields):
+        return []
+    action = urljoin(target, parser.action or target)
+    if urlparse(action).hostname != urlparse(target).hostname:
+        return []
+    values = []
+    for name, value, input_type in parser.fields:
+        values.append((name, _field_value(name, input_type) if input_type != "hidden" else value))
+    body = urlencode(values).encode("utf-8")
+    post = Request(action, data=body, method="POST", headers={"Content-Type": "application/x-www-form-urlencoded", "User-Agent": "ScriptKidd.o browser-request-harvester"})
+    with opener.open(post, timeout=30) as response:
+        response_headers = {str(key): str(value) for key, value in response.headers.items()}
+        response_body = response.read(20_000).decode("utf-8", "replace")
+        post_status = int(response.status)
+    return [
+        {"method": "GET", "url": target, "request_headers": {}, "request_body_full": "", "request_content_type": "", "status_code": status, "response_content_type": headers.get("Content-Type", ""), "response_excerpt": html[:_MAX_BODY_CHARS]},
+        {"method": "POST", "url": action, "request_headers": {"Content-Type": "application/x-www-form-urlencoded"}, "request_body_full": body.decode("utf-8"), "request_content_type": "application/x-www-form-urlencoded", "status_code": post_status, "response_content_type": response_headers.get("Content-Type", ""), "response_excerpt": response_body[:_MAX_BODY_CHARS]},
+    ]
+
+
 def harvest_target(
     db: Session,
     scan: ScanJob,
@@ -227,6 +330,7 @@ def harvest_target(
     extra_headers = _resolve_identity_headers(db, scan, identity_key)
     captured: list[dict[str, Any]] = []
     storage_snapshot: dict[str, Any] = {}
+    forms_submitted = 0
 
     try:
         with sync_playwright() as p:
@@ -242,6 +346,12 @@ def harvest_target(
                     page.goto(target, wait_until="networkidle", timeout=max_wait_seconds * 1000)
                 except Exception:
                     pass  # partial capture from whatever fired before the timeout is still useful
+                forms_submitted = _submit_public_forms(page, target)
+                if forms_submitted:
+                    try:
+                        page.wait_for_load_state("networkidle", timeout=min(max_wait_seconds * 1000, 15000))
+                    except Exception:
+                        pass
 
                 try:
                     cookies = context.cookies()
@@ -259,6 +369,12 @@ def harvest_target(
     except Exception as exc:  # noqa: BLE001
         logger.warning("browser_request_harvester failed target=%s error=%s", target, exc)
         return {"status": "error", "reason": f"harvest_failed: {exc}"}
+
+    if not forms_submitted and not any(str(entry.get("method")) == "POST" for entry in captured):
+        try:
+            captured.extend(_fallback_form_capture(target))
+        except Exception as exc:
+            logger.info("browser_request_harvester fallback_failed target=%s error=%s", target, exc)
 
     inv = OffensiveInventoryService(db, scan)
     persisted = 0
@@ -283,5 +399,6 @@ def harvest_target(
         "target": target,
         "requests_captured": len(captured),
         "requests_persisted": persisted,
+        "forms_submitted": forms_submitted,
         "storage": storage_snapshot,
     }

@@ -37,6 +37,13 @@ IMPACT = {
     "api_security": 68, "api_graphql": 68, "api_spec_exposure": 58,
     "information_disclosure": 50,
 }
+LEARNING_FAMILY_ALIASES = {
+    "xss_sqli": ("xss", "sqli", "sql_injection"),
+    "lfi_ssti_path_traversal": ("lfi", "ssti", "path_traversal"),
+    "ssrf_open_redirect": ("ssrf", "open_redirect"),
+    "idor_bola": ("idor", "bola", "broken_access_control"),
+    "bfla_authz": ("bfla", "auth_bypass", "authorization"),
+}
 COST = {
     "rce": 90, "business_logic_mass_assignment": 80, "idor_bola": 65,
     "object_reference": 65, "cross_tenant_object_access": 60, "bfla_authz": 55,
@@ -76,6 +83,7 @@ def score_hypothesis(
     job: ScanJob,
     hypothesis: OffensiveHypothesis,
     calibration: dict[str, dict[str, Any]] | None = None,
+    learning_calibration: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     h_type = str(hypothesis.hypothesis_type or "").lower()
     confidence = max(0.0, min(100.0, float(hypothesis.confidence or 0)))
@@ -85,6 +93,18 @@ def score_hypothesis(
     requires_identities = bool(hypothesis.required_identities)
     crown = _crown_jewel_match(job, hypothesis)
     historical = dict((calibration or {}).get(h_type) or {})
+    learned = dict((learning_calibration or {}).get(h_type) or {})
+    if not learned:
+        for alias in LEARNING_FAMILY_ALIASES.get(h_type, (h_type,)):
+            candidate = dict((learning_calibration or {}).get(alias) or {})
+            if candidate and (not learned or int(candidate.get("attempts") or 0) > int(learned.get("attempts") or 0)):
+                learned = candidate
+    if learned:
+        historical = {
+            **historical,
+            "ema_precision": (float(historical.get("ema_precision", 0.5)) + float(learned.get("ema_precision", 0.5))) / 2,
+            "ema_success": (float(historical.get("ema_success", 0.5)) + float(learned.get("ema_success", 0.5))) / 2,
+        }
     precision = float(historical.get("ema_precision", 0.5))
     success = float(historical.get("ema_success", 0.5))
 
@@ -120,6 +140,7 @@ def plan_hypotheses(db: Session, job: ScanJob, *, limit: int | None = None) -> d
         .all()
     )
     calibration = calibration_map(db, job, "hypothesis")
+    learning_calibration = calibration_map(db, job, "hackerone_learning")
     groups: dict[str, list[OffensiveHypothesis]] = defaultdict(list)
     for row in rows:
         groups[hypothesis_cluster_key(row)].append(row)
@@ -128,7 +149,7 @@ def plan_hypotheses(db: Session, job: ScanJob, *, limit: int | None = None) -> d
     superseded = 0
     for cluster_key, grouped in groups.items():
         ranked = sorted(
-            ((score_hypothesis(job, row, calibration), row) for row in grouped),
+            ((score_hypothesis(job, row, calibration, learning_calibration), row) for row in grouped),
             key=lambda item: (-float(item[0]["score"]), -int(item[1].confidence or 0), int(item[1].id)),
         )
         leader_score, leader = ranked[0]

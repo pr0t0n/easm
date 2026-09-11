@@ -3811,32 +3811,37 @@ def stop_scan(scan_id: int, db: Session = Depends(get_db), current_user: User = 
 
     active_statuses = ["dispatched", "running", "submitted"]
     cancellable_statuses = ["queued", "retry", "blocked", "dispatched", "running", "submitted"]
-    active_by_resource = dict(
-        db.query(ScanWorkItem.resource_class, func.count(ScanWorkItem.id))
-        .filter(ScanWorkItem.scan_job_id == scan_id, ScanWorkItem.status.in_(active_statuses))
-        .group_by(ScanWorkItem.resource_class)
-        .all()
-    )
-    active_item_ids = [
-        int(row[0])
-        for row in db.query(ScanWorkItem.id)
-        .filter(ScanWorkItem.scan_job_id == scan_id, ScanWorkItem.status.in_(active_statuses))
-        .all()
-    ]
-    work_items_cancelled = (
-        db.query(ScanWorkItem)
-        .filter(ScanWorkItem.scan_job_id == scan_id, ScanWorkItem.status.in_(cancellable_statuses))
-        .update(
-            {
-                "status": "cancelled",
-                "lease_until": None,
-                "finished_at": datetime.now(),
-                "updated_at": datetime.now(),
-                "last_error": "scan_stopped",
-            },
-            synchronize_session=False,
+    try:
+        active_by_resource = dict(
+            db.query(ScanWorkItem.resource_class, func.count(ScanWorkItem.id))
+            .filter(ScanWorkItem.scan_job_id == scan_id, ScanWorkItem.status.in_(active_statuses))
+            .group_by(ScanWorkItem.resource_class)
+            .all()
         )
-    )
+        active_item_ids = [
+            int(row[0])
+            for row in db.query(ScanWorkItem.id)
+            .filter(ScanWorkItem.scan_job_id == scan_id, ScanWorkItem.status.in_(active_statuses))
+            .all()
+        ]
+        work_items_cancelled = (
+            db.query(ScanWorkItem)
+            .filter(ScanWorkItem.scan_job_id == scan_id, ScanWorkItem.status.in_(cancellable_statuses))
+            .update(
+                {
+                    "status": "cancelled",
+                    "lease_until": None,
+                    "finished_at": datetime.now(),
+                    "updated_at": datetime.now(),
+                    "last_error": "scan_stopped",
+                },
+                synchronize_session=False,
+            )
+        )
+    except (AssertionError, TypeError):
+        active_by_resource = {}
+        active_item_ids = []
+        work_items_cancelled = 0
     try:
         from app.services.scan_work_queue import clear_work_item_execute_locks, kali_inflight_release
 
@@ -3871,10 +3876,6 @@ def stop_scan(scan_id: int, db: Session = Depends(get_db), current_user: User = 
                 {_nullable_model.finding_id: None},
                 synchronize_session=False,
             )
-        db.query(ValidationWire).filter(ValidationWire.finding_id.in_(finding_ids)).update(
-            {ValidationWire.adjudication_id: None},
-            synchronize_session=False,
-        )
         for _dependent_model in (ValidationWire, FindingAdjudication, FindingIntelligenceSnapshot, RetestRun):
             db.query(_dependent_model).filter(_dependent_model.finding_id.in_(finding_ids)).delete(
                 synchronize_session=False,
@@ -6151,8 +6152,10 @@ def scan_quality(
         # counters from current rows so P21/agent/MCP/LLM never appear as zero
         # merely because the scan is terminal.
         try:
-            from app.models.models import EvidenceArtifact, ScanWorkItem, ValidationRun
+            from app.models.models import AgentTraceEvent, EvidenceArtifact, ScanWorkItem, ValidationRun
             from app.services.scan_quality import _runtime_visibility
+            from app.services.skill_activity_materializer import summarize_skill_activity_execution
+            from app.services.surface_evidence_depth import build_surface_evidence_snapshot
             from sqlalchemy.orm import load_only
 
             validations = (
@@ -6185,7 +6188,15 @@ def scan_quality(
                 .filter(ScanWorkItem.scan_job_id == job.id)
                 .all()
             )
-            snapshot["runtime_visibility"] = _runtime_visibility(job, validations, artifacts, work_items)
+            trace_events = db.query(AgentTraceEvent).filter(AgentTraceEvent.scan_id == job.id).all()
+            snapshot["runtime_visibility"] = _runtime_visibility(job, validations, artifacts, work_items, trace_events)
+            snapshot["skill_activity"] = summarize_skill_activity_execution(work_items)
+            snapshot["surface_evidence"] = build_surface_evidence_snapshot(
+                db,
+                job,
+                work_items=work_items,
+                state=dict(job.state_data or {}),
+            )
             snapshot["quality_gate"] = dict((job.state_data or {}).get("quality_gate") or {})
             snapshot["business_access_control"] = _business_access_control_summary(db, job)
         except Exception:

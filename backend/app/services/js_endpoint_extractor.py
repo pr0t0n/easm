@@ -23,8 +23,10 @@ from __future__ import annotations
 
 import logging
 import re
+import ssl
 from datetime import datetime
 from typing import Any
+from urllib.request import Request, build_opener, HTTPSHandler
 
 from sqlalchemy.orm import Session
 
@@ -170,6 +172,14 @@ def _extract_js_endpoints(js_content: str) -> list[str]:
             if ep and len(ep) > 3 and len(ep) < 300:
                 endpoints.add(ep)
     return sorted(endpoints)
+
+
+def _download_js_bundle(url: str) -> str:
+    context = ssl._create_unverified_context()
+    opener = build_opener(HTTPSHandler(context=context))
+    request = Request(url, headers={"User-Agent": "ScriptKidd.o js-analyzer"})
+    with opener.open(request, timeout=20) as response:
+        return response.read(2_000_000).decode("utf-8", "replace")
 
 
 def _try_ingest_exposed_spec(db: Session, scan_id: int, spec_url: str) -> None:
@@ -334,6 +344,13 @@ def process_crawl_result(
             for js_url in crawl_result.get("js_files") or []:
                 ep = inv.ingest_url(js_url, source_tool=tool_name, discovered_from=target)
                 inv.upsert_js_asset(js_url, endpoint=ep, source_tool=tool_name)
+                try:
+                    js_content = _download_js_bundle(js_url)
+                    for js_endpoint in _extract_js_endpoints(js_content):
+                        api_url = js_endpoint if js_endpoint.startswith("http") else js_url.rstrip("/").rsplit("/", 1)[0] + "/" + js_endpoint.lstrip("/")
+                        inv.ingest_url(api_url, source_tool="js-content-analysis", discovered_from=js_url, metadata={"js_endpoint": True})
+                except Exception as exc:
+                    logger.info("js_endpoint_extractor bundle_failed url=%s error=%s", js_url, exc)
             for path in crawl_result.get("api_paths") or []:
                 api_url = path if str(path).startswith("http") else target.rstrip("/") + "/" + str(path).lstrip("/")
                 inv.ingest_url(api_url, source_tool=tool_name, discovered_from=target, metadata={"api_path": path})

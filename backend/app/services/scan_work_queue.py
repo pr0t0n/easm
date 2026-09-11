@@ -824,6 +824,7 @@ def _seed_api_top20_skill_work_items(
         return 0, 0, 1
     try:
         from app.services.api_skill_top20_runner import load_api_top20_skills
+        from app.services.skill_activity_materializer import build_skill_activity_plan
 
         catalog = load_api_top20_skills()
         skills = [dict(item) for item in list(catalog.get("skills") or []) if isinstance(item, dict)]
@@ -835,6 +836,24 @@ def _seed_api_top20_skill_work_items(
             message=f"api_top20_catalog_unavailable error={exc!s}"[:2000],
         ))
         return 0, 0, 1
+    learning_playbook: dict[str, Any] = {}
+    try:
+        from app.services.vulnerability_learning_service import build_runtime_learning_playbook
+
+        learning_playbook = dict(build_runtime_learning_playbook(
+            candidate_tools=["api-skill-top20"],
+            phase="P16",
+            limit=20,
+            tech_stack=list(state.get("detected_tech_stack") or state.get("technologies") or []),
+        ) or {})
+    except Exception:
+        learning_playbook = {}
+    learning_techniques = [
+        dict(item) for item in list(learning_playbook.get("techniques") or []) if isinstance(item, dict)
+    ]
+    learning_sources = [
+        dict(item) for item in list(learning_playbook.get("sources") or []) if isinstance(item, dict)
+    ]
     created = 0
     existing = 0
     skipped = 0
@@ -863,7 +882,48 @@ def _seed_api_top20_skill_work_items(
             "skill_id": skill_id,
             "applicability": _tool_applicability_decision("P16", "api-skill-top20", target, state, at="enqueue"),
         }, "P16", "api-skill-top20", source=source, decision_source="api_top20_yaml_catalog")
+        activity_plan = build_skill_activity_plan(skill, phase_id="P16", target=target)
+        matching_techniques = [
+            item for item in learning_techniques
+            if not item.get("affected_skills")
+            or skill_id in {str(value) for value in item.get("affected_skills") or []}
+        ][:8]
+        matching_sources = [
+            item for item in learning_sources
+            if any(
+                str(value or "").lower() in json.dumps(technique, ensure_ascii=False).lower()
+                for technique in matching_techniques
+                for value in (item.get("title"), item.get("vulnerability_type"))
+            )
+        ][:8]
+        metadata["skill_activity_plan"] = activity_plan
+        metadata["skill_activity_contract"] = {
+            "version": "surface-to-evidence-v1",
+            "skill_id": skill_id,
+            "phase_id": "P16",
+            "surface_target": target,
+            "activity_ids": [str(item.get("activity_id")) for item in activity_plan],
+            "required_evidence": list(skill.get("evidence_required") or []),
+            "validator": str(skill.get("validator") or "independent-evidence-validator"),
+            "learning_sources": matching_sources,
+            "learning_techniques": matching_techniques,
+        }
+        metadata["learning_sources"] = matching_sources
+        metadata["learning_techniques"] = matching_techniques
+        metadata["skill_activity_execution"] = {
+            "consulted": True,
+            "selected": False,
+            "materialized": bool(activity_plan),
+            "activity_count": len(activity_plan),
+            "executed_count": 0,
+            "evidence_complete_count": 0,
+            "validated_count": 0,
+            "blocked_count": 0,
+            "activities": activity_plan,
+        }
         status = "queued" if metadata.get("applicability", {}).get("applicable") else "skipped"
+        metadata["skill_activity_execution"]["selected"] = status == "queued"
+        metadata["skill_activity_execution"]["learning_used"] = bool(matching_sources or matching_techniques)
         last_error = None if status == "queued" else f"skipped:applicability:{metadata.get('applicability', {}).get('reason') or 'not_applicable'}"
         applicability = dict(metadata.get("applicability") or {})
         consultations.append({
@@ -887,9 +947,9 @@ def _seed_api_top20_skill_work_items(
             "contract_required": True,
             "candidate_tools": ["api-skill-top20"],
             "recommended_tools": ["api-skill-top20"],
-            "learning_sources": [],
-            "learning_techniques": [],
-            "learning_used": False,
+            "learning_sources": matching_sources,
+            "learning_techniques": matching_techniques,
+            "learning_used": bool(matching_sources or matching_techniques),
             "reason": (
                 f"Skill {skill_id} consultada para P16; selecionada={status == 'queued'} "
                 "via catalogo API Top 20."
@@ -1005,6 +1065,7 @@ def _skill_consultations_for_phase(
 
     selected = [str(t) for t in selected_tools if str(t or "").strip()]
     learning_playbook = dict(learning_playbook or {})
+    from app.services.skill_activity_materializer import build_skill_activity_plan
 
     learning_tools = [str(t) for t in learning_playbook.get("recommended_tools") or [] if str(t)]
     learning_sources = list(learning_playbook.get("sources") or [])[:8]
@@ -1070,6 +1131,18 @@ def _skill_consultations_for_phase(
                 f"score={round(best_score, 4)} com ferramentas aplicáveis: {', '.join(applicable_tools) or 'nenhuma'}."
             ),
             "created_at": datetime.now().isoformat(),
+            "activity_plan": build_skill_activity_plan(
+                {
+                    "skill_id": skill_id,
+                    "name": skill_id,
+                    "objective": f"Executar objetivo {skill_id}",
+                    "evidence_required": [
+                        str(value) for value in list(learning_playbook.get("evidence_signals") or [])[:5] if str(value)
+                    ],
+                },
+                phase_id=phase_id,
+                target=target,
+            ),
         })
     return consultations
 
@@ -1109,6 +1182,27 @@ def _append_skill_consultations_to_state(
             payload=consultation,
             created_at=datetime.now(),
         ))
+        activity_plan = [
+            dict(item) for item in list(consultation.get("activity_plan") or []) if isinstance(item, dict)
+        ]
+        if activity_plan:
+            db.add(AgentTraceEvent(
+                scan_id=job.id,
+                event_type="skill_activity_materialized",
+                from_node="work_queue",
+                to_node="executor",
+                skill_id=str(consultation.get("skill_id") or "")[:120] or None,
+                tool_name=",".join(consultation.get("recommended_tools") or [])[:100] or None,
+                capability=str(consultation.get("phase_id") or "")[:100],
+                status="materialized",
+                payload={
+                    "consultation_id": consultation.get("consultation_id"),
+                    "activity_count": len(activity_plan),
+                    "activity_ids": [str(item.get("activity_id")) for item in activity_plan],
+                    "target": consultation.get("target"),
+                },
+                created_at=datetime.now(),
+            ))
     if not added:
         return
     from app.services.scan_state_sanitizer import sanitize_scan_state_for_hot_update
@@ -3489,6 +3583,12 @@ def enqueue_scan_work_items(
             if c.get("skill_id") in _batch_skill_ids
         ]
         _batch_consultation_ids = sorted({str(c.get("consultation_id")) for c in _batch_consultations if c.get("consultation_id")})
+        _batch_activity_plan = [
+            activity
+            for consultation in _batch_consultations
+            for activity in list(consultation.get("activity_plan") or [])
+            if isinstance(activity, dict)
+        ]
         _batch_learning_sources = list({
             str(src.get("id") or src.get("title") or "")
             for c in _batch_consultations
@@ -3505,6 +3605,18 @@ def enqueue_scan_work_items(
                 "skill_decision_source": "supervisor_skill_contract+accepted_learning",
                 "skill_consultation_ids": _batch_consultation_ids,
                 "learning_sources": _batch_learning_sources,
+                "skill_activity_plan": _batch_activity_plan,
+                "skill_activity_execution": {
+                    "consulted": bool(_batch_consultations),
+                    "selected": bool(_batch_activity_plan),
+                    "materialized": bool(_batch_activity_plan),
+                    "activity_count": len(_batch_activity_plan),
+                    "executed_count": 0,
+                    "evidence_complete_count": 0,
+                    "validated_count": 0,
+                    "blocked_count": 0,
+                    "activities": _batch_activity_plan,
+                },
                 "batch_targets": sorted_targets,
                 "batch_count": len(sorted_targets),
                 "high_risk": best_boost < 0,
@@ -3567,6 +3679,12 @@ def enqueue_scan_work_items(
             for src in c.get("learning_sources") or []
             if isinstance(src, dict) and str(src.get("id") or src.get("title") or "")
         })[:20]
+        _activity_plan = [
+            activity
+            for consultation in _consultations
+            for activity in list(consultation.get("activity_plan") or [])
+            if isinstance(activity, dict)
+        ]
         _item_meta: dict[str, Any] = {
             "source": source,
             "engine": "capacity_work_queue",
@@ -3578,6 +3696,18 @@ def enqueue_scan_work_items(
             "skill_decision_source": "supervisor_skill_contract+accepted_learning",
             "skill_consultation_ids": _consultation_ids,
             "learning_sources": _learning_sources,
+            "skill_activity_plan": _activity_plan,
+            "skill_activity_execution": {
+                "consulted": bool(_consultations),
+                "selected": bool(_activity_plan),
+                "materialized": bool(_activity_plan),
+                "activity_count": len(_activity_plan),
+                "executed_count": 0,
+                "evidence_complete_count": 0,
+                "validated_count": 0,
+                "blocked_count": 0,
+                "activities": _activity_plan,
+            },
             "applicability": _tool_applicability_decision(phase_id, tool, target, state, at="enqueue"),
         }
         _to = _adaptive_timeout(tool, target)

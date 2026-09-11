@@ -1398,8 +1398,8 @@ def _work_item_execution_queue(item, mode: str = "unit") -> str:
         return SCAN_PARALLEL_QUEUE
     from app.workers.worker_groups import phase_queue
 
-    phase_id = str(getattr(item, "phase_id", "") or "")
-    return phase_queue(phase_id, mode=mode) if phase_id else SCAN_PARALLEL_QUEUE
+    _phase_id = str(getattr(item, "phase_id", "") or "")
+    return phase_queue(_phase_id, mode=mode) if _phase_id else SCAN_PARALLEL_QUEUE
 
 
 def _rehydrate_orphaned_dispatched_work_items(
@@ -6064,6 +6064,46 @@ def execute_scan_work_item(item_id: int):
             },
             "expected_evidence": ["stdout", "raw_tool_output", "parsed_result"],
         }
+        if str(item.tool_name or "").lower() == "sqlmap":
+            try:
+                from app.models.models import ObservedRequest
+                observed = (
+                    db.query(ObservedRequest)
+                    .filter(
+                        ObservedRequest.scan_job_id == item.scan_job_id,
+                        ObservedRequest.url == _dispatch_target,
+                        ObservedRequest.method.in_(["POST", "PUT", "PATCH"]),
+                        ObservedRequest.is_mutating.is_(True),
+                    )
+                    .order_by(ObservedRequest.created_at.desc())
+                    .first()
+                )
+                body = str((observed.request_body or {}).get("body") or "") if observed else ""
+                if observed and body:
+                    execution["profile"] = "sqlmap_body"
+                    execution["arguments"]["SCAN_HTTP_METHOD"] = str(observed.method)
+                    execution["arguments"]["SCAN_FUZZ_POST_DATA"] = body
+                    execution["arguments"]["SCAN_FUZZ_CONTENT_TYPE"] = str(observed.request_content_type or "application/x-www-form-urlencoded")
+            except Exception:
+                pass
+            if not str(execution.get("arguments", {}).get("SCAN_FUZZ_POST_DATA") or "").strip():
+                now_done = datetime.now()
+                item.status = "skipped"
+                item.finished_at = now_done
+                item.lease_until = None
+                item.last_error = "skipped:applicability:required_evidence_absent:post_body"
+                item.result = {
+                    "status": "skipped",
+                    "exit_code": 0,
+                    "stderr": "sqlmap_post_body_not_observed",
+                    "parsed_result": {"blocked_precondition": "sqlmap_post_body_not_observed"},
+                    "finished_at": now_done.isoformat(),
+                    "execution_path": "worker_precondition",
+                }
+                item.updated_at = now_done
+                db.add(item)
+                db.commit()
+                return {"id": item.id, "status": "skipped", "reason": "sqlmap_post_body_not_observed"}
         if _is_batch:
             execution["targets"] = _batch_targets
 
@@ -6203,6 +6243,25 @@ def execute_scan_work_item(item_id: int):
                 "source_agent_name": result.get("source_agent_name"),
                 "evidence_path": _stdout_full_path,
             }
+            try:
+                from app.services.skill_activity_materializer import materialize_skill_execution
+
+                _activity_execution = materialize_skill_execution(
+                    _item_meta,
+                    {
+                        **item.result,
+                        "stdout": stdout,
+                        "blocked_reason": _parsed_result.get("blocked_reason") if isinstance(_parsed_result, dict) else None,
+                    },
+                )
+                _item_meta["skill_activity_execution"] = _activity_execution
+                item.item_metadata = _item_meta
+                item.result["skill_activity_execution"] = _activity_execution
+            except Exception as _activity_exc:
+                item.item_metadata = {
+                    **_item_meta,
+                    "skill_activity_execution_error": str(_activity_exc)[:500],
+                }
             item.updated_at = now_done
             if _norm_item_tool in {"zap-api", "api-skill-top20"} and job:
                 state = dict(job.state_data or {})
@@ -6307,6 +6366,7 @@ def execute_scan_work_item(item_id: int):
                         "tool_name": item.tool_name,
                         "execution_path": result.get("execution_path") or "backend_local",
                         "mcp_used": bool(result.get("mcp_used")),
+                        "skill_activity_execution": dict(_item_meta.get("skill_activity_execution") or {}),
                     },
                     created_at=now_done,
                 ))
@@ -6825,6 +6885,25 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
             "finished_at": datetime.now().isoformat(),
             "evidence_path": _stdout_full_path or result.get("evidence_path") or "",
         }
+        try:
+            from app.services.skill_activity_materializer import materialize_skill_execution
+
+            _activity_execution = materialize_skill_execution(
+                dict(item.item_metadata or {}),
+                {
+                    **item.result,
+                    "stdout": _full_stdout,
+                    "blocked_reason": _parsed_result.get("blocked_reason") if isinstance(_parsed_result, dict) else None,
+                },
+            )
+            _item_meta = dict(item.item_metadata or {})
+            _item_meta["skill_activity_execution"] = _activity_execution
+            item.item_metadata = _item_meta
+            item.result["skill_activity_execution"] = _activity_execution
+        except Exception as _activity_exc:
+            _item_meta = dict(item.item_metadata or {})
+            _item_meta["skill_activity_execution_error"] = str(_activity_exc)[:500]
+            item.item_metadata = _item_meta
         item.updated_at = datetime.now()
         db.commit()
         db.refresh(item)
@@ -6934,9 +7013,20 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
                 _feedback_skill_ids = [str(_feedback_meta.get("skill_id"))]
             _success = 1 if item.status == "completed" else 0
             _failure = 1 if item.status in {"failed", "timeout"} else 0
-            _promoted = 1 if int(findings_created or 0) > 0 else 0
+            _confirmed_findings = 0
+            try:
+                from app.models.models import Finding as _FeedbackFinding
+                _confirmed_findings = db.query(_FeedbackFinding).filter(
+                    _FeedbackFinding.scan_job_id == item.scan_job_id,
+                    _FeedbackFinding.tool == str(item.tool_name or ""),
+                    _FeedbackFinding.verification_status.in_(("confirmed", "validated")),
+                    _FeedbackFinding.details["work_item_id"].astext == str(item.id),
+                ).count()
+            except Exception:
+                _confirmed_findings = 0
+            _promoted = 1 if _confirmed_findings > 0 else 0
             _efficiency = 1.0 if _success else 0.0
-            _productivity = min(1.0, float(findings_created or 0) / 3.0) if _success else 0.0
+            _productivity = min(1.0, float(_confirmed_findings) / 3.0) if _success else 0.0
             for _sid in _feedback_skill_ids:
                 db.add(SkillScore(
                     scan_id=item.scan_job_id,
@@ -6948,7 +7038,7 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
                     tool_successes=_success,
                     tool_failures=_failure,
                     findings_raw=int(findings_created or 0),
-                    findings_promoted=_promoted,
+                    findings_promoted=_confirmed_findings,
                     duration_ms=float(result.get("duration_seconds") or 0.0) * 1000.0,
                     efficiency_score=_efficiency,
                     productivity_score=_productivity,
@@ -6970,6 +7060,7 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
                         "tool_name": item.tool_name,
                         "status": item.status,
                         "findings_created": findings_created,
+                        "findings_confirmed": _confirmed_findings,
                         "skill_consultation_ids": list(_feedback_meta.get("skill_consultation_ids") or []),
                         "learning_used": bool(_feedback_meta.get("learning_sources")),
                     },
@@ -6994,7 +7085,7 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
                     if item.status == "skipped":
                         _score_result = "skipped"
                     elif item.status == "completed":
-                        _score_result = "productive" if int(findings_created or 0) > 0 else "unproductive"
+                        _score_result = "productive" if _confirmed_findings > 0 else "unproductive"
                     elif item.status in {"failed", "timeout"}:
                         _score_result = "unproductive"
                     else:
@@ -7005,7 +7096,7 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
                             _sid,
                             str(item.tool_name or ""),
                             _score_result,
-                            findings_count=int(findings_created or 0),
+                            findings_count=int(_confirmed_findings),
                         )
                     job.state_data = _score_state
                     db.commit()

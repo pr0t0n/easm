@@ -3541,6 +3541,8 @@ def persist_findings_from_work_item(
     }
     for _rf in raw_findings:
         _d = dict(_rf.get("details") or {})
+        if getattr(item, "id", None) is not None:
+            _d["work_item_id"] = int(item.id)
         _source_tool = str(_rf.get("source_tool") or _d.get("source_tool") or _d.get("tool") or tool).strip()
         if _source_tool:
             _d.setdefault("source_tool", _source_tool[:100])
@@ -3556,6 +3558,7 @@ def persist_findings_from_work_item(
             "learning_count": _im.get("learning_count"),
             "tech_stack": _im.get("tech_stack") or [],
             "rationale": _im.get("rationale") or "Técnica recomendada pelos aprendizados HackerOne para o stack detectado",
+            "matched_reports": list(_im.get("matched_reports") or []),
         }
         for _rf in raw_findings:
             _d = dict(_rf.get("details") or {})

@@ -1056,6 +1056,23 @@ def record_adjudication_feedback(db: Session, job: Any, finding: Any, adjudicati
     if final not in TERMINAL_VERDICTS:
         return
     try:
+        finding_details = dict(finding.details or {})
+        if final in {"inconclusive", "blocked", "needs_human_review"}:
+            reason = str(adjudication.reason_code or "missing_evidence")
+            actions = ["rerun_with_full_artifact", "cross_validate_with_alternate_tool"]
+            if "auth" in reason or "identity" in reason:
+                actions.append("requeue_after_auth_evidence")
+            if "fixture" in reason or "mutation" in reason or "business" in reason:
+                actions.append("requeue_after_reversible_fixture")
+            finding_details["follow_up_plan"] = {
+                "status": "planned",
+                "reason": reason,
+                "actions": actions,
+                "source_adjudication_id": adjudication.id,
+                "planned_at": datetime.now().isoformat(),
+            }
+            finding.details = finding_details
+            db.add(finding)
         from app.services.pentest_outcome_learning import record_outcome
 
         agreed = str(adjudication.proposed_verdict) == final
@@ -1075,6 +1092,24 @@ def record_adjudication_feedback(db: Session, job: Any, finding: Any, adjudicati
                 "reason_code": adjudication.reason_code,
             },
         )
+        learning_source = dict((finding.details or {}).get("learning_source") or {})
+        if learning_source:
+            family = str(learning_source.get("vuln_family") or "unknown")
+            report_ids = list(learning_source.get("matched_reports") or [])
+            record_outcome(
+                db,
+                job,
+                dimension="hackerone_learning",
+                metric_key=family,
+                outcome=final,
+                context=str((finding.details or {}).get("matched_at") or family),
+                metadata={
+                    "finding_id": finding.id,
+                    "report_ids": report_ids[:10],
+                    "agreement": agreed,
+                    "tool": str(getattr(finding, "tool", "") or ""),
+                },
+            )
         metadata["feedback_recorded"] = True
         metadata["model_agreed_with_final"] = agreed
         adjudication.decision_metadata = metadata

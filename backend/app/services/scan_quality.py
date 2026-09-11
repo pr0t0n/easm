@@ -27,6 +27,7 @@ from app.models.models import (
     ScanJob,
     ScanLog,
     ScanWorkItem,
+    AgentTraceEvent,
     ValidationRun,
 )
 from app.services.phase_monitor import build_phase_monitor
@@ -35,6 +36,8 @@ from app.services.offensive_operator_core import PHASE_CONTRACTS
 from app.services.scan_profiles import scan_profile
 from app.services.loop_agent_telemetry import build_loop_agent_quality_summary
 from app.services.api_skill_coverage import build_api_skill_coverage
+from app.services.skill_activity_materializer import summarize_skill_activity_execution
+from app.services.surface_evidence_depth import build_surface_evidence_snapshot
 
 
 VERIFIED_STATUSES = {"confirmed", "proven", "validated", "verified", "true_positive"}
@@ -1091,6 +1094,23 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
         .filter(ScanWorkItem.scan_job_id == job.id)
         .all()
     )
+    trace_events = (
+        db.query(AgentTraceEvent)
+        .options(load_only(
+            AgentTraceEvent.event_type, AgentTraceEvent.status,
+            AgentTraceEvent.skill_id, AgentTraceEvent.tool_name,
+            AgentTraceEvent.payload,
+        ))
+        .filter(AgentTraceEvent.scan_id == job.id)
+        .all()
+    )
+    skill_activity = summarize_skill_activity_execution(work_items)
+    surface_evidence = build_surface_evidence_snapshot(
+        db,
+        job,
+        work_items=work_items,
+        state=state,
+    )
     endpoints = (
         db.query(OffensiveEndpoint)
         .options(load_only(
@@ -1463,6 +1483,7 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
         if "SCAN_JWT_TOKEN" in reason or "jwt" in reason.lower() and "required" in reason.lower()
     )
     external_preconditions = {
+        "external_no_identity": not bool(valid_sessions) and str((state or {}).get("execution_plan") or "external").lower() != "internal",
         "identity_pair_required": False,
         "valid_auth_sessions": len(valid_sessions),
         "auth_required_endpoints": len(auth_relevant_endpoints),
@@ -1605,6 +1626,7 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
             "covered_items": covered_count,
             "offensive_assets": offensive_assets_count,
             "endpoints": endpoints_count,
+            "deep_surface": surface_evidence,
         },
     }
     total_score = round(sum((c["score"] * c["weight"]) / 100 for c in components.values()), 1)
@@ -1612,6 +1634,7 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
 
     gaps: list[dict[str, Any]] = []
     gaps.extend(list(api_skill_coverage.get("gaps") or []))
+    gaps.extend(list(surface_evidence.get("gaps") or []))
     gaps.extend(_build_p08_tool_missing_gap(state=state, work_items=work_items, artifacts=artifacts))
     for requirement in list(depth_requirements.get("requirements") or []):
         status = str(requirement.get("status") or "")
@@ -1982,6 +2005,8 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
         "label": label,
         "quality_gate": quality_gate,
         "api_skill_coverage": api_skill_coverage,
+        "skill_activity": skill_activity,
+        "surface_evidence": surface_evidence,
         "business_logic": business_logic,
         "execution_contexts": context_quality,
         "external_preconditions": external_preconditions,
@@ -1990,7 +2015,7 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
         "business_logic_precondition_summary": business_logic_precondition_summary,
         "depth_requirements": depth_requirements,
         "operational_sli": dict((job.state_data or {}).get("operational_sli") or {}),
-        "runtime_visibility": _runtime_visibility(job, all_validations, artifacts, work_items),
+        "runtime_visibility": _runtime_visibility(job, all_validations, artifacts, work_items, trace_events),
         "loop_agent": loop_agent,
         "finding_evidence_lifecycle": loop_agent["finding_evidence_lifecycle"],
         "operational_observability": loop_agent["operational_observability"],
@@ -2266,6 +2291,7 @@ def _runtime_visibility(
     validations: list[ValidationRun],
     artifacts: list[EvidenceArtifact],
     work_items: list[ScanWorkItem],
+    trace_events: list[Any] | None = None,
 ) -> dict[str, Any]:
     state = dict(job.state_data or {})
     gate = dict(state.get("quality_gate") or {})
@@ -2321,6 +2347,12 @@ def _runtime_visibility(
     agent_runs = [row for row in list(state.get("agent_execution_runs") or []) if isinstance(row, dict)]
     agent_summaries = dict(state.get("agent_execution_summary") or {})
     skill_invocations = list(state.get("skill_invocation") or state.get("skill_invocations") or [])
+    trace_events = list(trace_events or [])
+    trace_success = [row for row in trace_events if str(getattr(row, "status", "") or "") in {"success", "positive", "partial"}]
+    mcp_trace = [row for row in trace_success if str(getattr(row, "event_type", "") or "") in {"mcp_execution", "mcp_tool_execution"}]
+    agent_trace = [row for row in trace_success if str(getattr(row, "event_type", "") or "") in {"agent_execution", "agent_run"}]
+    llm_trace = [row for row in trace_success if str(getattr(row, "event_type", "") or "") in {"llm_reasoning", "llm_execution"}]
+    activity_trace = [row for row in trace_events if str(getattr(row, "event_type", "") or "") == "skill_activity_materialized"]
     llm_real = [row for row in llm_reasoning if isinstance(row, dict) and not bool(row.get("fallback"))]
     llm_fallback = [row for row in llm_reasoning if isinstance(row, dict) and bool(row.get("fallback"))]
 
@@ -2338,17 +2370,22 @@ def _runtime_visibility(
             "recent": p21_validations[:8],
         },
         "agent_runtime": {
-            "llm_reasoning_count": len(llm_reasoning),
-            "llm_real_count": len(llm_real),
+            "llm_reasoning_count": len(llm_reasoning) + len(llm_trace),
+            "llm_real_count": len(llm_real) + len(llm_trace),
             "llm_fallback_count": len(llm_fallback),
-            "mcp_contract_count": len(mcp_contracts),
+            "mcp_contract_count": len(mcp_contracts) + len(mcp_trace),
             "reasoning_feedback_count": len(feedback),
             "orchestrated_phases": len(orchestration),
-            "agent_execution_count": len([row for row in agent_runs if str(row.get("status") or "") in {"success", "partial"}]),
-            "agent_success_count": len([row for row in agent_runs if str(row.get("status") or "") == "success"]),
+            "agent_execution_count": len([row for row in agent_runs if str(row.get("status") or "") in {"success", "partial"}]) + len(agent_trace),
+            "agent_success_count": len([row for row in agent_runs if str(row.get("status") or "") == "success"]) + len([row for row in agent_trace if str(getattr(row, "status", "") or "") == "success"]),
             "agent_partial_count": len([row for row in agent_runs if str(row.get("status") or "") == "partial"]),
             "agent_execution_phases": len(agent_summaries),
             "skill_invocation_count": len(skill_invocations),
+            "skill_activity_materialized_count": len(activity_trace),
+            "skill_activity_materialized_ids": [
+                str((getattr(row, "payload", {}) or {}).get("consultation_id") or "")
+                for row in activity_trace[-20:]
+            ],
             "recent_llm_reasoning": llm_reasoning[-5:],
             "recent_mcp_contracts": mcp_contracts[-5:],
             "recent_agent_executions": agent_runs[-8:],
@@ -2384,6 +2421,32 @@ def run_scan_quality_gate(db: Session, job: ScanJob) -> dict[str, Any]:
         ))
     validation_changes = _apply_promotion_gate(db, job)
     validation_changes["p21_audits_recorded"] = _record_p21_evidence_audits(db, job)
+    try:
+        from app.services.skill_activity_materializer import (
+            materialize_existing_skill_activity_plans,
+            requeue_incomplete_skill_activity_items,
+        )
+
+        validation_changes["skill_activity_materialization"] = materialize_existing_skill_activity_plans(db, job)
+        validation_changes["skill_activity_requeue"] = requeue_incomplete_skill_activity_items(db, job)
+        if int(validation_changes["skill_activity_materialization"].get("items_materialized") or 0) > 0:
+            actions.append({
+                "type": "materialize_skill_activities",
+                **validation_changes["skill_activity_materialization"],
+            })
+        if int(validation_changes["skill_activity_requeue"] or 0) > 0:
+            actions.append({
+                "type": "requeue_incomplete_skill_activities",
+                "requeued": int(validation_changes["skill_activity_requeue"]),
+            })
+    except Exception as exc:  # noqa: BLE001
+        validation_changes["skill_activity_materialization"] = {"error": str(exc)[:500]}
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="quality-gate",
+            level="WARNING",
+            message=f"skill_activity_materialization_failed error={exc!s}"[:2000],
+        ))
     try:
         from app.services.endpoint_analysis_pipeline import analyze_endpoints_for_scan
         from app.services.hypothesis_rules import generate_hypotheses_for_scan
