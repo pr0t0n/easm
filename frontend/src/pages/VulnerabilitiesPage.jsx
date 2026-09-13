@@ -73,6 +73,8 @@ export default function VulnerabilitiesPage() {
   const [accessGroupId, setAccessGroupId] = useState("");
   const [kindFilter, setKindFilter] = useState("todos");
   const [sourceFilter, setSourceFilter] = useState("todos");
+  const [compareIds, setCompareIds] = useState("");
+  const [comparison, setComparison] = useState(null);
 
   useEffect(() => {
     setLoading(true);
@@ -94,6 +96,11 @@ export default function VulnerabilitiesPage() {
       .catch(() => setError("Falha ao carregar achados."))
       .finally(() => setLoading(false));
   }, [sevFilter, kindFilter, sourceFilter, scanId, accessGroupId, page]);
+
+  async function compareSelectedScans() {
+    const { data } = await client.get("/api/scans/compare", { params: { scan_ids: compareIds } });
+    setComparison(data);
+  }
 
   const total = useMemo(() => SEV_ORDER.reduce((a, k) => a + Number(counts[k] || 0), 0), [counts]);
   const actionableTotal = Number(kindCounts.validated_risk || 0) + Number(kindCounts.candidate_risk || 0);
@@ -462,6 +469,14 @@ export default function VulnerabilitiesPage() {
           <div className="sk-panel" style={{ padding: 14 }}><div className="sk-eyebrow">Riscos</div><strong className="sk-mono" style={{ fontSize: 24 }}>{actionableTotal}</strong></div>
           <div className="sk-panel" style={{ padding: 14 }}><div className="sk-eyebrow">Observações</div><strong className="sk-mono" style={{ fontSize: 24 }}>{observationTotal}</strong></div>
           <div className="sk-panel" style={{ padding: 14 }}><div className="sk-eyebrow">BAS</div><strong className="sk-mono" style={{ fontSize: 24 }}>{Number(sourceCounts.bas || 0)}</strong></div>
+        </section>
+        <section className="sk-panel" style={{ padding: 14, marginBottom: 16 }}>
+          <div className="sk-eyebrow">Comparação de qualidade</div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 8 }}>
+            <input value={compareIds} onChange={(event) => setCompareIds(event.target.value)} placeholder="IDs dos scans separados por vírgula" aria-label="Scans para comparar" />
+            <button type="button" className="btn btn-primary" onClick={compareSelectedScans} disabled={!compareIds.trim()}>Comparar</button>
+          </div>
+          {comparison?.scans?.length ? <div style={{ overflowX: "auto", marginTop: 12 }}><table><thead><tr><th>Scan</th><th>Status</th><th>Progresso</th><th>Concluídos</th><th>Falhas</th><th>Recovery</th></tr></thead><tbody>{comparison.scans.map((row) => <tr key={row.scan_id}><td>#{row.scan_id}</td><td>{row.status}</td><td>{row.progress}%</td><td>{row.completed}</td><td>{row.failed}</td><td>{row.recovery}</td></tr>)}</tbody></table></div> : null}
         </section>
 
         <section className="surface-filter-strip">

@@ -6207,6 +6207,41 @@ def scan_quality(
     return quality
 
 
+@router.get("/scans/compare")
+def compare_scans(
+    scan_ids: str = Query(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    ids = list(dict.fromkeys(int(value) for value in scan_ids.split(",") if value.strip().isdigit()))
+    if not ids or len(ids) > 20:
+        raise HTTPException(status_code=400, detail="Informe de 1 a 20 scans")
+    jobs = db.query(ScanJob).filter(ScanJob.id.in_(ids)).order_by(ScanJob.created_at).all()
+    if not current_user.is_admin:
+        jobs = [job for job in jobs if can_access_company_resource(current_user, job)]
+    targets = {str(job.target_query or "").strip().lower() for job in jobs}
+    if len(targets) > 1:
+        raise HTTPException(status_code=400, detail="Os scans precisam ter o mesmo alvo")
+    rows = []
+    for job in jobs:
+        items = db.query(ScanWorkItem).filter(ScanWorkItem.scan_job_id == job.id).all()
+        rows.append({"scan_id": job.id, "target": job.target_query, "status": job.status, "progress": job.mission_progress, "created_at": job.created_at.isoformat(), "work_items": len(items), "completed": sum(i.status == "completed" for i in items), "failed": sum(i.status == "failed" for i in items), "skipped": sum(i.status == "skipped" for i in items), "blocked": sum(i.status == "blocked" for i in items), "recovery": sum(i.execution_context == "recovery" for i in items), "quality": build_scan_quality(db, job)})
+    return {"target": next(iter(targets), ""), "scans": rows}
+
+
+@router.get("/reports/comparison/latest")
+def latest_completed_comparison(
+    target: str = Query(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    query = db.query(ScanJob).filter(ScanJob.target_query == target, ScanJob.status.in_(["completed", "completed_with_gaps"])).order_by(ScanJob.created_at.desc()).limit(5)
+    jobs = query.all()
+    if not current_user.is_admin:
+        jobs = [job for job in jobs if can_access_company_resource(current_user, job)]
+    return compare_scans(",".join(str(job.id) for job in jobs), db, current_user)
+
+
 @router.get("/scans/{scan_id}/report", response_model=ReportResponse)
 def scan_report(
     scan_id: int,
