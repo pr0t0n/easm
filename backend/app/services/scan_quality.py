@@ -27,6 +27,7 @@ from app.models.models import (
     ScanJob,
     ScanLog,
     ScanWorkItem,
+    WorkItemAttempt,
     AgentTraceEvent,
     ValidationRun,
 )
@@ -1094,6 +1095,10 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
         .filter(ScanWorkItem.scan_job_id == job.id)
         .all()
     )
+    work_item_ids = [int(item.id) for item in work_items]
+    attempts = db.query(WorkItemAttempt).filter(WorkItemAttempt.work_item_id.in_(work_item_ids)).all() if work_item_ids else []
+    attempt_states = Counter(str(attempt.state or "unknown") for attempt in attempts)
+    operational_attempt_failures = [attempt for attempt in attempts if str(attempt.error_class or "") in {"lease_expired_without_terminal_ack", "mcp_rejected", "transient_worker_error", "poll_processing_error"}]
     trace_events = (
         db.query(AgentTraceEvent)
         .options(load_only(
@@ -1786,6 +1791,14 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
             "detail": "Nenhum ValidationRun foi registrado para este scan.",
             "action": "Ativar validação segura para findings relevantes e registrar resultado.",
         })
+    if operational_attempt_failures:
+        gaps.append({
+            "severity": "high",
+            "area": "execution_control_plane",
+            "title": "Tentativas interrompidas pelo control plane",
+            "detail": f"{len(operational_attempt_failures)} tentativa(s) tiveram falha operacional confirmada e não representam resultado negativo da ferramenta.",
+            "action": "Verificar recovery, capacidade, acknowledgements MCP/runner e concluir a nova tentativa antes de avaliar cobertura.",
+        })
     if not coverage_items and not endpoints_count:
         gaps.append({
             "severity": "low",
@@ -2020,6 +2033,7 @@ def build_scan_quality(db: Session, job: ScanJob) -> dict[str, Any]:
         "finding_evidence_lifecycle": loop_agent["finding_evidence_lifecycle"],
         "operational_observability": loop_agent["operational_observability"],
         "execution_metrics": execution_metrics,
+        "execution_attempts": {"total": len(attempts), "states": dict(sorted(attempt_states.items())), "operational_failures": len(operational_attempt_failures)},
         "components": components,
         "summary": {
             "findings_total": len(findings),
@@ -2267,6 +2281,7 @@ def _persist_quality_state(
         if key not in {"runtime_visibility", "phase_monitor_issues"}
     }
     snapshot["quality_gate"] = gate_state
+    snapshot["snapshot_status"] = "final" if str(getattr(job, "status", "") or "").lower() in {"completed", "completed_with_gaps", "failed", "cancelled", "canceled"} else "provisional"
     state["quality_snapshot"] = snapshot
     state["quality_gate"] = gate_state
     for key in (

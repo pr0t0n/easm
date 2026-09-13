@@ -121,6 +121,19 @@ def _parameter_for_finding(finding: Any) -> str:
     return str(details.get("parameter") or details.get("param") or details.get("parameter_name") or "").strip()[:255]
 
 
+def _parameter_location_for_finding(finding: Any, family: str) -> str:
+    details = dict(getattr(finding, "details", None) or {})
+    explicit = str(details.get("parameter_location") or details.get("param_location") or details.get("injection_location") or "").strip().lower()
+    if explicit:
+        return explicit[:40]
+    if family == "security_headers":
+        return "response_header"
+    if not _parameter_for_finding(finding):
+        return ""
+    method = str(details.get("method") or "GET").upper()
+    return "body" if method in {"POST", "PUT", "PATCH"} else "query"
+
+
 def _available_identities(db: Session, scan_id: int) -> list[dict[str, str]]:
     from app.models.models import ScanIdentity
 
@@ -303,6 +316,7 @@ def build_adjudication_dossier(db: Session, job: Any, finding: Any) -> dict[str,
             "target_ref": target,
             "host": host_from_scope_reference(target),
             "parameter_ref": _parameter_for_finding(finding),
+            "parameter_location": _parameter_location_for_finding(finding, family),
             "in_scope": is_host_in_scope(host_from_scope_reference(target), authorized_scope_for_scan(db, job.id)),
         },
         "context": {
@@ -637,6 +651,7 @@ def create_validation_wire(
             "endpoint_id": _resolve_endpoint_id(db, job.id, target),
             "target_ref": target,
             "parameter_ref": str((dossier.get("target") or {}).get("parameter_ref") or ""),
+            "parameter_location": str((dossier.get("target") or {}).get("parameter_location") or ""),
             "method": method,
             "object_id": object_id,
             "secondary_object_id": secondary_object_id,

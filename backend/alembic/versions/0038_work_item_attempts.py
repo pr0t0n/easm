@@ -11,7 +11,7 @@ def upgrade():
     op.create_table(
         "work_item_attempts",
         sa.Column("id", sa.Integer(), primary_key=True),
-        sa.Column("work_item_id", sa.Integer(), sa.ForeignKey("scan_work_items.id"), nullable=False),
+        sa.Column("work_item_id", sa.Integer(), sa.ForeignKey("scan_work_items.id", ondelete="CASCADE"), nullable=False),
         sa.Column("attempt_key", sa.String(80), nullable=False, unique=True),
         sa.Column("state", sa.String(40), nullable=False, server_default="claimed"),
         sa.Column("worker_id", sa.String(120)),

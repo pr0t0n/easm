@@ -42,6 +42,10 @@ def resolve_validation_execution_context(
     bindings = dict(getattr(wire, "input_bindings", None) or {})
     parameter = str(getattr(wire, "parameter_ref", None) or bindings.get("parameter_ref") or "").strip()
     expected_method = str(bindings.get("method") or "").upper().strip()
+    parameter_location = str(bindings.get("parameter_location") or "").lower().strip()
+    if not parameter_location and parameter:
+        tool_name = str(getattr(item, "tool_name", None) or getattr(wire, "tool_name", None) or "").lower().strip()
+        parameter_location = "response_header" if tool_name in {"nuclei-headers", "curl-headers", "shcheck"} else ("body" if expected_method in MUTATING_METHODS else "query")
     source_id = getattr(wire, "source_artifact_id", None)
     artifacts: list[Any] = []
     if source_id:
@@ -87,7 +91,7 @@ def resolve_validation_execution_context(
         _, target, method, body, candidate_endpoint_id, source = candidate
         if expected_method and method and method != expected_method:
             continue
-        if parameter and method in {"GET", "HEAD"} and not _has_parameter(target, parameter):
+        if parameter and parameter_location == "query" and method in {"GET", "HEAD"} and not _has_parameter(target, parameter):
             continue
         selected = candidate
         break
@@ -97,6 +101,7 @@ def resolve_validation_execution_context(
             "reason": "required_evidence_absent:exact_request_contract",
             "wire_id": int(wire.id),
             "parameter_ref": parameter,
+            "parameter_location": parameter_location,
         }
 
     _, target, method, body, selected_endpoint_id, source = selected
@@ -123,6 +128,7 @@ def resolve_validation_execution_context(
             "execution_target": target,
             "method": method,
             "parameter_ref": parameter,
+            "parameter_location": parameter_location,
         }
 
     return {
@@ -131,6 +137,7 @@ def resolve_validation_execution_context(
         "execution_target": target,
         "method": method,
         "parameter_ref": parameter,
+        "parameter_location": parameter_location,
         "endpoint_id": selected_endpoint_id or (int(endpoint_id) if endpoint_id else None),
         "source": source,
         "body": body,

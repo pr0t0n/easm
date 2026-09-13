@@ -479,7 +479,7 @@ EVIDENCE_REQUIRED_TOOLS: dict[str, str] = {
     for tool, clauses in TOOL_EVIDENCE_CONTRACTS.items()
 }
 SKILL_SELECTION_THRESHOLD = 0.35
-EVIDENCE_REQUEUE_REOPEN_STATUSES = {"completed_with_gaps"}
+EVIDENCE_REQUEUE_REOPEN_STATUSES = {"completed_with_gaps", "blocked"}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # High-risk subdomain keywords → prioridade elevada no scanner
@@ -2360,27 +2360,52 @@ def work_item_applicability_decision(
 def requeue_evidence_ready_work_items(db: Session, job: ScanJob) -> int:
     """Requeue tools skipped by stale applicability context once prerequisites exist."""
     job_status = str(getattr(job, "status", "") or "").lower()
-    if job_status not in {"running", "completed_with_gaps"}:
+    if job_status not in {"running", "completed_with_gaps", "blocked"}:
         return 0
     state = dict(job.state_data or {})
     now = datetime.now()
     candidates = (
         db.query(ScanWorkItem)
         .filter(
-                ScanWorkItem.scan_job_id == job.id,
-                ScanWorkItem.status == "skipped",
-                or_(
-                    ScanWorkItem.last_error.like("skipped:applicability:required_evidence_absent:%"),
-                    ScanWorkItem.last_error.like("skipped:applicability:required_technology_absent:%"),
-                    ScanWorkItem.last_error.like("skipped:applicability:no_http_surface:%"),
+            ScanWorkItem.scan_job_id == job.id,
+            or_(
+                and_(
+                    ScanWorkItem.status == "skipped",
+                    or_(
+                        ScanWorkItem.last_error.like("skipped:applicability:required_evidence_absent:%"),
+                        ScanWorkItem.last_error.like("skipped:applicability:required_technology_absent:%"),
+                        ScanWorkItem.last_error.like("skipped:applicability:no_http_surface:%"),
+                    ),
                 ),
+                and_(
+                    ScanWorkItem.status == "blocked",
+                    ScanWorkItem.last_error.like("required_evidence_absent:%"),
+                ),
+            ),
         )
         .all()
     )
     requeued = 0
     requeued_ids: list[int] = []
     for item in candidates:
-        decision = work_item_applicability_decision(item, state, at="requeue")
+        meta = dict(item.item_metadata or {})
+        wire_id = meta.get("validation_wire_id")
+        if wire_id:
+            from app.models.models import ValidationWire
+            from app.services.validation_execution_context import resolve_validation_execution_context
+
+            wire = db.query(ValidationWire).filter(ValidationWire.id == int(wire_id)).first()
+            resolution = resolve_validation_execution_context(db, item, wire=wire)
+            meta["validation_resolution"] = resolution
+            item.item_metadata = meta
+            if resolution.get("status") != "resolved":
+                item.updated_at = now
+                continue
+            meta["execution_target"] = resolution["execution_target"]
+            meta["target_parameter"] = resolution.get("parameter_ref") or meta.get("target_parameter")
+            decision = {"applicable": True, "reason": "validation_context_resolved", "resolution": resolution}
+        else:
+            decision = work_item_applicability_decision(item, state, at="requeue")
         if (
             decision.get("applicable")
             and str(item.tool_name or "").lower() == "sqlmap"
@@ -2403,10 +2428,20 @@ def requeue_evidence_ready_work_items(db: Session, job: ScanJob) -> int:
             item.item_metadata = meta
             item.updated_at = now
             continue
-        meta = dict(item.item_metadata or {})
+        fingerprint_payload = {
+            "reason": decision.get("reason"),
+            "evidence": decision.get("evidence"),
+            "context": decision.get("context"),
+            "resolution": decision.get("resolution"),
+        }
+        requeue_fingerprint = hashlib.sha256(json.dumps(fingerprint_payload, sort_keys=True, default=str).encode()).hexdigest()
+        if meta.get("evidence_requeue_fingerprint") == requeue_fingerprint:
+            item.updated_at = now
+            continue
         meta["applicability_requeue"] = decision
         meta["requeued_after_evidence"] = True
         meta["requeued_after_evidence_at"] = now.isoformat()
+        meta["evidence_requeue_fingerprint"] = requeue_fingerprint
         item.status = "queued"
         item.attempts = 0
         item.lease_until = None
@@ -2438,6 +2473,10 @@ def requeue_evidence_ready_work_items(db: Session, job: ScanJob) -> int:
             state["quality_gate_active"] = True
             state["quality_gate_reopened_after_evidence_at"] = now.isoformat()
             state["quality_gate_reopened_after_evidence_items"] = requeued
+            broken_glass = dict(state.get("broken_glass") or {})
+            if broken_glass.get("status") == "required":
+                broken_glass.update({"status": "recovered", "recovered_at": now.isoformat(), "reason": "evidence_context_resolved"})
+                state["broken_glass"] = broken_glass
         job.state_data = state
         db.add(ScanLog(
             scan_job_id=job.id,
@@ -2446,6 +2485,22 @@ def requeue_evidence_ready_work_items(db: Session, job: ScanJob) -> int:
             message=f"evidence_ready_requeue scan={job.id} requeued={requeued}",
         ))
     return requeued
+
+
+def finalize_superseded_work_items(db: Session, scan_id: int) -> int:
+    rows = db.query(ScanWorkItem).filter(
+        ScanWorkItem.scan_job_id == scan_id,
+        ScanWorkItem.status == "blocked",
+        ScanWorkItem.last_error.like("superseded_by_replan:%"),
+    ).all()
+    now = datetime.now()
+    for item in rows:
+        item.status = "skipped"
+        item.lease_until = None
+        item.finished_at = item.finished_at or now
+        item.updated_at = now
+        item.result = {**dict(item.result or {}), "status": "superseded"}
+    return len(rows)
 
 
 # Crawler/spider AND content-discovery tools whose kali-runner profiles inject
@@ -4010,65 +4065,45 @@ def claim_work_items(db: Session, scan_id: int, *, limit: int | None = None) -> 
                 .all()
             )
         ]
-        db.query(ScanWorkItem).filter(
+        expired_items = db.query(ScanWorkItem).filter(
             ScanWorkItem.scan_job_id == scan_id,
             ScanWorkItem.status.in_(["running", "dispatched"]),
             ScanWorkItem.lease_until.isnot(None),
             ScanWorkItem.lease_until <= now,
-            ScanWorkItem.attempts < ScanWorkItem.max_attempts,
-        ).update(
-            {
-                "status": "retry",
-                "lease_until": None,
-                "updated_at": now,
-                "last_error": "lease_expired_requeued",
-            },
-            synchronize_session=False,
-        )
-        db.query(ScanWorkItem).filter(
-            ScanWorkItem.scan_job_id == scan_id,
-            ScanWorkItem.status.in_(["running", "dispatched"]),
-            ScanWorkItem.lease_until.isnot(None),
-            ScanWorkItem.lease_until <= now,
-            ScanWorkItem.attempts >= ScanWorkItem.max_attempts,
-        ).update(
-            {
-                "status": "failed",
-                "lease_until": None,
-                "finished_at": now,
-                "updated_at": now,
-                "last_error": "lease_expired_max_attempts",
-            },
-            synchronize_session=False,
-        )
+        ).all()
+        from app.services.work_item_attempts import reconcile_expired_item
+
+        for expired_item in expired_items:
+            reconcile_expired_item(db, expired_item, now)
         db.flush()
         clear_work_item_execute_locks(expired_item_ids)
 
-        # ── Zombie reaper: queued/retry items that exhausted attempts ─────────
-        # CRITICAL stall fix: an item with status='queued'/'retry' but
-        # attempts >= max_attempts can NEVER be claimed (the claim query requires
-        # attempts < max_attempts). It sits forever as 'queued', so its phase
-        # never reaches 100% terminal → the gate (P06→P08/P09 etc) never fires →
-        # all downstream phases stay blocked → scan stalls. Mark them failed
-        # (terminal) so the phase can complete and the gate opens.
-        _reaped = db.query(ScanWorkItem).filter(
+        exhausted_queued = db.query(ScanWorkItem).filter(
             ScanWorkItem.scan_job_id == scan_id,
             ScanWorkItem.status.in_(["queued", "retry"]),
             ScanWorkItem.attempts >= ScanWorkItem.max_attempts,
-        ).update(
-            {
-                "status": "failed",
-                "lease_until": None,
-                "finished_at": now,
-                "updated_at": now,
-                "last_error": "max_attempts_exhausted_while_queued",
-            },
-            synchronize_session=False,
-        )
+        ).all()
+        _reaped = 0
+        for exhausted_item in exhausted_queued:
+            outcome = reconcile_expired_item(db, exhausted_item, now)
+            if outcome != "requeued_unconfirmed":
+                exhausted_item.status = "blocked"
+                exhausted_item.last_error = "supervisor_review_required:confirmed_attempts_exhausted"
+            _reaped += 1
         if _reaped:
             db.flush()
 
         job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+        if job:
+            from app.services.runtime_supervisor import apply_recovery_decision, evaluate_runtime_outcome, materialize_replan
+
+            for exhausted_item in exhausted_queued:
+                if exhausted_item.status != "blocked":
+                    continue
+                decision = evaluate_runtime_outcome(db, job, exhausted_item)
+                apply_recovery_decision(exhausted_item, decision)
+                materialize_replan(db, exhausted_item, decision)
+            db.flush()
         hold_external_for_internal = False
         if job:
             _evidence_requeued = requeue_evidence_ready_work_items(db, job)
@@ -4692,6 +4727,7 @@ def finalize_orphaned_blocked_work_items(db: Session, scan_id: int) -> int:
         .filter(
             ScanWorkItem.scan_job_id == scan_id,
             ScanWorkItem.status == "blocked",
+            ScanWorkItem.last_error.like("waiting_for:%"),
         )
         .scalar() or 0
     )
@@ -4704,6 +4740,7 @@ def finalize_orphaned_blocked_work_items(db: Session, scan_id: int) -> int:
         .filter(
             ScanWorkItem.scan_job_id == scan_id,
             ScanWorkItem.status == "blocked",
+            ScanWorkItem.last_error.like("waiting_for:%"),
         )
         .update(
             {

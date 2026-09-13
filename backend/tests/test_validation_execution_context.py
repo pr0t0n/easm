@@ -60,3 +60,31 @@ def test_resolution_blocks_mutating_request_without_body():
 
     assert result["status"] == "awaiting_evidence"
     assert result["reason"] == "required_evidence_absent:post_body"
+
+
+def test_response_header_reference_does_not_require_query_parameter():
+    wire = SimpleNamespace(
+        id=20,
+        finding_id=None,
+        source_artifact_id=None,
+        endpoint_id=None,
+        target_ref="https://example.test/login",
+        parameter_ref="x-frame-options",
+        tool_name="nuclei-headers",
+        input_bindings={"method": "GET"},
+    )
+    db = MagicMock()
+    item = SimpleNamespace(
+        id=21,
+        scan_job_id=22,
+        target="https://example.test/login#easm-wire-20",
+        tool_name="nuclei-headers",
+        item_metadata={"validation_wire_id": 20},
+    )
+
+    result = resolve_validation_execution_context(db, item, wire=wire)
+
+    assert result["status"] == "resolved"
+    assert result["execution_target"] == "https://example.test/login"
+    assert result["parameter_ref"] == "x-frame-options"
+    assert result["parameter_location"] == "response_header"

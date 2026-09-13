@@ -649,6 +649,76 @@ def test_requeue_evidence_ready_work_items_does_not_mutate_completed_scan() -> N
     assert item.status == "skipped"
 
 
+def test_requeue_evidence_ready_work_items_reopens_resolved_broken_glass(monkeypatch) -> None:
+    item = SimpleNamespace(
+        id=45,
+        scan_job_id=7,
+        phase_id="P21",
+        skill_id="skill.reporting.evidence_quality",
+        tool_name="nuclei-headers",
+        target="https://target.example.com/login#easm-wire-12",
+        status="blocked",
+        attempts=0,
+        max_attempts=2,
+        last_error="required_evidence_absent:exact_request_contract",
+        result={"status": "blocked"},
+        item_metadata={"validation_wire_id": 12},
+        lease_until=None,
+        finished_at="earlier",
+        updated_at=None,
+    )
+    job = SimpleNamespace(
+        id=7,
+        status="blocked",
+        current_step="Supervisor · broken glass",
+        mission_progress=99,
+        state_data={"broken_glass": {"status": "required"}},
+    )
+
+    class FakeQuery:
+        def filter(self, *_args, **_kwargs):
+            return self
+
+        def all(self):
+            return [item]
+
+        def first(self):
+            return SimpleNamespace(id=12)
+
+    class FakeDb:
+        def __init__(self):
+            self.added = []
+
+        def query(self, *_args, **_kwargs):
+            return FakeQuery()
+
+        def add(self, obj):
+            self.added.append(obj)
+
+    monkeypatch.setattr(
+        "app.services.validation_execution_context.resolve_validation_execution_context",
+        lambda *_args, **_kwargs: {
+            "status": "resolved",
+            "execution_target": "https://target.example.com/login",
+            "method": "GET",
+            "parameter_ref": "x-frame-options",
+            "parameter_location": "response_header",
+        },
+    )
+
+    requeued = requeue_evidence_ready_work_items(FakeDb(), job)  # type: ignore[arg-type]
+
+    assert requeued == 1
+    assert item.status == "queued"
+    assert item.item_metadata["validation_resolution"]["status"] == "resolved"
+    assert job.status == "running"
+    assert job.state_data["broken_glass"]["status"] == "recovered"
+
+    item.status = "blocked"
+    item.last_error = "required_evidence_absent:exact_request_contract"
+    assert requeue_evidence_ready_work_items(FakeDb(), job) == 0  # type: ignore[arg-type]
+
+
 def test_zap_api_metadata_carries_openapi_url_from_api_scan_config() -> None:
     meta = apply_phase_tool_metadata(
         {"api_scan_config": {"spec_url": "https://api.example.test/openapi.json"}},

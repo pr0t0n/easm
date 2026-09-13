@@ -124,7 +124,15 @@ def materialize_skill_execution(
     errors = list(parsed.get("observation_error_counts") or {})
     blocked_reason = str(parsed.get("blocked_reason") or execution.get("blocked_reason") or "").strip()
     has_observation = bool(observations)
-    has_evidence = bool(observations or findings or execution.get("stdout") or execution.get("evidence_path"))
+    has_evidence = bool(
+        observations
+        or findings
+        or execution.get("stdout")
+        or execution.get("stdout_full")
+        or execution.get("stdout_preview")
+        or execution.get("stdout_path")
+        or execution.get("evidence_path")
+    )
     status_terminal = status in TERMINAL_STATUSES
     artifact_ids = [int(item) for item in list(artifact_ids or []) if str(item).isdigit()]
     validation_ids = [int(item) for item in list(validation_ids or []) if str(item).isdigit()]
@@ -143,7 +151,7 @@ def materialize_skill_execution(
         elif index == 0:
             row["status"] = "completed" if has_observation or has_evidence else "inconclusive"
         elif row.get("name") == "independent_validation":
-            row["status"] = "validated" if validation_ids or findings else "inconclusive"
+            row["status"] = "validated" if validation_ids or findings or (status_terminal and has_evidence) else "inconclusive"
         else:
             row["status"] = "completed" if has_observation or has_evidence else "inconclusive"
         row["evidence_artifact_ids"] = artifact_ids
@@ -248,7 +256,19 @@ def materialize_existing_skill_activity_plans(db: Any, job: Any) -> dict[str, in
     for item in items:
         metadata = dict(item.item_metadata or {})
         skill_id = str(metadata.get("api_skill_id") or metadata.get("skill_id") or "").strip()
-        if not skill_id or metadata.get("skill_activity_plan"):
+        if not skill_id:
+            continue
+        if metadata.get("skill_activity_plan"):
+            execution = materialize_skill_execution(metadata, dict(item.result or {}))
+            if execution != dict(metadata.get("skill_activity_execution") or {}):
+                metadata["skill_activity_execution"] = execution
+                item.item_metadata = metadata
+                result = dict(item.result or {})
+                if result:
+                    result["skill_activity_execution"] = execution
+                    item.result = result
+                db.add(item)
+                refreshed += 1
             continue
         skill = catalog_by_id.get(skill_id) or {
             "id": skill_id,
@@ -342,3 +362,44 @@ def requeue_incomplete_skill_activity_items(db: Any, job: Any, *, limit: int = 1
     if requeued:
         db.flush()
     return requeued
+
+
+def reconcile_completed_skill_activity_requeues(db: Any, job: Any) -> int:
+    from datetime import datetime
+    from app.models.models import ScanWorkItem
+
+    items = (
+        db.query(ScanWorkItem)
+        .filter(
+            ScanWorkItem.scan_job_id == int(job.id),
+            ScanWorkItem.status == "queued",
+        )
+        .all()
+    )
+    reconciled = 0
+    for item in items:
+        metadata = dict(item.item_metadata or {})
+        if metadata.get("skill_activity_retry_reason") != "activity_execution_incomplete":
+            continue
+        plan = list(metadata.get("skill_activity_plan") or [])
+        result = dict(item.result or {})
+        if not plan or str(result.get("status") or "").lower() not in TERMINAL_STATUSES:
+            continue
+        execution = materialize_skill_execution(metadata, result)
+        if int(execution.get("executed_count") or 0) < len(plan):
+            continue
+        metadata["skill_activity_execution"] = execution
+        metadata["skill_activity_retry_reconciled_at"] = datetime.now().isoformat()
+        item.item_metadata = metadata
+        result["skill_activity_execution"] = execution
+        item.result = result
+        item.status = "completed"
+        item.finished_at = item.finished_at or datetime.now()
+        item.lease_until = None
+        item.last_error = None
+        item.updated_at = datetime.now()
+        db.add(item)
+        reconciled += 1
+    if reconciled:
+        db.flush()
+    return reconciled

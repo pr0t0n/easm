@@ -750,13 +750,15 @@ class ScanWorkItem(Base):
 class WorkItemAttempt(Base):
     __tablename__ = "work_item_attempts"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    work_item_id: Mapped[int] = mapped_column(ForeignKey("scan_work_items.id"), index=True)
+    work_item_id: Mapped[int] = mapped_column(ForeignKey("scan_work_items.id", ondelete="CASCADE"), index=True)
     attempt_key: Mapped[str] = mapped_column(String(80), unique=True, index=True)
     state: Mapped[str] = mapped_column(String(40), default="claimed", index=True)
     worker_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
     mcp_request_id: Mapped[str | None] = mapped_column(String(160), nullable=True)
     runner_job_id: Mapped[str | None] = mapped_column(String(160), nullable=True)
     error_class: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    state_history: Mapped[list] = mapped_column(JSONB, default=list)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)

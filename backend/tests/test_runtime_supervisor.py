@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 from app.services.runtime_supervisor import evaluate_runtime_outcome
 
 
-def test_runtime_supervisor_opens_broken_glass_for_unsatisfactory_context():
+def test_runtime_supervisor_corrects_recoverable_missing_context_in_flight():
     db = MagicMock()
     job = SimpleNamespace(id=7, state_data={})
     item = SimpleNamespace(
@@ -20,8 +20,9 @@ def test_runtime_supervisor_opens_broken_glass_for_unsatisfactory_context():
 
     decision = evaluate_runtime_outcome(db, job, item)
 
-    assert decision["action"] == "open_broken_glass"
-    assert job.state_data["runtime_supervisor"]["status"] == "open_broken_glass"
+    assert decision["action"] == "correct_in_flight"
+    assert decision["recovery"]["type"] == "recollect_context"
+    assert job.state_data["runtime_supervisor"]["status"] == "correct_in_flight"
     db.add.assert_called_once()
 
 

@@ -6147,7 +6147,7 @@ def scan_quality(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scan nao encontrado")
 
     snapshot = dict((job.state_data or {}).get("quality_snapshot") or {})
-    if snapshot and not refresh:
+    if snapshot and not refresh and snapshot.get("snapshot_status") == "final":
         # Snapshots intentionally omit volatile runtime counters. Hydrate those
         # counters from current rows so P21/agent/MCP/LLM never appear as zero
         # merely because the scan is terminal.
@@ -6227,7 +6227,7 @@ def compare_scans(
         items = db.query(ScanWorkItem).filter(ScanWorkItem.scan_job_id == job.id).all()
         findings = db.query(Finding).filter(Finding.scan_job_id == job.id).all()
         risks = [finding for finding in findings if str(getattr(finding, "finding_kind", "") or "") in {"validated_risk", "candidate_risk"}]
-        rows.append({"scan_id": job.id, "target": job.target_query, "status": job.status, "progress": job.mission_progress, "created_at": job.created_at.isoformat(), "work_items": len(items), "completed": sum(i.status == "completed" for i in items), "failed": sum(i.status == "failed" for i in items), "skipped": sum(i.status == "skipped" for i in items), "blocked": sum(i.status == "blocked" for i in items), "recovery": sum(i.execution_context == "recovery" for i in items), "findings": len(findings), "risks": len(risks), "quality": build_scan_quality(db, job)})
+        rows.append({"scan_id": job.id, "target": job.target_query, "status": job.status, "progress": job.mission_progress, "created_at": job.created_at.isoformat(), "work_items": len(items), "completed": sum(i.status == "completed" for i in items), "failed": sum(i.status == "failed" for i in items), "skipped": sum(i.status == "skipped" for i in items), "blocked": sum(i.status == "blocked" for i in items), "recovery": sum(str(i.execution_context or "").startswith("recovery") for i in items), "findings": len(findings), "risks": len(risks), "quality": build_scan_quality(db, job)})
     return {"target": next(iter(targets), ""), "scans": rows}
 
 

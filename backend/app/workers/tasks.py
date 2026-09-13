@@ -4613,6 +4613,7 @@ def dispatch_scan_work_items(
     from app.services.scan_work_queue import (
         claim_work_items,
         finalize_orphaned_blocked_work_items,
+        finalize_superseded_work_items,
         work_queue_counts,
     )
 
@@ -4650,6 +4651,12 @@ def dispatch_scan_work_items(
             return {"error": f"scan {scan_id} not found"}
         if str(job.status or "").lower() in HALTED_SCAN_STATUSES:
             return {"scan_id": scan_id, "status": job.status, "paused": job.status == "paused"}
+        if str(job.status or "").lower() == "blocked":
+            from app.services.scan_work_queue import requeue_evidence_ready_work_items
+
+            if requeue_evidence_ready_work_items(db, job):
+                db.commit()
+                db.refresh(job)
         if _scan_is_terminal(job.status):
             return {"scan_id": scan_id, "status": job.status, "terminal": True}
 
@@ -4755,6 +4762,10 @@ def dispatch_scan_work_items(
             import logging as _grlog2
             _grlog2.getLogger(__name__).debug("gate_reconciler failed: %s", _gr_err)
 
+        from app.services.skill_activity_materializer import reconcile_completed_skill_activity_requeues
+
+        if reconcile_completed_skill_activity_requeues(db, job):
+            db.commit()
         item_ids = claim_work_items(db, scan_id, limit=limit)
 
         # ── Target priority scoring: exploitation phases first for targets with findings ──
@@ -4930,9 +4941,30 @@ def dispatch_scan_work_items(
         # batch 2 to have already seeded. finalize_orphaned_blocked_work_items
         # already no-ops safely whenever any active work remains scan-wide, so
         # it's always safe to call here regardless of seal state.
+        _superseded = finalize_superseded_work_items(db, scan_id)
         _orphaned_blocked = finalize_orphaned_blocked_work_items(db, scan_id)
-        if _orphaned_blocked:
+        if _superseded or _orphaned_blocked:
             db.commit()
+
+        executable_left = db.query(func.count(ScanWorkItem.id)).filter(
+            ScanWorkItem.scan_job_id == scan_id,
+            ScanWorkItem.status.in_(["queued", "retry", "dispatched", "running", "submitted"]),
+        ).scalar() or 0
+        supervisor_blocked = db.query(func.count(ScanWorkItem.id)).filter(
+            ScanWorkItem.scan_job_id == scan_id,
+            ScanWorkItem.status == "blocked",
+            ~ScanWorkItem.last_error.like("waiting_for:%"),
+            ~ScanWorkItem.last_error.like("superseded_by_replan:%"),
+        ).scalar() or 0
+        if int(executable_left) == 0 and int(supervisor_blocked) > 0:
+            state = dict(job.state_data or {})
+            state["broken_glass"] = {"status": "required", "blocked_work_items": int(supervisor_blocked), "at": datetime.now().isoformat()}
+            job.state_data = state
+            job.status = "blocked"
+            job.current_step = f"Supervisor · broken glass ({int(supervisor_blocked)} item(ns))"
+            job.updated_at = datetime.now()
+            db.commit()
+            return {"claimed": len(item_ids), "status": "blocked", "blocked_work_items": int(supervisor_blocked)}
 
         counts = work_queue_counts(db, scan_id)
         state = dict(job.state_data or {})
@@ -5673,7 +5705,7 @@ def execute_scan_work_item(item_id: int):
     import requests
     from app.db.session import SessionLocal
     from app.core.config import settings
-    from app.models.models import AgentTraceEvent, ScanJob, ScanLog, ScanWorkItem, ValidationWire, WorkItemAttempt
+    from app.models.models import AgentTraceEvent, ScanJob, ScanLog, ScanWorkItem, ValidationWire
     from app.services.scan_work_queue import (
         enforce_work_item_scope,
         kali_inflight_release,
@@ -5763,38 +5795,56 @@ def execute_scan_work_item(item_id: int):
         if _validation_meta.get("validation_wire_id"):
             from app.services.validation_execution_context import resolve_validation_execution_context
 
-            _resolution = resolve_validation_execution_context(db, item)
+            wire = db.query(ValidationWire).filter(ValidationWire.id == int(_validation_meta["validation_wire_id"])).first()
+            _resolution = resolve_validation_execution_context(db, item, wire=wire)
             _validation_meta["validation_resolution"] = _resolution
             if _resolution.get("status") == "awaiting_evidence":
-                now = datetime.now()
-                attempts = int(item.attempts or 0)
-                max_attempts = int(item.max_attempts or 1)
-                item.status = "retry" if attempts < max_attempts else "blocked"
-                item.lease_until = None
-                item.finished_at = now
-                item.last_error = str(_resolution.get("reason") or "awaiting_evidence")[:2000]
-                _validation_meta["runtime_recovery"] = {"type": "recollect_context", "verification": "pending", "verification_attempt": attempts + 1}
-                item.item_metadata = _validation_meta
-                item.result = {
-                    "status": item.status,
-                    "blocked_reason": item.last_error,
-                    "validation_resolution": _resolution,
-                    "finished_at": now.isoformat(),
-                }
-                wire = db.query(ValidationWire).filter(ValidationWire.id == int(_validation_meta["validation_wire_id"])).first()
-                if wire is not None:
-                    wire.status = "awaiting_evidence"
-                    wire.result_summary = {"validation_resolution": _resolution}
-                    db.add(wire)
-                db.add(item)
-                db.commit()
-                try:
-                    kali_inflight_release(str(item.resource_class or "light"), 1)
-                except Exception:
+                collection_attempts = int(_validation_meta.get("evidence_collection_attempts") or 0)
+                collection_target = str(_resolution.get("execution_target") or getattr(wire, "target_ref", "") or "").split("#easm-wire-", 1)[0]
+                if collection_attempts < 2 and collection_target.startswith(("http://", "https://")):
+                    from app.services.browser_request_harvester import harvest_target
+
+                    collection_result = harvest_target(
+                        db,
+                        job,
+                        collection_target,
+                        identity_key=str(_validation_meta.get("identity_key") or ""),
+                    )
+                    _validation_meta["evidence_collection_attempts"] = collection_attempts + 1
+                    _validation_meta["evidence_collection_result"] = collection_result
+                    item.item_metadata = _validation_meta
+                    db.flush()
+                    _resolution = resolve_validation_execution_context(db, item, wire=wire)
+                    _validation_meta["validation_resolution"] = _resolution
+                    if _resolution.get("status") == "resolved":
+                        _validation_meta["execution_target"] = _resolution["execution_target"]
+                        _validation_meta["target_parameter"] = _resolution.get("parameter_ref") or _validation_meta.get("target_parameter")
+                        item.item_metadata = _validation_meta
+                if _resolution.get("status") == "resolved":
                     pass
-                if item.status == "retry":
-                    _schedule_scan_work_dispatch(item.scan_job_id, countdown=2)
-                return {"id": item.id, "status": item.status, "reason": item.last_error}
+                else:
+                    now = datetime.now()
+                    collection_attempts = int(_validation_meta.get("evidence_collection_attempts") or 0)
+                    item.status = "retry" if collection_attempts < 2 else "blocked"
+                    item.lease_until = None
+                    item.finished_at = None if item.status == "retry" else now
+                    item.last_error = str(_resolution.get("reason") or "awaiting_evidence")[:2000]
+                    _validation_meta["runtime_recovery"] = {"type": "recollect_context", "verification": "pending" if item.status == "retry" else "failed", "verification_attempt": collection_attempts}
+                    item.item_metadata = _validation_meta
+                    item.result = {"status": item.status, "blocked_reason": item.last_error, "validation_resolution": _resolution, "evidence_collection": _validation_meta.get("evidence_collection_result") or {}, "finished_at": now.isoformat()}
+                    if wire is not None:
+                        wire.status = "awaiting_evidence"
+                        wire.result_summary = {"validation_resolution": _resolution, "evidence_collection": _validation_meta.get("evidence_collection_result") or {}}
+                        db.add(wire)
+                    db.add(item)
+                    db.commit()
+                    try:
+                        kali_inflight_release(str(item.resource_class or "light"), 1)
+                    except Exception:
+                        pass
+                    if item.status == "retry":
+                        _schedule_scan_work_dispatch(item.scan_job_id, countdown=2)
+                    return {"id": item.id, "status": item.status, "reason": item.last_error}
             if _resolution.get("status") == "resolved":
                 _validation_meta["execution_target"] = _resolution["execution_target"]
                 _validation_meta["target_parameter"] = _resolution.get("parameter_ref") or _validation_meta.get("target_parameter")
@@ -5895,6 +5945,15 @@ def execute_scan_work_item(item_id: int):
         _applicability = work_item_applicability_decision(item, _state_for_applicability, at="dispatch")
         _meta_for_applicability = dict(item.item_metadata or {})
         _meta_for_applicability["applicability_dispatch"] = _applicability
+        if _meta_for_applicability.get("skill_id") and not _meta_for_applicability.get("skill_activity_plan"):
+            from app.services.skill_activity_materializer import build_skill_activity_plan
+
+            _skill_id = str(_meta_for_applicability["skill_id"])
+            _meta_for_applicability["skill_activity_plan"] = build_skill_activity_plan(
+                {"id": _skill_id, "name": _skill_id, "objective": f"Executar {_skill_id}", "evidence_required": list(_meta_for_applicability.get("expected_evidence") or [])},
+                phase_id=str(item.phase_id or ""),
+                target=str(item.target or ""),
+            )
         if not _applicability.get("applicable"):
             now = datetime.now()
             reason = str(_applicability.get("reason") or "not_applicable")
@@ -5962,9 +6021,9 @@ def execute_scan_work_item(item_id: int):
 
         now = datetime.now()
         item.status = "running"
-        item.attempts = int(item.attempts or 0) + 1
-        attempt = WorkItemAttempt(work_item_id=item.id, attempt_key=f"wi-{item.id}-{item.attempts}-{uuid.uuid4().hex[:12]}", state="execution_started", started_at=now)
-        db.add(attempt)
+        from app.services.work_item_attempts import start_attempt
+
+        attempt = start_attempt(db, item)
         item.started_at = now
         item.finished_at = None
         _work_item_lease_seconds = 1800
@@ -6053,6 +6112,9 @@ def execute_scan_work_item(item_id: int):
                     "execution_path": "worker_precondition",
                 }
                 item.updated_at = now_done
+                from app.services.work_item_attempts import transition_attempt
+
+                transition_attempt(db, item, "skipped", error_class="missing_post_template")
                 try:
                     from app.services.scan_work_queue import kali_inflight_release
                     kali_inflight_release(str(item.resource_class or "light"), 1)
@@ -6133,6 +6195,9 @@ def execute_scan_work_item(item_id: int):
                 }
                 item.updated_at = now_done
                 db.add(item)
+                from app.services.work_item_attempts import transition_attempt
+
+                transition_attempt(db, item, "skipped", error_class="missing_post_body")
                 try:
                     kali_inflight_release(str(item.resource_class or "light"), 1)
                 except Exception:
@@ -6298,6 +6363,14 @@ def execute_scan_work_item(item_id: int):
                     "skill_activity_execution_error": str(_activity_exc)[:500],
                 }
             item.updated_at = now_done
+            from app.services.work_item_attempts import transition_attempt
+
+            transition_attempt(
+                db,
+                item,
+                terminal if terminal != "retry" else "failed",
+                error_class="backend_local_retry" if terminal == "retry" else (_local_error[:80] or None),
+            )
             if _norm_item_tool in {"zap-api", "api-skill-top20"} and job:
                 state = dict(job.state_data or {})
                 api_config = dict(state.get("api_scan_config") or {})
@@ -6473,14 +6546,17 @@ def execute_scan_work_item(item_id: int):
             json=execution,
             timeout=30,
         )
-        response.raise_for_status()
         result = dict(response.json())
-        if 'attempt' in locals():
-            attempt.state = "mcp_accepted" if response.status_code < 300 else "failed"
-            attempt.mcp_request_id = str(result.get("mcp_request_id") or result.get("request_id") or "")[:160] or None
-            attempt.error_class = None if response.status_code < 300 else "mcp_rejected"
-            attempt.finished_at = datetime.now() if response.status_code >= 300 else None
-            db.add(attempt)
+        from app.services.work_item_attempts import transition_attempt
+
+        transition_attempt(
+            db,
+            item,
+            "mcp_accepted" if response.status_code < 300 else "failed",
+            mcp_request_id=result.get("mcp_request_id") or result.get("request_id"),
+            error_class=None if response.status_code < 300 else "mcp_rejected",
+        )
+        response.raise_for_status()
         db.refresh(job)
         if _scan_is_terminal(job.status) and not _is_post_scan_revalidation(item, job):
             try:
@@ -6536,6 +6612,13 @@ def execute_scan_work_item(item_id: int):
                 "execution_path": result.get("execution_path"),
                 "submitted_at": datetime.now().isoformat(),
             }
+            transition_attempt(
+                db,
+                item,
+                "runner_started",
+                mcp_request_id=result.get("mcp_request_id"),
+                runner_job_id=result.get("kali_job_id") or result.get("dispatch_task_id"),
+            )
             _schedule_work_item_poll(item.id, countdown=5)
         item.updated_at = datetime.now()
         try:
@@ -6612,6 +6695,14 @@ def execute_scan_work_item(item_id: int):
             )
             item.lease_until = datetime.now() + timedelta(seconds=120) if item.status == "retry" else None
             item.finished_at = datetime.now() if item.status == "failed" else None
+            from app.services.work_item_attempts import transition_attempt
+
+            transition_attempt(
+                db,
+                item,
+                "failed",
+                error_class="transient_worker_error" if transient_error else "worker_error",
+            )
             # ── Camada 0: semaphore leak fix — release slot on exception ──────
             if item.status == "failed":
                 try:
@@ -6759,6 +6850,14 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
             result_state["runner_output_bytes"] = int(status_payload.get("output_bytes") or 0)
             result_state["runner_elapsed_seconds"] = status_payload.get("elapsed_seconds")
             result_state["runner_timeout_policy"] = dict(status_payload.get("timeout_policy") or {})
+            from app.services.work_item_attempts import transition_attempt
+
+            transition_attempt(
+                db,
+                item,
+                "runner_started",
+                runner_job_id=kali_job_id,
+            )
             # P1 — heartbeat de progresso VISÍVEL. O updated_at já era tocado a
             # cada poll (sinal mudo p/ o watchdog), mas o branch "ainda rodando"
             # não emitia log nenhum — então no log/UI o job parecia morto. Conta
@@ -6848,6 +6947,15 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
         item.finished_at = datetime.now() if terminal != "retry" else None
         item.lease_until = None if terminal != "retry" else datetime.now() + timedelta(seconds=120)
         item.last_error = terminal_error
+        from app.services.work_item_attempts import transition_attempt
+
+        transition_attempt(
+            db,
+            item,
+            terminal if terminal != "retry" else "failed",
+            runner_job_id=kali_job_id,
+            error_class=terminal_error if terminal != "completed" else None,
+        )
 
         # Libera slot no semáforo Redis global quando tarefa termina (não é retry)
         if terminal != "retry":
@@ -8264,7 +8372,7 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
                 }
             item.last_error = str(exc)[:2000]
             # If max attempts exceeded, mark failed and release semaphore
-            _over_limit = int(item.attempts or 0) >= int(item.max_attempts or 2)
+            _over_limit = int(getattr(item, "attempts", 0) or 0) >= int(getattr(item, "max_attempts", 2) or 2)
             if _over_limit:
                 item.status = "failed"
                 item.finished_at = datetime.now()
@@ -8275,6 +8383,9 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
                     _release_poll(str(item.resource_class or "light"), 1)
                 except Exception:
                     pass
+                from app.services.work_item_attempts import transition_attempt
+
+                transition_attempt(db, item, "failed", error_class="poll_processing_error")
             else:
                 item.lease_until = datetime.now() + timedelta(seconds=120)
             item.updated_at = datetime.now()

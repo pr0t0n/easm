@@ -416,37 +416,26 @@ def run_watchdog(db) -> dict:
         # updated_at. Só mexemos quando o lease venceu ou quando nem existe lease
         # e o item está velho.
         if int(expired or 0) > 0 or int(stuck or 0) > 0:
-            retry_res = db.execute(text("""
-                UPDATE scan_work_items
-                   SET status='retry',
-                       lease_until=NULL,
-                       updated_at=now(),
-                       last_error='watchdog_stale_active_requeued'
-                 WHERE scan_job_id=:sid
-                   AND status IN ('running','dispatched','submitted')
-                   AND attempts < max_attempts
-                   AND (
-                     lease_until <= now()
-                     OR (lease_until IS NULL AND updated_at < now() - interval '%d minutes')
-                   )
-            """ % _STUCK_MINUTES), {"sid": int(sid)})
-            fail_res = db.execute(text("""
-                UPDATE scan_work_items
-                   SET status='failed',
-                       lease_until=NULL,
-                       finished_at=now(),
-                       updated_at=now(),
-                       last_error='watchdog_stale_active_max_attempts'
-                 WHERE scan_job_id=:sid
-                   AND status IN ('running','dispatched','submitted')
-                   AND attempts >= max_attempts
-                   AND (
-                     lease_until <= now()
-                     OR (lease_until IS NULL AND updated_at < now() - interval '%d minutes')
-                   )
-            """ % _STUCK_MINUTES), {"sid": int(sid)})
-            requeued = int(getattr(retry_res, "rowcount", 0) or 0)
-            failed = int(getattr(fail_res, "rowcount", 0) or 0)
+            from app.models.models import ScanWorkItem
+            from app.services.work_item_attempts import reconcile_expired_item
+
+            cutoff = datetime.now() - timedelta(minutes=_STUCK_MINUTES)
+            stale_items = (
+                db.query(ScanWorkItem)
+                .filter(
+                    ScanWorkItem.scan_job_id == int(sid),
+                    ScanWorkItem.status.in_(["running", "dispatched", "submitted"]),
+                )
+                .all()
+            )
+            outcomes = []
+            for stale_item in stale_items:
+                lease_expired = stale_item.lease_until is not None and stale_item.lease_until <= datetime.now()
+                lease_missing_stale = stale_item.lease_until is None and stale_item.updated_at < cutoff
+                if lease_expired or lease_missing_stale:
+                    outcomes.append(reconcile_expired_item(db, stale_item, datetime.now()))
+            requeued = sum(outcome.startswith("requeued") or outcome == "retry" for outcome in outcomes)
+            failed = 0
             if requeued or failed:
                 report["requeued"] += requeued
                 report["stale_failed"] = int(report.get("stale_failed", 0) or 0) + failed

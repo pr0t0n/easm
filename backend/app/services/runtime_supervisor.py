@@ -6,7 +6,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.models import AgentTraceEvent, ScanLog, ScanWorkItem
+from app.models.models import AgentTraceEvent, EvidenceArtifact, ScanLog, ScanWorkItem, WorkItemAttempt
 
 
 def build_execution_timeline(db: Session, job_id: int, item_id: int | None = None) -> list[dict[str, Any]]:
@@ -15,11 +15,18 @@ def build_execution_timeline(db: Session, job_id: int, item_id: int | None = Non
     timeline = [{"at": event.created_at.isoformat(), "source": "agent", "type": event.event_type, "status": event.status, "payload": event.payload or {}, "item_id": (event.payload or {}).get("work_item_id")} for event in events]
     timeline.extend({"at": log.created_at.isoformat(), "source": log.source, "type": "log", "status": log.level, "message": log.message} for log in logs)
     if item_id is not None:
+        attempts = list(db.scalars(select(WorkItemAttempt).where(WorkItemAttempt.work_item_id == item_id).order_by(WorkItemAttempt.created_at, WorkItemAttempt.id)))
+        timeline.extend({"at": attempt.created_at.isoformat(), "source": "execution_attempt", "type": attempt.state, "status": attempt.state, "item_id": item_id, "payload": {"attempt_id": attempt.id, "attempt_key": attempt.attempt_key, "worker_id": attempt.worker_id, "mcp_request_id": attempt.mcp_request_id, "runner_job_id": attempt.runner_job_id, "error_class": attempt.error_class}} for attempt in attempts)
+        item = db.query(ScanWorkItem).filter(ScanWorkItem.id == item_id).first()
+        if item is not None:
+            artifacts = db.query(EvidenceArtifact).filter(EvidenceArtifact.scan_job_id == job_id, EvidenceArtifact.phase_id == item.phase_id, EvidenceArtifact.tool_name == item.tool_name).order_by(EvidenceArtifact.created_at, EvidenceArtifact.id).all()
+            timeline.extend({"at": artifact.created_at.isoformat(), "source": "evidence", "type": artifact.artifact_type, "status": artifact.validation_status, "item_id": item_id, "payload": {"artifact_id": artifact.id, "target": artifact.target, "confidence_score": artifact.confidence_score}} for artifact in artifacts)
+    if item_id is not None:
         timeline = [row for row in timeline if row.get("item_id") in (None, item_id)]
     return sorted(timeline, key=lambda row: row["at"])[-500:]
 
 
-def diagnose_execution(item: Any) -> dict[str, Any]:
+def diagnose_execution(db: Session, item: Any) -> dict[str, Any]:
     result = dict(getattr(item, "result", None) or {})
     metadata = dict(getattr(item, "item_metadata", None) or {})
     resolution = dict(metadata.get("validation_resolution") or {})
@@ -28,17 +35,21 @@ def diagnose_execution(item: Any) -> dict[str, Any]:
         category = "data_missing"
     elif "contradict" in error or resolution.get("status") == "contradictory":
         category = "data_contradictory"
-    elif "timeout" in error or "connection" in error or "temporar" in error:
+    elif "supervisor_review_required" in error or "impossible" in error:
+        category = "impossible_state"
+    elif "dispatch_not_acknowledged" in error or "timeout" in error or "connection" in error or "temporar" in error:
         category = "transient_error"
     elif "capacity" in error or "resource" in error:
         category = "capacity_unavailable"
     elif str(getattr(item, "status", "")).lower() in {"failed", "timeout"}:
-        category = "contract_degraded" if result.get("mcp_error") else "inconclusive_result"
+        category = "contract_degraded" if result.get("mcp_error") or "mcp" in error else "inconclusive_result"
     elif str(getattr(item, "status", "")).lower() == "completed" and not any(result.get(key) for key in ("stdout_full", "stdout_preview", "parsed_result", "evidence_path")):
         category = "inconclusive_result"
     else:
         category = "ok"
-    return {"category": category, "confidence": 0.9 if category != "ok" else 1.0, "evidence": {"status": getattr(item, "status", None), "error": getattr(item, "last_error", None), "resolution": resolution}}
+    from app.services.work_item_attempts import attempt_summary
+
+    return {"category": category, "confidence": 0.9 if category != "ok" else 1.0, "evidence": {"status": getattr(item, "status", None), "error": getattr(item, "last_error", None), "resolution": resolution, "attempt": attempt_summary(db, item)}}
 
 
 def apply_recovery_decision(item: Any, decision: dict[str, Any]) -> dict[str, Any]:
@@ -49,12 +60,12 @@ def apply_recovery_decision(item: Any, decision: dict[str, Any]) -> dict[str, An
         return {"applied": False, "state": getattr(item, "status", None), "verification": "not_required"}
     attempts = int(getattr(item, "attempts", 0) or 0)
     max_attempts = int(getattr(item, "max_attempts", 1) or 1)
-    safe_recovery = category in {"data_missing", "data_contradictory", "transient_error", "capacity_unavailable", "inconclusive_result"}
-    if safe_recovery and attempts < max_attempts:
-        item.status = "retry"
+    safe_recovery = category in {"data_missing", "data_contradictory", "transient_error", "capacity_unavailable", "contract_degraded", "inconclusive_result"}
+    if safe_recovery:
+        item.status = "retry" if attempts < max_attempts else "blocked"
         item.lease_until = None
         recovery["applied"] = True
-        recovery["state"] = "retry"
+        recovery["state"] = "retry" if attempts < max_attempts else "replan"
         recovery["verification_attempt"] = attempts + 1
     else:
         item.status = "blocked"
@@ -66,21 +77,53 @@ def apply_recovery_decision(item: Any, decision: dict[str, Any]) -> dict[str, An
     metadata["runtime_recovery"] = recovery
     metadata["runtime_recovery_source"] = decision.get("work_item_id")
     item.item_metadata = metadata
+    decision["recovery"] = recovery
     return recovery
 
 
 def materialize_replan(db: Session, item: Any, decision: dict[str, Any]) -> Any | None:
+    if decision.get("action") != "correct_in_flight":
+        return None
     recovery = dict(decision.get("recovery") or {})
-    if not recovery.get("applied") or recovery.get("state") != "retry":
+    if not recovery.get("applied") or recovery.get("state") not in {"retry", "replan"}:
         return None
     metadata = dict(getattr(item, "item_metadata", None) or {})
     generation = int(metadata.get("plan_generation") or 0) + 1
-    existing = next((row for row in db.query(ScanWorkItem).filter(ScanWorkItem.scan_job_id == item.scan_job_id, ScanWorkItem.execution_context == "recovery").all() if int((row.item_metadata or {}).get("recovery_of") or 0) == int(item.id)), None)
+    recovery_root = int(metadata.get("recovery_root") or metadata.get("recovery_of") or item.id)
+    if generation > int(item.max_attempts or 1):
+        item.status = "blocked"
+        item.last_error = "supervisor_broken_glass:recovery_generations_exhausted"
+        return None
+    existing = next((row for row in db.query(ScanWorkItem).filter(ScanWorkItem.scan_job_id == item.scan_job_id).all() if int((row.item_metadata or {}).get("recovery_root") or 0) == recovery_root and int((row.item_metadata or {}).get("plan_generation") or 0) == generation), None)
     if existing is not None:
         return existing
-    clone = ScanWorkItem(scan_job_id=item.scan_job_id, execution_context="recovery", auth_session_revision=item.auth_session_revision, phase_id=item.phase_id, target=item.target, tool_name=item.tool_name, profile=item.profile, resource_class=item.resource_class, priority=max(1, int(item.priority or 100) - 1), status="queued", max_attempts=item.max_attempts, item_metadata={**metadata, "recovery_of": int(item.id), "plan_generation": generation})
-    item.status = "blocked"
+    clone_metadata = {**metadata, "recovery_of": int(item.id), "recovery_root": recovery_root, "plan_generation": generation}
+    clone_metadata["runtime_recovery"] = {**recovery, "verification": "pending", "source_work_item_id": int(item.id)}
+    tool_name = str(item.tool_name or "")
+    profile = str(item.profile or "")
+    resource_class = str(item.resource_class or "light")
+    if recovery.get("type") == "alternate_capability":
+        from app.services.scan_quality import _fallback_candidates_for_item
+        from app.services.scan_work_queue import _tool_profile, apply_phase_tool_metadata, resource_class_for_tool
+
+        candidates = _fallback_candidates_for_item(item)
+        if not candidates:
+            item.status = "blocked"
+            item.last_error = "supervisor_broken_glass:no_alternate_capability"
+            return None
+        tool_name = candidates[0]
+        profile = _tool_profile(tool_name)
+        resource_class = resource_class_for_tool(tool_name)
+        clone_metadata = apply_phase_tool_metadata(clone_metadata, str(item.phase_id or ""), tool_name, source="runtime_supervisor")
+        clone_metadata["alternate_capability"] = {"from": str(item.tool_name or ""), "to": tool_name}
+    if recovery.get("type") == "change_capacity":
+        clone_metadata["capacity_recovery"] = {"source_resource_class": resource_class, "priority_boost": 1}
+    clone = ScanWorkItem(scan_job_id=item.scan_job_id, execution_context=f"recovery-{generation}", auth_session_revision=item.auth_session_revision, phase_id=item.phase_id, target=item.target, tool_name=tool_name, profile=profile, resource_class=resource_class, priority=max(1, int(item.priority or 100) - 1), status="queued", attempts=0, max_attempts=item.max_attempts, item_metadata=clone_metadata)
+    item.status = "skipped"
     item.last_error = f"superseded_by_replan:{generation}"
+    item.lease_until = None
+    item.finished_at = datetime.now()
+    item.result = {**dict(getattr(item, "result", None) or {}), "status": "superseded", "superseded_by_generation": generation}
     db.add(clone)
     db.flush()
     recovery["new_work_item_id"] = clone.id
@@ -94,7 +137,7 @@ def evaluate_runtime_outcome(db: Session, job: Any, item: Any) -> dict[str, Any]
     metadata = dict(getattr(item, "item_metadata", None) or {})
     status = str(getattr(item, "status", "") or "").lower()
     resolution = dict(metadata.get("validation_resolution") or {})
-    diagnosis = diagnose_execution(item)
+    diagnosis = diagnose_execution(db, item)
     reasons: list[str] = []
     if resolution.get("status") == "awaiting_evidence":
         reasons.append(str(resolution.get("reason") or "context_quality_below_threshold"))
@@ -103,8 +146,22 @@ def evaluate_runtime_outcome(db: Session, job: Any, item: Any) -> dict[str, Any]
     if status == "completed" and not any(result.get(key) for key in ("stdout_full", "stdout_preview", "parsed_result", "evidence_path")):
         reasons.append("completed_without_observable_evidence")
     quality = 1.0 if not reasons else max(0.0, 1.0 - min(0.9, 0.25 * len(reasons)))
-    action = "continue" if quality >= 0.8 and diagnosis["category"] == "ok" else "open_broken_glass"
-    recovery = {"type": "none" if action == "continue" else ("recollect_context" if diagnosis["category"] == "data_missing" else "replan_with_supervisor"), "verification_required": action != "continue"}
+    recovery_types = {
+        "data_missing": "recollect_context",
+        "data_contradictory": "rehydrate_authoritative_context",
+        "transient_error": "redispatch",
+        "capacity_unavailable": "change_capacity",
+        "contract_degraded": "replan_with_supervisor",
+        "inconclusive_result": "alternate_capability",
+        "impossible_state": "broken_glass",
+    }
+    if quality >= 0.8 and diagnosis["category"] == "ok":
+        action = "continue"
+    elif diagnosis["category"] == "impossible_state":
+        action = "open_broken_glass"
+    else:
+        action = "correct_in_flight"
+    recovery = {"type": recovery_types.get(diagnosis["category"], "none"), "verification_required": action != "continue"}
     decision = {
         "status": "satisfactory" if action == "continue" else "unsatisfactory",
         "quality_score": quality,
