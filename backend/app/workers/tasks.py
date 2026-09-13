@@ -5673,7 +5673,7 @@ def execute_scan_work_item(item_id: int):
     import requests
     from app.db.session import SessionLocal
     from app.core.config import settings
-    from app.models.models import AgentTraceEvent, ScanJob, ScanLog, ScanWorkItem, ValidationWire
+    from app.models.models import AgentTraceEvent, ScanJob, ScanLog, ScanWorkItem, ValidationWire, WorkItemAttempt
     from app.services.scan_work_queue import (
         enforce_work_item_scope,
         kali_inflight_release,
@@ -5963,6 +5963,8 @@ def execute_scan_work_item(item_id: int):
         now = datetime.now()
         item.status = "running"
         item.attempts = int(item.attempts or 0) + 1
+        attempt = WorkItemAttempt(work_item_id=item.id, attempt_key=f"wi-{item.id}-{item.attempts}-{uuid.uuid4().hex[:12]}", state="execution_started", started_at=now)
+        db.add(attempt)
         item.started_at = now
         item.finished_at = None
         _work_item_lease_seconds = 1800
@@ -6473,6 +6475,12 @@ def execute_scan_work_item(item_id: int):
         )
         response.raise_for_status()
         result = dict(response.json())
+        if 'attempt' in locals():
+            attempt.state = "mcp_accepted" if response.status_code < 300 else "failed"
+            attempt.mcp_request_id = str(result.get("mcp_request_id") or result.get("request_id") or "")[:160] or None
+            attempt.error_class = None if response.status_code < 300 else "mcp_rejected"
+            attempt.finished_at = datetime.now() if response.status_code >= 300 else None
+            db.add(attempt)
         db.refresh(job)
         if _scan_is_terminal(job.status) and not _is_post_scan_revalidation(item, job):
             try:
