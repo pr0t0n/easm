@@ -346,7 +346,7 @@ def _persist_job_record(job: dict[str, Any]) -> None:
         return
     try:
         path = _job_path(job_id)
-        tmp_path = path.with_suffix(".tmp")
+        tmp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
         tmp_path.write_text(
             json.dumps(_json_safe_job(job), ensure_ascii=False, indent=2),
             encoding="utf-8",

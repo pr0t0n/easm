@@ -137,6 +137,16 @@ def _kali_functional_ok() -> bool:
             return False
 
 
+def _has_active_work_items(db) -> bool:
+    return bool(db.execute(text("""
+        SELECT 1
+          FROM scan_work_items
+         WHERE status IN ('dispatched', 'running', 'submitted')
+           AND lease_until > now()
+         LIMIT 1
+    """)).scalar())
+
+
 def _restart_kali() -> bool:
     """Reinicia o kali_runner via Docker (requer socket rw). Limpa o estado inchado."""
     try:
@@ -195,7 +205,10 @@ def run_watchdog(db) -> dict:
     # ── 1. kali funcional? senão, reinicia ──────────────────────────────────
     if not _kali_functional_ok():
         report["kali_functional"] = False
-        report["kali_restarted"] = _restart_kali()
+        if _has_active_work_items(db):
+            report["kali_restart_deferred"] = "active_work_items"
+        else:
+            report["kali_restarted"] = _restart_kali()
 
     # ── 1b. Poller rehydration from durable DB state ─────────────────────────
     # A submitted scan_work_item may outlive its volatile Celery poll message.
@@ -741,6 +754,7 @@ def run_watchdog(db) -> dict:
             WHERE EXISTS (SELECT 1 FROM scan_jobs)
         """), {"alert": (not report["kali_functional"]) or bool(report["stalled_scans"]),
                "msg": f"watchdog kali_ok={report['kali_functional']} restarted={report['kali_restarted']} "
+                      f"restart_deferred={report.get('kali_restart_deferred') or 'none'} "
                       f"stalled={len(report['stalled_scans'])} requeued={report['requeued']}"})
         db.commit()
     except Exception:

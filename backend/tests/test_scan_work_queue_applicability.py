@@ -504,6 +504,8 @@ def test_requeue_evidence_ready_work_items_revives_missing_evidence_skip() -> No
         tool_name="sqlmap",
         target="target.example.com",
         status="skipped",
+        attempts=2,
+        max_attempts=2,
         last_error="skipped:applicability:required_evidence_absent:discovered_parameterized_urls",
         result={"status": "skipped"},
         item_metadata={"skill_ids": ["skill.vuln.sqli"]},
@@ -551,6 +553,7 @@ def test_requeue_evidence_ready_work_items_revives_missing_evidence_skip() -> No
 
     assert requeued == 1
     assert item.status == "queued"
+    assert item.attempts == 0
     assert item.last_error is None
     assert item.result["reason"] == "applicability_prerequisite_now_present"
     assert item.item_metadata["requeued_after_evidence"] is True
@@ -568,6 +571,8 @@ def test_requeue_evidence_ready_work_items_revives_stale_http_surface_skip() -> 
         tool_name="nuclei-exposure",
         target="target.example.com",
         status="skipped",
+        attempts=2,
+        max_attempts=2,
         last_error="skipped:applicability:no_http_surface:tcp_closed",
         result={"status": "skipped"},
         item_metadata={"skill_ids": ["skill.chain.exposed_git_to_credential_leak"]},
@@ -616,6 +621,7 @@ def test_requeue_evidence_ready_work_items_revives_stale_http_surface_skip() -> 
 
     assert requeued == 1
     assert item.status == "queued"
+    assert item.attempts == 0
     assert item.last_error is None
     assert item.result["reason"] == "applicability_prerequisite_now_present"
 

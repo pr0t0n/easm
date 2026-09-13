@@ -2381,6 +2381,22 @@ def requeue_evidence_ready_work_items(db: Session, job: ScanJob) -> int:
     requeued_ids: list[int] = []
     for item in candidates:
         decision = work_item_applicability_decision(item, state, at="requeue")
+        if (
+            decision.get("applicable")
+            and str(item.tool_name or "").lower() == "sqlmap"
+            and str(item.last_error or "").endswith("required_evidence_absent:post_body")
+        ):
+            from app.services.sqlmap_request import resolve_sqlmap_request
+
+            metadata = dict(item.item_metadata or {})
+            request = resolve_sqlmap_request(
+                db, item.scan_job_id,
+                str(metadata.get("execution_target") or item.target),
+                str(getattr(item, "profile", "") or ""),
+                dict(metadata.get("env") or {}),
+            )
+            if request["reason"]:
+                decision = {**decision, "applicable": False, "reason": request["reason"]}
         if not decision.get("applicable"):
             meta = dict(item.item_metadata or {})
             meta["applicability_requeue"] = decision
@@ -2392,6 +2408,7 @@ def requeue_evidence_ready_work_items(db: Session, job: ScanJob) -> int:
         meta["requeued_after_evidence"] = True
         meta["requeued_after_evidence_at"] = now.isoformat()
         item.status = "queued"
+        item.attempts = 0
         item.lease_until = None
         item.finished_at = None
         item.last_error = None

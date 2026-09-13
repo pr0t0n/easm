@@ -5590,7 +5590,7 @@ def schedule_post_scan_validation_wire(item_id: int, *, countdown: int = 0) -> s
 def dispatch_post_scan_validation_wire(item_id: int):
     """Capacity-aware dispatcher for one bounded P21 wire on a closed scan."""
     from app.db.session import SessionLocal
-    from app.models.models import ScanJob, ScanLog, ScanWorkItem
+    from app.models.models import ScanJob, ScanLog, ScanWorkItem, ValidationWire
     from app.services.scan_work_queue import capacity_limits, kali_inflight_claim, kali_inflight_release
     from app.workers.worker_groups import phase_queue
 
@@ -5673,7 +5673,7 @@ def execute_scan_work_item(item_id: int):
     import requests
     from app.db.session import SessionLocal
     from app.core.config import settings
-    from app.models.models import AgentTraceEvent, ScanJob, ScanLog, ScanWorkItem
+    from app.models.models import AgentTraceEvent, ScanJob, ScanLog, ScanWorkItem, ValidationWire
     from app.services.scan_work_queue import (
         enforce_work_item_scope,
         kali_inflight_release,
@@ -5758,6 +5758,47 @@ def execute_scan_work_item(item_id: int):
                 "skipped": "out_of_scope",
                 "scope": _scope_decision.get("authorized_scope") or [],
             }
+
+        _validation_meta = dict(item.item_metadata or {})
+        if _validation_meta.get("validation_wire_id"):
+            from app.services.validation_execution_context import resolve_validation_execution_context
+
+            _resolution = resolve_validation_execution_context(db, item)
+            _validation_meta["validation_resolution"] = _resolution
+            if _resolution.get("status") == "awaiting_evidence":
+                now = datetime.now()
+                attempts = int(item.attempts or 0)
+                max_attempts = int(item.max_attempts or 1)
+                item.status = "retry" if attempts < max_attempts else "blocked"
+                item.lease_until = None
+                item.finished_at = now
+                item.last_error = str(_resolution.get("reason") or "awaiting_evidence")[:2000]
+                _validation_meta["runtime_recovery"] = {"type": "recollect_context", "verification": "pending", "verification_attempt": attempts + 1}
+                item.item_metadata = _validation_meta
+                item.result = {
+                    "status": item.status,
+                    "blocked_reason": item.last_error,
+                    "validation_resolution": _resolution,
+                    "finished_at": now.isoformat(),
+                }
+                wire = db.query(ValidationWire).filter(ValidationWire.id == int(_validation_meta["validation_wire_id"])).first()
+                if wire is not None:
+                    wire.status = "awaiting_evidence"
+                    wire.result_summary = {"validation_resolution": _resolution}
+                    db.add(wire)
+                db.add(item)
+                db.commit()
+                try:
+                    kali_inflight_release(str(item.resource_class or "light"), 1)
+                except Exception:
+                    pass
+                if item.status == "retry":
+                    _schedule_scan_work_dispatch(item.scan_job_id, countdown=2)
+                return {"id": item.id, "status": item.status, "reason": item.last_error}
+            if _resolution.get("status") == "resolved":
+                _validation_meta["execution_target"] = _resolution["execution_target"]
+                _validation_meta["target_parameter"] = _resolution.get("parameter_ref") or _validation_meta.get("target_parameter")
+                item.item_metadata = _validation_meta
 
         # Internal, read-only validators are first-class persistent work items.
         # This keeps large hypothesis sets resumable and observable without
@@ -5968,7 +6009,7 @@ def execute_scan_work_item(item_id: int):
         except Exception:
             pass
         for _env_name, _env_value in dict(_item_meta.get("env") or {}).items():
-            if str(_env_name) in {"SCAN_FUZZ_PARAM", "SCAN_FUZZ_POST_DATA", "SCAN_FUZZ_CONTENT_TYPE"}:
+            if str(_env_name) in {"SCAN_FUZZ_PARAM", "SCAN_FUZZ_POST_DATA", "SCAN_FUZZ_CONTENT_TYPE", "SCAN_HTTP_METHOD"}:
                 _job_env[str(_env_name)] = str(_env_value)
 
         _norm_item_tool = str(item.tool_name or "").strip().lower()
@@ -6065,28 +6106,16 @@ def execute_scan_work_item(item_id: int):
             "expected_evidence": ["stdout", "raw_tool_output", "parsed_result"],
         }
         if str(item.tool_name or "").lower() == "sqlmap":
-            try:
-                from app.models.models import ObservedRequest
-                observed = (
-                    db.query(ObservedRequest)
-                    .filter(
-                        ObservedRequest.scan_job_id == item.scan_job_id,
-                        ObservedRequest.url == _dispatch_target,
-                        ObservedRequest.method.in_(["POST", "PUT", "PATCH"]),
-                        ObservedRequest.is_mutating.is_(True),
-                    )
-                    .order_by(ObservedRequest.created_at.desc())
-                    .first()
-                )
-                body = str((observed.request_body or {}).get("body") or "") if observed else ""
-                if observed and body:
-                    execution["profile"] = "sqlmap_body"
-                    execution["arguments"]["SCAN_HTTP_METHOD"] = str(observed.method)
-                    execution["arguments"]["SCAN_FUZZ_POST_DATA"] = body
-                    execution["arguments"]["SCAN_FUZZ_CONTENT_TYPE"] = str(observed.request_content_type or "application/x-www-form-urlencoded")
-            except Exception:
-                pass
-            if not str(execution.get("arguments", {}).get("SCAN_FUZZ_POST_DATA") or "").strip():
+            from app.services.sqlmap_request import resolve_sqlmap_request
+
+            request = resolve_sqlmap_request(
+                db, item.scan_job_id, _dispatch_target,
+                str(execution["profile"]), _job_env,
+            )
+            if not request["reason"]:
+                execution["profile"] = request["profile"]
+                execution["arguments"].update(request["arguments"])
+            else:
                 now_done = datetime.now()
                 item.status = "skipped"
                 item.finished_at = now_done
@@ -6102,6 +6131,10 @@ def execute_scan_work_item(item_id: int):
                 }
                 item.updated_at = now_done
                 db.add(item)
+                try:
+                    kali_inflight_release(str(item.resource_class or "light"), 1)
+                except Exception:
+                    pass
                 db.commit()
                 return {"id": item.id, "status": "skipped", "reason": "sqlmap_post_body_not_observed"}
         if _is_batch:
@@ -6379,6 +6412,26 @@ def execute_scan_work_item(item_id: int):
                     f"tool={item.tool_name} status={terminal} execution_path={result.get('execution_path') or 'backend_local'}"
                 ),
             ))
+            _recovery_item = None
+            if job:
+                try:
+                    from app.services.runtime_supervisor import evaluate_runtime_outcome
+                    from app.services.runtime_supervisor import apply_recovery_decision, materialize_replan
+
+                    _runtime_decision = evaluate_runtime_outcome(db, job, item)
+                    apply_recovery_decision(item, _runtime_decision)
+                    _recovery_item = materialize_replan(db, item, _runtime_decision)
+                    if _runtime_decision.get("action") == "open_broken_glass" and terminal in {"skipped", "failed", "timeout"}:
+                        item.item_metadata = {
+                            **dict(item.item_metadata or {}),
+                            "runtime_supervisor_decision": _runtime_decision,
+                        }
+                        item.last_error = f"supervisor_broken_glass:{';'.join(_runtime_decision.get('reasons') or [])}"[:2000]
+                        item.status = "blocked"
+                        item.finished_at = datetime.now()
+                        item.lease_until = None
+                except Exception as _runtime_exc:
+                    logger.warning("runtime supervisor evaluation failed item=%s: %s", item.id, _runtime_exc)
             db.commit()
             if terminal == "completed":
                 try:
@@ -6405,7 +6458,9 @@ def execute_scan_work_item(item_id: int):
                     )
             if terminal == "retry" and _is_post_scan_revalidation(item, job):
                 schedule_post_scan_validation_wire(item.id, countdown=30)
-            return {"id": item.id, "status": terminal, "execution_path": result.get("execution_path") or "backend_local"}
+            if _recovery_item is not None:
+                _schedule_scan_work_dispatch(item.scan_job_id, countdown=1)
+            return {"id": item.id, "status": item.status, "recovery_work_item_id": getattr(_recovery_item, "id", None), "execution_path": result.get("execution_path") or "backend_local"}
 
         # Never pass timeout to the kali runner — the profile's own timeout is
         # the authoritative limit. A backend-side value kills long-running tools.
@@ -8132,6 +8187,26 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
                     + (f" findings={findings_created}" if findings_created else "")
                 ),
             ))
+        _runtime_decision = None
+        if job:
+            try:
+                from app.services.runtime_supervisor import evaluate_runtime_outcome
+                from app.services.runtime_supervisor import apply_recovery_decision, materialize_replan
+
+                _runtime_decision = evaluate_runtime_outcome(db, job, item)
+                apply_recovery_decision(item, _runtime_decision)
+                _recovery_item = materialize_replan(db, item, _runtime_decision)
+                if _runtime_decision.get("action") == "open_broken_glass" and item.status in {"skipped", "failed", "timeout"}:
+                    item.item_metadata = {
+                        **dict(item.item_metadata or {}),
+                        "runtime_supervisor_decision": _runtime_decision,
+                    }
+                    item.last_error = f"supervisor_broken_glass:{';'.join(_runtime_decision.get('reasons') or [])}"[:2000]
+                    item.status = "blocked"
+                    item.finished_at = datetime.now()
+                    item.lease_until = None
+            except Exception as _runtime_exc:
+                logger.warning("runtime supervisor evaluation failed item=%s: %s", item.id, _runtime_exc)
         _post_scan_followups = _consume_validation_wire_and_collect_followups(db, job, item) if job else []
         db.commit()
         _schedule_post_scan_followups(_post_scan_followups)
@@ -8143,6 +8218,22 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
         else:
             _schedule_scan_work_dispatch(item.scan_job_id, countdown=1)
         return {"id": item.id, "status": item.status}
+    except requests.RequestException as exc:
+        db.rollback()
+        item = db.query(ScanWorkItem).filter(ScanWorkItem.id == item_id).first()
+        if item and item.status == "submitted":
+            now = datetime.now()
+            result_state = dict(item.result or {})
+            result_state["poll_transport_error"] = str(exc)[:1000]
+            result_state["poll_transport_error_at"] = now.isoformat()
+            item.result = result_state
+            item.last_error = f"poll_transport_error:{exc!s}"[:2000]
+            item.lease_until = now + timedelta(seconds=180)
+            item.updated_at = now
+            db.commit()
+            _schedule_work_item_poll(item.id, countdown=30)
+            return {"id": item.id, "status": "submitted", "poll_error": "transport"}
+        raise
     except Exception as exc:  # noqa: BLE001
         db.rollback()
         item = db.query(ScanWorkItem).filter(ScanWorkItem.id == item_id).first()

@@ -3,6 +3,22 @@ from __future__ import annotations
 from app.services import watchdog
 
 
+class _ScalarResult:
+    def __init__(self, value):
+        self.value = value
+
+    def scalar(self):
+        return self.value
+
+
+class _WorkItemDb:
+    def __init__(self, active):
+        self.active = active
+
+    def execute(self, _query):
+        return _ScalarResult(1 if self.active else None)
+
+
 class _Response:
     def __init__(self, items):
         self._items = items
@@ -57,6 +73,11 @@ def test_watchdog_reports_unknown_when_runner_cannot_be_inspected(monkeypatch):
 
 def test_watchdog_default_no_progress_threshold_exceeds_p01_long_job():
     assert watchdog._ORPHAN_NO_PROGRESS_SECONDS > 900
+
+
+def test_watchdog_detects_active_work_items_before_restarting_runner():
+    assert watchdog._has_active_work_items(_WorkItemDb(True)) is True
+    assert watchdog._has_active_work_items(_WorkItemDb(False)) is False
 
 
 def test_watchdog_has_idle_transaction_reaper_contract():

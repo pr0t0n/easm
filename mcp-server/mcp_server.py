@@ -688,8 +688,13 @@ async def submit_mcp_contract(request: MCPExecutionRequest) -> dict[str, Any]:
 async def mcp_job_status(job_id: str) -> dict[str, Any]:
     if kali_client is None:
         raise HTTPException(status_code=503, detail="Kali runner not available")
-    response = await kali_client.get(f"/jobs/{job_id}", timeout=_KALI_POLL_TIMEOUT)
-    response.raise_for_status()
+    try:
+        response = await kali_client.get(f"/jobs/{job_id}", timeout=_KALI_POLL_TIMEOUT)
+        response.raise_for_status()
+    except httpx.TimeoutException as exc:
+        raise HTTPException(status_code=503, detail=f"kali_runner_poll_timeout:{type(exc).__name__}") from exc
+    except httpx.NetworkError as exc:
+        raise HTTPException(status_code=503, detail=f"kali_runner_poll_unavailable:{type(exc).__name__}") from exc
     payload = dict(response.json())
     payload.setdefault("kali_job_id", job_id)
     payload["mcp_status"] = "terminal" if payload.get("status") in TERMINAL_STATES else "running"
@@ -700,8 +705,13 @@ async def mcp_job_status(job_id: str) -> dict[str, Any]:
 async def mcp_job_result(job_id: str) -> dict[str, Any]:
     if kali_client is None:
         raise HTTPException(status_code=503, detail="Kali runner not available")
-    result_response = await kali_client.get(f"/jobs/{job_id}/result", timeout=_KALI_RESULT_TIMEOUT)
-    result_response.raise_for_status()
+    try:
+        result_response = await kali_client.get(f"/jobs/{job_id}/result", timeout=_KALI_RESULT_TIMEOUT)
+        result_response.raise_for_status()
+    except httpx.TimeoutException as exc:
+        raise HTTPException(status_code=503, detail=f"kali_runner_result_timeout:{type(exc).__name__}") from exc
+    except httpx.NetworkError as exc:
+        raise HTTPException(status_code=503, detail=f"kali_runner_result_unavailable:{type(exc).__name__}") from exc
     result = dict(result_response.json())
     result.setdefault("dispatch_task_id", job_id)
     result.setdefault("kali_job_id", job_id)
