@@ -6225,7 +6225,9 @@ def compare_scans(
     rows = []
     for job in jobs:
         items = db.query(ScanWorkItem).filter(ScanWorkItem.scan_job_id == job.id).all()
-        rows.append({"scan_id": job.id, "target": job.target_query, "status": job.status, "progress": job.mission_progress, "created_at": job.created_at.isoformat(), "work_items": len(items), "completed": sum(i.status == "completed" for i in items), "failed": sum(i.status == "failed" for i in items), "skipped": sum(i.status == "skipped" for i in items), "blocked": sum(i.status == "blocked" for i in items), "recovery": sum(i.execution_context == "recovery" for i in items), "quality": build_scan_quality(db, job)})
+        findings = db.query(Finding).filter(Finding.scan_job_id == job.id).all()
+        risks = [finding for finding in findings if str(getattr(finding, "finding_kind", "") or "") in {"validated_risk", "candidate_risk"}]
+        rows.append({"scan_id": job.id, "target": job.target_query, "status": job.status, "progress": job.mission_progress, "created_at": job.created_at.isoformat(), "work_items": len(items), "completed": sum(i.status == "completed" for i in items), "failed": sum(i.status == "failed" for i in items), "skipped": sum(i.status == "skipped" for i in items), "blocked": sum(i.status == "blocked" for i in items), "recovery": sum(i.execution_context == "recovery" for i in items), "findings": len(findings), "risks": len(risks), "quality": build_scan_quality(db, job)})
     return {"target": next(iter(targets), ""), "scans": rows}
 
 

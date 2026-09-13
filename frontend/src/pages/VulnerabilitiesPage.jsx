@@ -73,8 +73,13 @@ export default function VulnerabilitiesPage() {
   const [accessGroupId, setAccessGroupId] = useState("");
   const [kindFilter, setKindFilter] = useState("todos");
   const [sourceFilter, setSourceFilter] = useState("todos");
-  const [compareIds, setCompareIds] = useState("");
+  const [compareIds, setCompareIds] = useState([]);
+  const [availableScans, setAvailableScans] = useState([]);
   const [comparison, setComparison] = useState(null);
+
+  useEffect(() => {
+    client.get("/api/scans", { params: { limit: 100 } }).then(({ data }) => setAvailableScans(Array.isArray(data) ? data : data?.items || [])).catch(() => setAvailableScans([]));
+  }, []);
 
   useEffect(() => {
     setLoading(true);
@@ -98,7 +103,7 @@ export default function VulnerabilitiesPage() {
   }, [sevFilter, kindFilter, sourceFilter, scanId, accessGroupId, page]);
 
   async function compareSelectedScans() {
-    const { data } = await client.get("/api/scans/compare", { params: { scan_ids: compareIds } });
+    const { data } = await client.get("/api/scans/compare", { params: { scan_ids: compareIds.join(",") } });
     setComparison(data);
   }
 
@@ -473,10 +478,12 @@ export default function VulnerabilitiesPage() {
         <section className="sk-panel" style={{ padding: 14, marginBottom: 16 }}>
           <div className="sk-eyebrow">Comparação de qualidade</div>
           <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 8 }}>
-            <input value={compareIds} onChange={(event) => setCompareIds(event.target.value)} placeholder="IDs dos scans separados por vírgula" aria-label="Scans para comparar" />
-            <button type="button" className="btn btn-primary" onClick={compareSelectedScans} disabled={!compareIds.trim()}>Comparar</button>
+            <select multiple value={compareIds} onChange={(event) => setCompareIds(Array.from(event.target.selectedOptions, (option) => option.value))} aria-label="Scans para comparar" style={{ minWidth: 300, minHeight: 76 }}>
+              {availableScans.filter((scan) => !accessGroupId || String(scan.access_group_id || "") === String(accessGroupId)).map((scan) => <option key={scan.id} value={scan.id}>#{scan.id} · {scan.target_query} · {scan.status}</option>)}
+            </select>
+            <button type="button" className="btn btn-primary" onClick={compareSelectedScans} disabled={!compareIds.length}>Comparar</button>
           </div>
-          {comparison?.scans?.length ? <div style={{ overflowX: "auto", marginTop: 12 }}><table><thead><tr><th>Scan</th><th>Status</th><th>Progresso</th><th>Concluídos</th><th>Falhas</th><th>Recovery</th></tr></thead><tbody>{comparison.scans.map((row) => <tr key={row.scan_id}><td>#{row.scan_id}</td><td>{row.status}</td><td>{row.progress}%</td><td>{row.completed}</td><td>{row.failed}</td><td>{row.recovery}</td></tr>)}</tbody></table></div> : null}
+          {comparison?.scans?.length ? <div style={{ overflowX: "auto", marginTop: 12 }}><table><thead><tr><th>Scan</th><th>Status</th><th>Achados</th><th>Riscos</th><th>Qualidade</th><th>Concluídos</th><th>Falhas</th><th>Recovery</th></tr></thead><tbody>{comparison.scans.map((row) => <tr key={row.scan_id}><td>#{row.scan_id}</td><td>{row.status}</td><td>{row.findings}</td><td>{row.risks}</td><td>{typeof row.quality?.score === "number" ? `${Math.round(row.quality.score * 100)}%` : "—"}</td><td>{row.completed}</td><td>{row.failed}</td><td>{row.recovery}</td></tr>)}</tbody></table></div> : null}
         </section>
 
         <section className="surface-filter-strip">
