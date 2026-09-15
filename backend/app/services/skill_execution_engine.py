@@ -46,6 +46,7 @@ from typing import Any
 
 import requests
 
+from app.services.work_item_contract import build_scan_work_item
 from app.core.config import settings
 from app.services.llm_determinism import ollama_generate_payload
 from app.services.scan_scope import authorized_scope_for_scan, host_from_scope_reference, is_host_in_scope
@@ -240,7 +241,7 @@ def seed_skill_probe_items(db: Any, job: Any, phase_id: str, target: str) -> int
         if existing:
             continue
 
-        item = ScanWorkItem(
+        item = build_scan_work_item(
             scan_job_id=job.id,
             execution_context=execution_context,
             auth_session_revision=auth_session_revision,

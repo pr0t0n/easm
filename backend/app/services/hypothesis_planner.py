@@ -11,6 +11,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from sqlalchemy.orm import Session
 
+from app.services.work_item_contract import build_scan_work_item
 from app.models.models import OffensiveHypothesis, ScanJob, ScanWorkItem
 from app.services.pentest_outcome_learning import calibration_map
 
@@ -417,7 +418,7 @@ def ensure_hypothesis_drain_work_item(
     # the queue target a stable logical batch key.
     queue_target = f"{target[:420]}#hypothesis-drain:{batch_iteration}"[:500]
 
-    item = ScanWorkItem(
+    item = build_scan_work_item(
         scan_job_id=job.id,
         execution_context=execution_context,
         phase_id="P21",

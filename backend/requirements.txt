@@ -45,6 +45,7 @@ anthropic==0.54.0
 
 # Vector DB
 chromadb==0.5.23
+posthog==5.4.0
 
 # Embeddings semânticos dos aprendizados HackerOne (ONNX CPU, sem torch)
 fastembed==0.4.2

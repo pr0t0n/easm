@@ -100,6 +100,43 @@ def attempt_summary(db: Session, item: ScanWorkItem) -> dict[str, Any]:
     }
 
 
+def reconcile_terminal_attempt_states(db: Session, scan_id: int) -> int:
+    items = (
+        db.query(ScanWorkItem)
+        .filter(
+            ScanWorkItem.scan_job_id == int(scan_id),
+            ScanWorkItem.status.in_(["completed", "done", "failed", "timeout", "skipped", "cancelled", "canceled"]),
+        )
+        .all()
+    )
+    reconciled = 0
+    for item in items:
+        attempt = latest_attempt(db, item.id)
+        if attempt is None or attempt.state not in ACTIVE_ATTEMPT_STATES:
+            continue
+        status = str(item.status or "").lower()
+        terminal_state = {
+            "completed": "completed",
+            "done": "completed",
+            "failed": "failed",
+            "timeout": "timeout",
+            "skipped": "skipped",
+            "cancelled": "cancelled",
+            "canceled": "cancelled",
+        }[status]
+        result = dict(item.result or {})
+        transition_attempt(
+            db,
+            item,
+            terminal_state,
+            mcp_request_id=result.get("mcp_request_id"),
+            runner_job_id=result.get("kali_job_id") or result.get("dispatch_task_id"),
+            error_class=str(item.last_error or "")[:80] or None,
+        )
+        reconciled += 1
+    return reconciled
+
+
 def reconcile_expired_item(db: Session, item: ScanWorkItem, now: datetime) -> str:
     attempt = latest_attempt(db, item.id)
     result = dict(getattr(item, "result", None) or {})

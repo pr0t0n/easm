@@ -36,6 +36,7 @@ from sqlalchemy.orm.attributes import flag_modified
 # ─────────────────────────────────────────────────────────────────────────────
 # Re-use existing parsers from the LangGraph path
 # ─────────────────────────────────────────────────────────────────────────────
+from app.services.work_item_contract import build_scan_work_item
 from app.graph.tool_parsers import (
     _extract_curl_headers_findings,
     _extract_wafw00f_findings,
@@ -3649,12 +3650,22 @@ def _seed_verification_work_item(
     will update the finding's verification_status to "confirmed" or "refuted".
     """
     from app.models.models import ScanWorkItem
-    from app.services.scan_work_queue import apply_phase_tool_metadata, resource_class_for_tool
+    from app.services.scan_work_queue import _tool_profile, apply_phase_tool_metadata, resource_class_for_tool
+
+    source_metadata = dict(getattr(source_item, "item_metadata", None) or {})
+    if source_metadata.get("verifies_finding_id") or source_metadata.get("validation_wire_id"):
+        return
 
     if str(tool or "").lower() in _NO_VERIFY_TOOLS:
         return
 
-    target = str(source_item.target or finding.domain or "").strip()
+    target = str(
+        finding_url
+        or source_metadata.get("execution_target")
+        or source_item.target
+        or finding.domain
+        or ""
+    ).strip().split("#easm-wire-", 1)[0]
     if not target:
         return
 
@@ -3682,10 +3693,9 @@ def _seed_verification_work_item(
         "verification_url": finding_url or "",
     }
     if str(target or "").startswith("__batch__"):
-        source_meta = dict(getattr(source_item, "item_metadata", None) or {})
         batch_targets = [
             str(value).strip()
-            for value in source_meta.get("batch_targets") or []
+            for value in source_metadata.get("batch_targets") or []
             if str(value or "").strip()
         ]
         if batch_targets:
@@ -3738,12 +3748,14 @@ def _seed_verification_work_item(
     if already:
         return
 
-    verify_item = ScanWorkItem(
+    verify_item = build_scan_work_item(
+        parent_work_item=source_item,
+        derivation_kind="verification",
         scan_job_id=job.id,
         phase_id=phase_id,
         target=target[:500],
         tool_name=verify_tool[:120],
-        profile="",
+        profile=_tool_profile(verify_tool)[:120],
         resource_class=rc,
         priority=verify_priority,
         status="queued",

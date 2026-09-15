@@ -4762,9 +4762,35 @@ def dispatch_scan_work_items(
             import logging as _grlog2
             _grlog2.getLogger(__name__).debug("gate_reconciler failed: %s", _gr_err)
 
+        from app.services.work_item_contract import normalize_scan_work_item_contracts
+
+        _contract_reconciliation = normalize_scan_work_item_contracts(db, scan_id)
+        if _contract_reconciliation["normalized"]:
+            db.add(ScanLog(
+                scan_job_id=scan_id,
+                source="work-queue",
+                level="INFO",
+                message=(
+                    f"work_item_contracts_reconciled normalized={_contract_reconciliation['normalized']} "
+                    f"invalidated={_contract_reconciliation['invalidated']}"
+                ),
+            ))
+            db.commit()
+
         from app.services.skill_activity_materializer import reconcile_completed_skill_activity_requeues
 
         if reconcile_completed_skill_activity_requeues(db, job):
+            db.commit()
+        from app.services.work_item_attempts import reconcile_terminal_attempt_states
+
+        _terminal_attempts_reconciled = reconcile_terminal_attempt_states(db, scan_id)
+        if _terminal_attempts_reconciled:
+            db.add(ScanLog(
+                scan_job_id=scan_id,
+                source="work-queue",
+                level="INFO",
+                message=f"terminal_attempts_reconciled count={_terminal_attempts_reconciled}",
+            ))
             db.commit()
         item_ids = claim_work_items(db, scan_id, limit=limit)
 
@@ -5792,6 +5818,7 @@ def execute_scan_work_item(item_id: int):
             }
 
         _validation_meta = dict(item.item_metadata or {})
+        _resolved_request_contract: dict[str, Any] = {}
         if _validation_meta.get("validation_wire_id"):
             from app.services.validation_execution_context import resolve_validation_execution_context
 
@@ -5848,6 +5875,8 @@ def execute_scan_work_item(item_id: int):
             if _resolution.get("status") == "resolved":
                 _validation_meta["execution_target"] = _resolution["execution_target"]
                 _validation_meta["target_parameter"] = _resolution.get("parameter_ref") or _validation_meta.get("target_parameter")
+                _validation_meta["resolved_request_contract"] = dict(_resolution)
+                _resolved_request_contract = dict(_resolution)
                 item.item_metadata = _validation_meta
 
         # Internal, read-only validators are first-class persistent work items.
@@ -6164,11 +6193,53 @@ def execute_scan_work_item(item_id: int):
                 **({"parameter": str(_item_meta.get("target_parameter"))} if _item_meta.get("target_parameter") else {}),
                 **({"expected_signals": dict(_item_meta.get("expected_signals") or {})} if _item_meta.get("expected_signals") else {}),
                 **({"targets": _batch_targets, "batch_count": len(_batch_targets)} if _is_batch else {}),
-                **({k: v for k, v in _job_env.items()} if _job_env else {}),
+                **({"env_vars": dict(_job_env)} if _job_env else {}),
                 **({"auth_headers": _auth_headers} if _auth_headers else {}),
             },
             "expected_evidence": ["stdout", "raw_tool_output", "parsed_result"],
         }
+        from app.services.request_execution_contract import adapt_execution_to_request_contract
+
+        _request_adaptation = adapt_execution_to_request_contract(execution, _resolved_request_contract)
+        _item_meta["request_contract_adaptation"] = {
+            key: value for key, value in _request_adaptation.items() if key != "execution"
+        }
+        item.item_metadata = _item_meta
+        execution = _request_adaptation["execution"]
+        if not _request_adaptation.get("compatible", True):
+            now_done = datetime.now()
+            item.status = "failed"
+            item.finished_at = now_done
+            item.lease_until = None
+            item.last_error = str(_request_adaptation.get("reason") or "capability_contract_degraded")[:2000]
+            item.result = {
+                "status": "failed",
+                "error": item.last_error,
+                "request_contract": _resolved_request_contract,
+                "finished_at": now_done.isoformat(),
+                "execution_path": "request_contract_adapter",
+            }
+            from app.services.work_item_attempts import transition_attempt
+
+            transition_attempt(db, item, "failed", error_class="capability_contract_degraded")
+            from app.services.runtime_supervisor import apply_recovery_decision, evaluate_runtime_outcome, materialize_replan
+
+            _runtime_decision = evaluate_runtime_outcome(db, job, item)
+            apply_recovery_decision(item, _runtime_decision)
+            _recovery_item = materialize_replan(db, item, _runtime_decision, job=job)
+            try:
+                kali_inflight_release(str(item.resource_class or "light"), 1)
+            except Exception:
+                pass
+            db.commit()
+            if _recovery_item is not None:
+                _schedule_scan_work_dispatch(item.scan_job_id, countdown=1)
+            return {
+                "id": item.id,
+                "status": item.status,
+                "recovery_work_item_id": getattr(_recovery_item, "id", None),
+                "reason": item.last_error,
+            }
         if str(item.tool_name or "").lower() == "sqlmap":
             from app.services.sqlmap_request import resolve_sqlmap_request
 
@@ -6178,7 +6249,10 @@ def execute_scan_work_item(item_id: int):
             )
             if not request["reason"]:
                 execution["profile"] = request["profile"]
-                execution["arguments"].update(request["arguments"])
+                _request_env = dict(execution["arguments"].get("env_vars") or {})
+                _request_env.update(request["arguments"])
+                if _request_env:
+                    execution["arguments"]["env_vars"] = _request_env
             else:
                 now_done = datetime.now()
                 item.status = "skipped"
@@ -6495,7 +6569,7 @@ def execute_scan_work_item(item_id: int):
 
                     _runtime_decision = evaluate_runtime_outcome(db, job, item)
                     apply_recovery_decision(item, _runtime_decision)
-                    _recovery_item = materialize_replan(db, item, _runtime_decision)
+                    _recovery_item = materialize_replan(db, item, _runtime_decision, job=job)
                     if _runtime_decision.get("action") == "open_broken_glass" and terminal in {"skipped", "failed", "timeout"}:
                         item.item_metadata = {
                             **dict(item.item_metadata or {}),
@@ -6593,6 +6667,14 @@ def execute_scan_work_item(item_id: int):
                 item.lease_until = datetime.now() + timedelta(seconds=120) if item.status == "retry" else None
                 item.finished_at = datetime.now() if item.status != "retry" else None
             item.last_error = str(result.get("error") or "mcp_submit_failed")[:2000]
+            transition_attempt(
+                db,
+                item,
+                "skipped" if item.status == "skipped" else "failed",
+                mcp_request_id=result.get("mcp_request_id"),
+                runner_job_id=result.get("kali_job_id") or result.get("dispatch_task_id"),
+                error_class=str(result.get("error") or raw_status or "mcp_submit_failed")[:80],
+            )
         else:
             timeout = int(result.get("timeout") or 300)
             item.status = "submitted"
@@ -8311,7 +8393,7 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
 
                 _runtime_decision = evaluate_runtime_outcome(db, job, item)
                 apply_recovery_decision(item, _runtime_decision)
-                _recovery_item = materialize_replan(db, item, _runtime_decision)
+                _recovery_item = materialize_replan(db, item, _runtime_decision, job=job)
                 if _runtime_decision.get("action") == "open_broken_glass" and item.status in {"skipped", "failed", "timeout"}:
                     item.item_metadata = {
                         **dict(item.item_metadata or {}),

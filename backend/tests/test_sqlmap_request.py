@@ -148,8 +148,8 @@ def test_worker_submits_valid_request_or_blocks_without_reprocessing(monkeypatch
         assert payload["arguments"]["target"] == target
         assert payload["profile"] == ("sqlmap_basic" if method == "GET" else "sqlmap_body")
         if method == "GET":
-            assert "SCAN_FUZZ_POST_DATA" not in payload["arguments"]
+            assert "SCAN_FUZZ_POST_DATA" not in payload["arguments"].get("env_vars", {})
         else:
-            assert payload["arguments"]["SCAN_HTTP_METHOD"] == method
-            assert payload["arguments"]["SCAN_FUZZ_POST_DATA"] == body
-            assert payload["arguments"]["SCAN_FUZZ_CONTENT_TYPE"] == "application/json"
+            assert payload["arguments"]["env_vars"]["SCAN_HTTP_METHOD"] == method
+            assert payload["arguments"]["env_vars"]["SCAN_FUZZ_POST_DATA"] == body
+            assert payload["arguments"]["env_vars"]["SCAN_FUZZ_CONTENT_TYPE"] == "application/json"

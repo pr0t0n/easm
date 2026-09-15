@@ -671,7 +671,7 @@ def run_watchdog(db) -> dict:
               JOIN scan_work_items w ON w.scan_job_id = s.id
              WHERE lower(s.status) IN (
                    'completed','completed_with_gaps','failed','stopped',
-                   'cancelled','canceled','blocked','paused'
+                   'cancelled','canceled'
              )
                AND w.status IN ('queued','blocked','submitted','retry','dispatched','running')
                AND COALESCE(w.metadata->>'post_scan_revalidation', 'false') <> 'true'
@@ -694,44 +694,55 @@ def run_watchdog(db) -> dict:
         logger.error("watchdog: consistencia terminal/work-items falhou: %s", exc)
         report["terminal_work_inconsistencies"] = []
 
-    # Item 20 — limpeza segura da fila: itens pendentes (queued/blocked/
-    # submitted/retry) de scans JÁ TERMINAIS nunca rodarão e só incham a tabela
-    # (scan #12 chegou a 6072 blocked). Remover é seguro — o scan acabou.
     try:
-        # Keep the reasoning edge even when its dead transport row is purged.
-        # ValidationWire.work_item_id is nullable specifically so terminal
-        # queue cleanup can detach it and record why the planned return test
-        # never executed instead of violating the FK or erasing the dossier.
         db.execute(text("""
             UPDATE validation_wires vw
-               SET work_item_id = NULL,
-                   status = CASE WHEN vw.status IN ('queued','running') THEN 'blocked' ELSE vw.status END,
+               SET status = CASE WHEN vw.status IN ('queued','running') THEN 'blocked' ELSE vw.status END,
                    result_summary = COALESCE(vw.result_summary, '{}'::jsonb)
-                       || '{"reason":"terminal_scan_work_item_purged"}'::jsonb,
+                       || '{"reason":"terminal_scan_closed_before_execution"}'::jsonb,
                    updated_at = now()
               FROM scan_work_items swi
              WHERE vw.work_item_id = swi.id
-               AND swi.status IN ('queued','blocked','submitted','retry')
+               AND swi.status IN ('queued','blocked','submitted','retry','dispatched','running')
                AND COALESCE(swi.metadata->>'post_scan_revalidation', 'false') <> 'true'
                AND swi.scan_job_id IN (
                    SELECT id FROM scan_jobs
                    WHERE lower(status) IN ('completed','completed_with_gaps','failed','stopped','cancelled','canceled')
                )
         """))
-        purged = db.execute(text("""
-            DELETE FROM scan_work_items
-            WHERE status IN ('queued','blocked','submitted','retry')
-              AND COALESCE(metadata->>'post_scan_revalidation', 'false') <> 'true'
-              AND scan_job_id IN (
-                  SELECT id FROM scan_jobs
-                  WHERE lower(status) IN ('completed','completed_with_gaps','failed','stopped','cancelled','canceled')
-              )
+        terminalized = db.execute(text("""
+            UPDATE scan_work_items swi
+               SET status = 'skipped',
+                   lease_until = NULL,
+                   finished_at = COALESCE(swi.finished_at, now()),
+                   updated_at = now(),
+                   last_error = CASE
+                       WHEN COALESCE(swi.last_error, '') = ''
+                       THEN 'terminal_scan_closed_before_execution'
+                       ELSE swi.last_error
+                   END,
+                   result = COALESCE(swi.result, '{}'::jsonb)
+                       || jsonb_build_object(
+                           'status', 'skipped',
+                           'terminal_reconciliation', true,
+                           'scan_status', lower(s.status),
+                           'finished_at', now()
+                       )
+              FROM scan_jobs s
+             WHERE s.id = swi.scan_job_id
+               AND swi.status IN ('queued','blocked','submitted','retry','dispatched','running')
+               AND COALESCE(swi.metadata->>'post_scan_revalidation', 'false') <> 'true'
+               AND lower(s.status) IN (
+                   'completed','completed_with_gaps','failed','stopped','cancelled','canceled'
+               )
         """))
         db.commit()
-        report["queue_purged"] = int(getattr(purged, "rowcount", 0) or 0)
+        report["queue_terminalized"] = int(getattr(terminalized, "rowcount", 0) or 0)
+        report["queue_purged"] = 0
     except Exception as exc:
         db.rollback()
-        logger.error("watchdog: limpeza de fila falhou: %s", exc)
+        logger.error("watchdog: reconciliacao terminal da fila falhou: %s", exc)
+        report["queue_terminalized"] = 0
         report["queue_purged"] = 0
 
     # guarda o último resultado para a página de Saúde

@@ -25,6 +25,7 @@ from typing import Any
 
 import requests
 
+from app.services.work_item_contract import build_scan_work_item
 from app.core.config import settings
 from app.services.llm_determinism import ollama_generate_payload
 from app.services.untrusted_content import normalize_adversarial_text, wrap_untrusted
@@ -299,7 +300,7 @@ def seed_attack_chain_items(
             continue
 
         rc = resource_class_for_tool(tool)
-        item = ScanWorkItem(
+        item = build_scan_work_item(
             scan_job_id=job.id,
             phase_id=phase,
             target=target[:500],

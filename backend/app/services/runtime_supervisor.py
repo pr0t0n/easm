@@ -6,7 +6,8 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.models import AgentTraceEvent, EvidenceArtifact, ScanLog, ScanWorkItem, WorkItemAttempt
+from app.services.work_item_contract import build_scan_work_item
+from app.models.models import AgentTraceEvent, EvidenceArtifact, ScanLog, ScanWorkItem, WorkItemAttempt, is_post_scan_revalidation_item
 
 
 def build_execution_timeline(db: Session, job_id: int, item_id: int | None = None) -> list[dict[str, Any]]:
@@ -39,6 +40,8 @@ def diagnose_execution(db: Session, item: Any) -> dict[str, Any]:
         category = "impossible_state"
     elif "dispatch_not_acknowledged" in error or "timeout" in error or "connection" in error or "temporar" in error:
         category = "transient_error"
+    elif "contract_degraded" in error:
+        category = "contract_degraded"
     elif "capacity" in error or "resource" in error:
         category = "capacity_unavailable"
     elif str(getattr(item, "status", "")).lower() in {"failed", "timeout"}:
@@ -81,13 +84,27 @@ def apply_recovery_decision(item: Any, decision: dict[str, Any]) -> dict[str, An
     return recovery
 
 
-def materialize_replan(db: Session, item: Any, decision: dict[str, Any]) -> Any | None:
+def materialize_replan(db: Session, item: Any, decision: dict[str, Any], *, job: Any | None = None) -> Any | None:
     if decision.get("action") != "correct_in_flight":
         return None
     recovery = dict(decision.get("recovery") or {})
     if not recovery.get("applied") or recovery.get("state") not in {"retry", "replan"}:
         return None
     metadata = dict(getattr(item, "item_metadata", None) or {})
+    scan_status = str(getattr(job, "status", "") or "").lower()
+    if scan_status in {"completed", "completed_with_gaps", "failed", "stopped", "cancelled", "canceled"} and not is_post_scan_revalidation_item(item, scan_status):
+        recovery.update({
+            "verification": "aborted",
+            "reason": "scan_closed_before_replan",
+            "scan_status": scan_status,
+        })
+        metadata["runtime_recovery"] = recovery
+        item.item_metadata = metadata
+        item.status = "skipped"
+        item.lease_until = None
+        item.finished_at = datetime.now()
+        item.last_error = "supervisor_replan_suppressed:scan_closed"
+        return None
     generation = int(metadata.get("plan_generation") or 0) + 1
     recovery_root = int(metadata.get("recovery_root") or metadata.get("recovery_of") or item.id)
     if generation > int(item.max_attempts or 1):
@@ -118,7 +135,7 @@ def materialize_replan(db: Session, item: Any, decision: dict[str, Any]) -> Any 
         clone_metadata["alternate_capability"] = {"from": str(item.tool_name or ""), "to": tool_name}
     if recovery.get("type") == "change_capacity":
         clone_metadata["capacity_recovery"] = {"source_resource_class": resource_class, "priority_boost": 1}
-    clone = ScanWorkItem(scan_job_id=item.scan_job_id, execution_context=f"recovery-{generation}", auth_session_revision=item.auth_session_revision, phase_id=item.phase_id, target=item.target, tool_name=tool_name, profile=profile, resource_class=resource_class, priority=max(1, int(item.priority or 100) - 1), status="queued", attempts=0, max_attempts=item.max_attempts, item_metadata=clone_metadata)
+    clone = build_scan_work_item(parent_work_item=item, derivation_kind="recovery", scan_job_id=item.scan_job_id, execution_context=f"recovery-{generation}", auth_session_revision=item.auth_session_revision, phase_id=item.phase_id, target=item.target, tool_name=tool_name, profile=profile, resource_class=resource_class, priority=max(1, int(item.priority or 100) - 1), status="queued", attempts=0, max_attempts=item.max_attempts, item_metadata=clone_metadata)
     item.status = "skipped"
     item.last_error = f"superseded_by_replan:{generation}"
     item.lease_until = None
@@ -151,7 +168,7 @@ def evaluate_runtime_outcome(db: Session, job: Any, item: Any) -> dict[str, Any]
         "data_contradictory": "rehydrate_authoritative_context",
         "transient_error": "redispatch",
         "capacity_unavailable": "change_capacity",
-        "contract_degraded": "replan_with_supervisor",
+        "contract_degraded": "alternate_capability",
         "inconclusive_result": "alternate_capability",
         "impossible_state": "broken_glass",
     }

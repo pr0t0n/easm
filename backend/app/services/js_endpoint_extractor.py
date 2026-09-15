@@ -20,6 +20,7 @@ Chamado por poll_scan_work_item após katana/gospider completar.
 """
 
 from __future__ import annotations
+from app.services.work_item_contract import build_scan_work_item
 
 import logging
 import re
@@ -285,7 +286,7 @@ def seed_high_value_probes(
                 "api_path_count": len(api_paths),
                 "queue_ready_at": datetime.now().isoformat(),
             }, phase_id, tool_name, source="js_endpoint_extractor")
-        item = ScanWorkItem(
+        item = build_scan_work_item(
             scan_job_id=scan_id,
             phase_id=phase_id,
             target=target[:500],

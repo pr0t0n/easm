@@ -56,6 +56,11 @@ services:
     profiles: ["dev", "prod"]
     environment:
       TZ: America/Sao_Paulo
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   ollama:
     image: ollama/ollama:latest
@@ -267,6 +272,15 @@ services:
     volumes:
       - evidence_storage:/evidence
 
+  chroma_init:
+    image: busybox:1.36
+    container_name: scriptkiddo_chroma_init
+    profiles: ["dev", "prod"]
+    restart: "no"
+    command: sh -c "mkdir -p /chroma && chown -R 1000:1000 /chroma && chmod -R 0700 /chroma"
+    volumes:
+      - chroma_data:/chroma
+
   # A freshly-created named volume mounts owned by root; backend runs as
   # non-root appuser (uid 1000) and needs to write the BAS root CA/server
   # cert into it on first boot (bas_ca.py). Same fix-permissions-then-exit
@@ -301,6 +315,7 @@ services:
       ZAP_URL: "${ZAP_URL:-http://zap:8090}"
       ZAP_API_KEY: "${ZAP_API_KEY:-scriptkiddo-zap-key}"
       EVIDENCE_STORAGE_PATH: "${EVIDENCE_STORAGE_PATH:-/evidence}"
+      CHROMA_PERSIST_PATH: "/chroma"
       BROWSER_RUNNER_URL: "${BROWSER_RUNNER_URL:-http://browser_runner:9222}"
       ENABLE_BROWSER_CAPTURE: "${ENABLE_BROWSER_CAPTURE:-true}"
       BROWSER_CAPTURE_HAR: "${BROWSER_CAPTURE_HAR:-true}"
@@ -329,25 +344,33 @@ services:
       postgres:
         condition: service_healthy
       redis:
-        condition: service_started
+        condition: service_healthy
       ollama:
         condition: service_started
       kali_runner:
-        condition: service_started
+        condition: service_healthy
       mcp_server:
-        condition: service_started
+        condition: service_healthy
       evidence_init:
         condition: service_completed_successfully
       bas_ca_init:
         condition: service_completed_successfully
+      chroma_init:
+        condition: service_completed_successfully
       zap:
-        condition: service_started
+        condition: service_healthy
     ports:
       - "${BACKEND_HOST_PORT:-8001}:8000"
       # BAS agent mTLS listener (heartbeat and onward) -- see bas_ca.py and
       # backend/start.sh. Distinct from the plain port above so a client
       # cert failure here never affects normal user/frontend traffic.
       - "${BAS_MTLS_HOST_PORT:-8444}:8443"
+    healthcheck:
+      test: ["CMD", "/opt/venv/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).read()"]
+      interval: 15s
+      timeout: 8s
+      retries: 8
+      start_period: 60s
     mem_limit: 1g
     profiles: ["dev"]
     # group_add 0 (root group): permite ao processo non-root (uid 1000) LER o
@@ -357,6 +380,7 @@ services:
       - ./backend:/app
       - ./skills:/app/skills:ro
       - evidence_storage:/evidence
+      - chroma_data:/chroma
       # BAS internal PKI (root CA + mTLS server cert) -- must survive
       # container recreates so agents' already-issued client certs keep
       # validating. Never mounted into any other service.
@@ -388,7 +412,7 @@ services:
     # socket Docker (rw) + group root: mantido para compatibilidade operacional.
     # O watchdog agora roda no worker_control para não disputar scan.unit.
     group_add: ["0"]
-    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_started }, backend: { condition: service_started }, kali_runner: { condition: service_started }, mcp_server: { condition: service_started } }
+    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_healthy }, backend: { condition: service_healthy }, kali_runner: { condition: service_healthy }, mcp_server: { condition: service_healthy } }
     volumes: ["./backend:/app", "./skills:/app/skills:ro", "evidence_storage:/evidence", "/var/run/docker.sock:/var/run/docker.sock"]
 
   worker_control:
@@ -403,7 +427,7 @@ services:
     environment: { <<: *vulnerability_catalog_env, APP_ENV: development, WORKER_MODE: control, KALI_RUNNER_URL: "${KALI_RUNNER_URL:-http://kali_runner:8088}", MCP_SERVER_URL: "${MCP_SERVER_URL:-http://mcp_server:3000}", MCP_RAG_ENABLED: "${MCP_RAG_ENABLED:-true}", MCP_EXECUTE_TOOLS_VIA_MCP: "${MCP_EXECUTE_TOOLS_VIA_MCP:-true}", TZ: America/Sao_Paulo }
     profiles: ["dev"]
     group_add: ["0"]
-    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_started }, backend: { condition: service_started }, kali_runner: { condition: service_started }, mcp_server: { condition: service_started } }
+    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_healthy }, backend: { condition: service_healthy }, kali_runner: { condition: service_healthy }, mcp_server: { condition: service_healthy } }
     volumes: ["./backend:/app", "./skills:/app/skills:ro", "evidence_storage:/evidence", "/var/run/docker.sock:/var/run/docker.sock"]
 
   worker_parallel:
@@ -430,7 +454,7 @@ services:
     environment: { <<: *vulnerability_catalog_env, APP_ENV: development, WORKER_MODE: unit, KALI_RUNNER_URL: "${KALI_RUNNER_URL:-http://kali_runner:8088}", MCP_SERVER_URL: "${MCP_SERVER_URL:-http://mcp_server:3000}", MCP_RAG_ENABLED: "${MCP_RAG_ENABLED:-true}", MCP_EXECUTE_TOOLS_VIA_MCP: "${MCP_EXECUTE_TOOLS_VIA_MCP:-true}", TZ: America/Sao_Paulo, OMP_NUM_THREADS: "1", ONNXRUNTIME_INTRA_OP_NUM_THREADS: "1" }
     mem_limit: 5g
     profiles: ["dev"]
-    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_started }, backend: { condition: service_started }, kali_runner: { condition: service_started }, mcp_server: { condition: service_started } }
+    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_healthy }, backend: { condition: service_healthy }, kali_runner: { condition: service_healthy }, mcp_server: { condition: service_healthy } }
     volumes: ["./backend:/app", "./skills:/app/skills:ro", "evidence_storage:/evidence"]
 
   worker_poll:
@@ -445,7 +469,7 @@ services:
     environment: { <<: *vulnerability_catalog_env, APP_ENV: development, WORKER_MODE: unit, KALI_RUNNER_URL: "${KALI_RUNNER_URL:-http://kali_runner:8088}", MCP_SERVER_URL: "${MCP_SERVER_URL:-http://mcp_server:3000}", MCP_RAG_ENABLED: "${MCP_RAG_ENABLED:-true}", MCP_EXECUTE_TOOLS_VIA_MCP: "${MCP_EXECUTE_TOOLS_VIA_MCP:-true}", TZ: America/Sao_Paulo, OMP_NUM_THREADS: "1", ONNXRUNTIME_INTRA_OP_NUM_THREADS: "1" }
     mem_limit: 2g
     profiles: ["dev"]
-    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_started }, backend: { condition: service_started }, kali_runner: { condition: service_started }, mcp_server: { condition: service_started } }
+    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_healthy }, backend: { condition: service_healthy }, kali_runner: { condition: service_healthy }, mcp_server: { condition: service_healthy } }
     volumes: ["./backend:/app", "./skills:/app/skills:ro", "evidence_storage:/evidence"]
 
   worker_recon:
@@ -456,7 +480,7 @@ services:
     env_file: *optional_env_file
     environment: { <<: *vulnerability_catalog_env, APP_ENV: development, WORKER_MODE: unit, KALI_RUNNER_URL: "${KALI_RUNNER_URL:-http://kali_runner:8088}", MCP_SERVER_URL: "${MCP_SERVER_URL:-http://mcp_server:3000}", MCP_RAG_ENABLED: "${MCP_RAG_ENABLED:-true}", MCP_EXECUTE_TOOLS_VIA_MCP: "${MCP_EXECUTE_TOOLS_VIA_MCP:-true}", TZ: America/Sao_Paulo }
     profiles: ["dev"]
-    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_started }, backend: { condition: service_started }, kali_runner: { condition: service_started }, mcp_server: { condition: service_started } }
+    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_healthy }, backend: { condition: service_healthy }, kali_runner: { condition: service_healthy }, mcp_server: { condition: service_healthy } }
     volumes: ["./backend:/app", "./skills:/app/skills:ro", "evidence_storage:/evidence"]
 
   worker_weaponization:
@@ -467,7 +491,7 @@ services:
     env_file: *optional_env_file
     environment: { <<: *vulnerability_catalog_env, APP_ENV: development, WORKER_MODE: unit, KALI_RUNNER_URL: "${KALI_RUNNER_URL:-http://kali_runner:8088}", MCP_SERVER_URL: "${MCP_SERVER_URL:-http://mcp_server:3000}", MCP_RAG_ENABLED: "${MCP_RAG_ENABLED:-true}", MCP_EXECUTE_TOOLS_VIA_MCP: "${MCP_EXECUTE_TOOLS_VIA_MCP:-true}", TZ: America/Sao_Paulo }
     profiles: ["dev"]
-    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_started }, backend: { condition: service_started }, kali_runner: { condition: service_started }, mcp_server: { condition: service_started } }
+    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_healthy }, backend: { condition: service_healthy }, kali_runner: { condition: service_healthy }, mcp_server: { condition: service_healthy } }
     volumes: ["./backend:/app", "./skills:/app/skills:ro", "evidence_storage:/evidence"]
 
   worker_delivery:
@@ -478,7 +502,7 @@ services:
     env_file: *optional_env_file
     environment: { <<: *vulnerability_catalog_env, APP_ENV: development, WORKER_MODE: unit, KALI_RUNNER_URL: "${KALI_RUNNER_URL:-http://kali_runner:8088}", MCP_SERVER_URL: "${MCP_SERVER_URL:-http://mcp_server:3000}", MCP_RAG_ENABLED: "${MCP_RAG_ENABLED:-true}", MCP_EXECUTE_TOOLS_VIA_MCP: "${MCP_EXECUTE_TOOLS_VIA_MCP:-true}", TZ: America/Sao_Paulo }
     profiles: ["dev"]
-    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_started }, backend: { condition: service_started }, kali_runner: { condition: service_started }, mcp_server: { condition: service_started } }
+    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_healthy }, backend: { condition: service_healthy }, kali_runner: { condition: service_healthy }, mcp_server: { condition: service_healthy } }
     volumes: ["./backend:/app", "./skills:/app/skills:ro", "evidence_storage:/evidence"]
 
   worker_exploitation:
@@ -489,7 +513,7 @@ services:
     env_file: *optional_env_file
     environment: { <<: *vulnerability_catalog_env, APP_ENV: development, WORKER_MODE: unit, KALI_RUNNER_URL: "${KALI_RUNNER_URL:-http://kali_runner:8088}", MCP_SERVER_URL: "${MCP_SERVER_URL:-http://mcp_server:3000}", MCP_RAG_ENABLED: "${MCP_RAG_ENABLED:-true}", MCP_EXECUTE_TOOLS_VIA_MCP: "${MCP_EXECUTE_TOOLS_VIA_MCP:-true}", TZ: America/Sao_Paulo }
     profiles: ["dev"]
-    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_started }, backend: { condition: service_started }, kali_runner: { condition: service_started }, mcp_server: { condition: service_started } }
+    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_healthy }, backend: { condition: service_healthy }, kali_runner: { condition: service_healthy }, mcp_server: { condition: service_healthy } }
     volumes: ["./backend:/app", "./skills:/app/skills:ro", "evidence_storage:/evidence"]
 
   worker_installation:
@@ -500,7 +524,7 @@ services:
     env_file: *optional_env_file
     environment: { <<: *vulnerability_catalog_env, APP_ENV: development, WORKER_MODE: unit, KALI_RUNNER_URL: "${KALI_RUNNER_URL:-http://kali_runner:8088}", MCP_SERVER_URL: "${MCP_SERVER_URL:-http://mcp_server:3000}", MCP_RAG_ENABLED: "${MCP_RAG_ENABLED:-true}", MCP_EXECUTE_TOOLS_VIA_MCP: "${MCP_EXECUTE_TOOLS_VIA_MCP:-true}", TZ: America/Sao_Paulo }
     profiles: ["dev"]
-    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_started }, backend: { condition: service_started }, kali_runner: { condition: service_started }, mcp_server: { condition: service_started } }
+    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_healthy }, backend: { condition: service_healthy }, kali_runner: { condition: service_healthy }, mcp_server: { condition: service_healthy } }
     volumes: ["./backend:/app", "./skills:/app/skills:ro", "evidence_storage:/evidence"]
 
   worker_c2:
@@ -511,7 +535,7 @@ services:
     env_file: *optional_env_file
     environment: { <<: *vulnerability_catalog_env, APP_ENV: development, WORKER_MODE: unit, KALI_RUNNER_URL: "${KALI_RUNNER_URL:-http://kali_runner:8088}", MCP_SERVER_URL: "${MCP_SERVER_URL:-http://mcp_server:3000}", MCP_RAG_ENABLED: "${MCP_RAG_ENABLED:-true}", MCP_EXECUTE_TOOLS_VIA_MCP: "${MCP_EXECUTE_TOOLS_VIA_MCP:-true}", TZ: America/Sao_Paulo }
     profiles: ["dev"]
-    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_started }, backend: { condition: service_started }, kali_runner: { condition: service_started }, mcp_server: { condition: service_started } }
+    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_healthy }, backend: { condition: service_healthy }, kali_runner: { condition: service_healthy }, mcp_server: { condition: service_healthy } }
     volumes: ["./backend:/app", "./skills:/app/skills:ro", "evidence_storage:/evidence"]
 
   worker_actions:
@@ -522,7 +546,7 @@ services:
     env_file: *optional_env_file
     environment: { <<: *vulnerability_catalog_env, APP_ENV: development, WORKER_MODE: unit, KALI_RUNNER_URL: "${KALI_RUNNER_URL:-http://kali_runner:8088}", MCP_SERVER_URL: "${MCP_SERVER_URL:-http://mcp_server:3000}", MCP_RAG_ENABLED: "${MCP_RAG_ENABLED:-true}", MCP_EXECUTE_TOOLS_VIA_MCP: "${MCP_EXECUTE_TOOLS_VIA_MCP:-true}", TZ: America/Sao_Paulo }
     profiles: ["dev"]
-    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_started }, backend: { condition: service_started }, kali_runner: { condition: service_started }, mcp_server: { condition: service_started } }
+    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_healthy }, backend: { condition: service_healthy }, kali_runner: { condition: service_healthy }, mcp_server: { condition: service_healthy } }
     volumes: ["./backend:/app", "./skills:/app/skills:ro", "evidence_storage:/evidence"]
 
   worker_reporting:
@@ -533,7 +557,7 @@ services:
     env_file: *optional_env_file
     environment: { <<: *vulnerability_catalog_env, APP_ENV: development, WORKER_MODE: unit, KALI_RUNNER_URL: "${KALI_RUNNER_URL:-http://kali_runner:8088}", MCP_SERVER_URL: "${MCP_SERVER_URL:-http://mcp_server:3000}", MCP_RAG_ENABLED: "${MCP_RAG_ENABLED:-true}", MCP_EXECUTE_TOOLS_VIA_MCP: "${MCP_EXECUTE_TOOLS_VIA_MCP:-true}", TZ: America/Sao_Paulo }
     profiles: ["dev"]
-    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_started }, backend: { condition: service_started }, kali_runner: { condition: service_started }, mcp_server: { condition: service_started } }
+    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_healthy }, backend: { condition: service_healthy }, kali_runner: { condition: service_healthy }, mcp_server: { condition: service_healthy } }
     volumes: ["./backend:/app", "./skills:/app/skills:ro", "evidence_storage:/evidence"]
 
   # ─────────────────────────────────────────────────────────────────
@@ -578,7 +602,7 @@ services:
       ENABLE_BROWSER_CAPTURE: "${ENABLE_BROWSER_CAPTURE:-true}"
       TZ: America/Sao_Paulo
     profiles: ["dev"]
-    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_started }, backend: { condition: service_started }, kali_runner: { condition: service_started }, browser_runner: { condition: service_started } }
+    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_healthy }, backend: { condition: service_healthy }, kali_runner: { condition: service_healthy }, browser_runner: { condition: service_healthy } }
     volumes: ["./backend:/app", "./skills:/app/skills:ro", "browser_traces:/browser-traces", "evidence_storage:/evidence"]
 
   worker_evidence:
@@ -595,7 +619,7 @@ services:
       ENABLE_ARTIFACT_REPLAY: "${ENABLE_ARTIFACT_REPLAY:-true}"
       TZ: America/Sao_Paulo
     profiles: ["dev"]
-    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_started }, backend: { condition: service_started } }
+    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_healthy }, backend: { condition: service_healthy } }
     volumes: ["./backend:/app", "./skills:/app/skills:ro", "evidence_storage:/evidence"]
 
   celery_beat:
@@ -616,11 +640,11 @@ services:
     profiles: ["dev"]
     depends_on:
       redis:
-        condition: service_started
+        condition: service_healthy
       backend:
-        condition: service_started
+        condition: service_healthy
       mcp_server:
-        condition: service_started
+        condition: service_healthy
     volumes:
       - ./backend:/app
       - ./skills:/app/skills:ro
@@ -747,7 +771,7 @@ services:
       TZ: America/Sao_Paulo
     depends_on:
       backend:
-        condition: service_started
+        condition: service_healthy
     profiles: ["dev"]
     ports:
       - "${FRONTEND_HOST_PORT:-5173}:5173"
@@ -764,3 +788,4 @@ volumes:
   evidence_storage:
   browser_traces:
   bas_ca_data:
+  chroma_data:

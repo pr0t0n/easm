@@ -14,6 +14,7 @@ Flow triggered by poll_scan_work_item after httpx/whatweb/nmap completes.
 """
 
 from __future__ import annotations
+from app.services.work_item_contract import build_scan_work_item
 
 import logging
 import re
@@ -829,7 +830,7 @@ def _seed_attack_profile_for_tech(
             except Exception:
                 job_state = {}
             initial_status = initial_status_for_target_phase(phase_id, [target], job_state)
-            item = ScanWorkItem(
+            item = build_scan_work_item(
                 scan_job_id=scan_id,
                 phase_id=phase_id,
                 target=target[:500],
@@ -918,7 +919,7 @@ def _seed_targeted_nuclei(
     except Exception:
         job_state = {}
     initial_status = initial_status_for_target_phase(phase_id, [target], job_state)
-    item = ScanWorkItem(
+    item = build_scan_work_item(
         scan_job_id=scan_id,
         phase_id=phase_id,
         target=target[:500],
@@ -1077,7 +1078,7 @@ def _add_learning_work_item(
                 "batch_count": len(batch_targets),
             }
     initial_status = initial_status_for_target_phase(phase_id, batch_targets or [target], job_state)
-    db.add(ScanWorkItem(
+    db.add(build_scan_work_item(
         scan_job_id=scan_id, phase_id=phase_id, target=target[:500],
         tool_name=tname, profile=tname, resource_class=rc,
         priority=pri - 8,  # learning-driven = prioridade alta (HackerOne-proven)

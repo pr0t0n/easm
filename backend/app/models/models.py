@@ -320,6 +320,7 @@ class EndpointObservation(Base):
     """A context-specific observation of a canonical offensive endpoint."""
     __tablename__ = "endpoint_observations"
     __table_args__ = (
+        sa.CheckConstraint("BTRIM(profile) <> ''", name="ck_scan_work_items_profile_present"),
         sa.UniqueConstraint(
             "endpoint_id", "execution_context", "method", "source_tool",
             name="uq_endpoint_observations_endpoint_context_method_tool",

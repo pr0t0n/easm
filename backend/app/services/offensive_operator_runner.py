@@ -3308,9 +3308,10 @@ def run_offensive_operator_scan(
                             _body_by_point[_point] = _req
 
                     _body_reqs = list(_body_by_point.values())[:5]
-                    _body_profile = "sqlmap_body" if phase_id == "P10" else "dalfox_body"
                     _body_skill = "skill.vuln.sql_injection" if phase_id == "P10" else "skill.stored_xss_testing"
                     _body_count = 0
+                    from app.services.request_execution_contract import adapt_execution_to_request_contract
+
                     for _req in _body_reqs:
                         if _time.monotonic() - _phase_unit_start > _PHASE_UNIT_DEADLINE:
                             db.add(ScanLog(
@@ -3331,23 +3332,42 @@ def run_offensive_operator_scan(
                             "phase_id": phase_id,
                             "skill_id": _body_skill,
                             "tool_name": _primary_tool,
-                            "profile": _body_profile,
+                            "profile": _primary_profile,
                             "target": _url,
-                            "arguments": {
-                                "target": _url,
-                                "scan_id": job.id,
-                                "env_vars": {
-                                    "SCAN_HTTP_METHOD": _method,
-                                    "SCAN_FUZZ_POST_DATA": _body_template,
-                                    "SCAN_FUZZ_CONTENT_TYPE": _content_type,
-                                },
-                            },
+                            "arguments": {"target": _url, "scan_id": job.id},
                             "expected_evidence": ["stdout", "raw_tool_output", "parsed_result"],
                         }
+                        _request_adaptation = adapt_execution_to_request_contract(
+                            _supp_exec,
+                            {
+                                "status": "resolved",
+                                "method": _method,
+                                "parameter_location": "body",
+                                "parameter_ref": str((list(_req.get("body_parameters") or []) or [""])[0]),
+                                "body": _body_template,
+                                "content_type": _content_type,
+                                "source": str(_req.get("source") or "discovered_parameterized_requests"),
+                                "endpoint_id": _req.get("endpoint_id"),
+                            },
+                        )
+                        if not _request_adaptation.get("compatible"):
+                            _supp_results.append({
+                                "status": "failed",
+                                "phase_id": phase_id,
+                                "skill_id": _body_skill,
+                                "tool_name": _primary_tool,
+                                "target": _url,
+                                "error": _request_adaptation.get("reason"),
+                                "request_contract_adaptation": {
+                                    key: value for key, value in _request_adaptation.items() if key != "execution"
+                                },
+                            })
+                            continue
+                        _supp_exec = _request_adaptation["execution"]
                         try:
                             _supp_result = _call_mcp_execution(_supp_exec, authorized_scope=authorized_scope)
                             _supp_result.setdefault("skill_id", _body_skill)
-                            _supp_result.setdefault("profile", _body_profile)
+                            _supp_result.setdefault("profile", _supp_exec["profile"])
                             _supp_result.setdefault("phase_id", phase_id)
                             _supp_result.setdefault("tool_name", _primary_tool)
                             _supp_result.setdefault("target", _url)

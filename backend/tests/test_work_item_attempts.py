@@ -196,3 +196,46 @@ def test_verified_recovery_does_not_replan_successful_item():
     assert clone is None
     assert target.status == "completed"
     db.add.assert_not_called()
+
+
+def test_replan_does_not_create_unexecutable_work_for_closed_scan():
+    db = MagicMock()
+    target = item(
+        scan_job_id=4,
+        execution_context="external",
+        auth_session_revision=0,
+        phase_id="P21",
+        target="https://example.test",
+        tool_name="validator",
+        profile="validator",
+        resource_class="medium",
+        priority=100,
+    )
+    decision = {
+        "action": "correct_in_flight",
+        "recovery": {"applied": True, "state": "replan", "type": "redispatch"},
+    }
+
+    clone = materialize_replan(db, target, decision, job=SimpleNamespace(status="completed_with_gaps"))
+
+    assert clone is None
+    assert target.status == "skipped"
+    assert target.last_error == "supervisor_replan_suppressed:scan_closed"
+    assert target.item_metadata["runtime_recovery"]["verification"] == "aborted"
+    db.add.assert_not_called()
+
+
+def test_terminal_work_item_reconciles_active_attempt(monkeypatch):
+    db = MagicMock()
+    target = item(id=22, status="failed", scan_job_id=4, last_error="runner rejected profile")
+    db.query.return_value.filter.return_value.all.return_value = [target]
+    active = SimpleNamespace(state="mcp_accepted")
+    monkeypatch.setattr(work_item_attempts, "latest_attempt", lambda *_: active)
+    transition = MagicMock()
+    monkeypatch.setattr(work_item_attempts, "transition_attempt", transition)
+
+    reconciled = work_item_attempts.reconcile_terminal_attempt_states(db, 4)
+
+    assert reconciled == 1
+    assert transition.call_args.args[2] == "failed"
+    assert transition.call_args.kwargs["error_class"] == "runner rejected profile"

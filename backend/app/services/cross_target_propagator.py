@@ -26,6 +26,7 @@ Chamado em poll_scan_work_item após ferramentas de:
 """
 
 from __future__ import annotations
+from app.services.work_item_contract import build_scan_work_item
 
 import logging
 import re
@@ -207,7 +208,7 @@ def _seed_credential_test(
 
         rc = resource_class_for_tool(tool_name)
         pri = PHASE_PRIORITY.get(phase_id, 100) - 15  # alta prioridade
-        item = ScanWorkItem(
+        item = build_scan_work_item(
             scan_job_id=scan_id,
             phase_id=phase_id,
             target=target[:500],
@@ -275,7 +276,7 @@ def _seed_version_cve_for_target(
 
         rc = resource_class_for_tool(tool_name)
         pri = PHASE_PRIORITY.get(phase_id, 100) - 10
-        item = ScanWorkItem(
+        item = build_scan_work_item(
             scan_job_id=scan_id,
             phase_id=phase_id,
             target=target[:500],

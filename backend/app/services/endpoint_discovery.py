@@ -25,6 +25,7 @@ from urllib.parse import urlparse
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.services.work_item_contract import build_scan_work_item
 from app.models.models import ScanJob
 
 logger = logging.getLogger("endpoint_discovery")
@@ -304,7 +305,7 @@ def _seed_test_item(db, scan_id, phase_id, target, tool_name, metadata, *, execu
         except Exception:
             pass
     item_metadata["queue_ready_at"] = datetime.now().isoformat()
-    db.add(ScanWorkItem(
+    db.add(build_scan_work_item(
         scan_job_id=scan_id, execution_context=execution_context,
         auth_session_revision=auth_session_revision,
         phase_id=phase_id, target=target[:500],

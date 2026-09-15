@@ -7,6 +7,7 @@ from typing import Any
 from sqlalchemy import func
 from sqlalchemy.orm import Session, load_only
 
+from app.services.work_item_contract import build_scan_work_item
 from app.graph.mission import PENTEST_PHASES
 from app.models.models import (
     CoverageItem,
@@ -2938,7 +2939,7 @@ def _schedule_fallback_quality_items(db: Session, job: ScanJob, weak_phase_ids: 
                 "quality_gate_fallback_chain": chain + [str(item.tool_name or "")],
                 "quality_gate_reason": "alternate_tool_for_repeated_phase_gap",
             }, str(item.phase_id or ""), candidate, source="quality_gate")
-            fallback_item = ScanWorkItem(
+            fallback_item = build_scan_work_item(
                 scan_job_id=job.id,
                 phase_id=str(item.phase_id or "")[:10],
                 target=str(item.target or "")[:500],

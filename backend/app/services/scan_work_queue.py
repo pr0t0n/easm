@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 from sqlalchemy import and_, func, or_, text
 from sqlalchemy.orm import Session
 
+from app.services.work_item_contract import build_scan_work_item
 from app.core.config import settings
 from app.models.models import ScanJob, ScanLog, ScanWorkItem
 from app.services.scan_scope import authorized_scope_for_scan, is_host_in_scope
@@ -772,7 +773,7 @@ def _seed_api_scan_work_item(
             )[:4000],
         ))
         return 0, 1, 0
-    item = ScanWorkItem(
+    item = build_scan_work_item(
         scan_job_id=job.id,
         execution_context="external",
         phase_id="P16",
@@ -975,7 +976,7 @@ def _seed_api_top20_skill_work_items(
             current.updated_at = datetime.now()
             existing += 1
             continue
-        item = ScanWorkItem(
+        item = build_scan_work_item(
             scan_job_id=job.id,
             execution_context="external",
             phase_id="P16",
@@ -2633,7 +2634,7 @@ def requeue_authenticated_crawl_items(db: Session, job: ScanJob, identity_key: s
             "session_revision": int(internal.session_revision or 1),
             "queue_ready_at": now.isoformat(),
         })
-        db.add(ScanWorkItem(
+        db.add(build_scan_work_item(
             scan_job_id=job.id,
             execution_context="internal",
             auth_session_revision=int(internal.session_revision or 1),
@@ -2718,7 +2719,7 @@ def seed_internal_first_work_items(db: Session, job: ScanJob, identity_key: str)
                     "queue_ready_at": now.isoformat(),
                     "internal_first": True,
                 }, phase_id, tool, source="internal_first_plan")
-                db.add(ScanWorkItem(
+                db.add(build_scan_work_item(
                     scan_job_id=job.id,
                     execution_context="internal",
                     auth_session_revision=int(internal.session_revision or 1),
@@ -2879,7 +2880,7 @@ def repair_authenticated_deep_test_work_items(db: Session, job: ScanJob, identit
                     "repair_reason": "p09_completed_with_authenticated_surface",
                     "applicability": _tool_applicability_decision(phase_id, tool, target, state, at="enqueue"),
                 }, phase_id, tool, source="authenticated_deep_repair")
-                db.add(ScanWorkItem(
+                db.add(build_scan_work_item(
                     scan_job_id=job.id,
                     execution_context="internal",
                     auth_session_revision=revision,
@@ -3168,7 +3169,7 @@ def enqueue_httpx_scope_candidates(
         if duplicate:
             existing += 1
             continue
-        db.add(ScanWorkItem(
+        db.add(build_scan_work_item(
             scan_job_id=job.id,
             phase_id="P05",
             target=host,
@@ -3248,7 +3249,7 @@ def enqueue_p06_discovered_port_origins(
                 "httpx",
                 source="p02_open_port_origin",
             )
-            db.add(ScanWorkItem(
+            db.add(build_scan_work_item(
                 scan_job_id=job.id,
                 phase_id="P06",
                 target=origin,
@@ -3331,7 +3332,7 @@ def enqueue_scope_safe_redirect_probes(
         if duplicate:
             existing += 1
             continue
-        item = ScanWorkItem(
+        item = build_scan_work_item(
             scan_job_id=job.id,
             phase_id=str(source_item.phase_id or "P07"),
             target=destination[:500],
@@ -3696,7 +3697,7 @@ def enqueue_scan_work_items(
             }, phase_id, tool, source=source)
         if _batch_status == "queued":
             _batch_metadata["queue_ready_at"] = datetime.now().isoformat()
-        item = ScanWorkItem(
+        item = build_scan_work_item(
             scan_job_id=job.id,
             execution_context="external",
             phase_id=phase_id,
@@ -3788,7 +3789,7 @@ def enqueue_scan_work_items(
         _single_status = initial_status_for_target_phase(phase_id, [target], state)
         if _single_status == "queued":
             _item_meta["queue_ready_at"] = datetime.now().isoformat()
-        item = ScanWorkItem(
+        item = build_scan_work_item(
             scan_job_id=job.id,
             execution_context="external",
             phase_id=phase_id,
@@ -4102,7 +4103,7 @@ def claim_work_items(db: Session, scan_id: int, *, limit: int | None = None) -> 
                     continue
                 decision = evaluate_runtime_outcome(db, job, exhausted_item)
                 apply_recovery_decision(exhausted_item, decision)
-                materialize_replan(db, exhausted_item, decision)
+                materialize_replan(db, exhausted_item, decision, job=job)
             db.flush()
         hold_external_for_internal = False
         if job:

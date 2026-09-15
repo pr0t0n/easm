@@ -21,6 +21,7 @@ import httpx
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.services.work_item_contract import build_scan_work_item
 from app.core.config import settings
 from app.services.artifact_store import redact
 from app.services.evidence_contract_service import evaluate_finding_promotion
@@ -726,7 +727,7 @@ def materialize_validation_wire(db: Session, job: Any, finding: Any, wire: Any) 
         "post_scan_revalidation": post_scan_revalidation,
         "queue_ready_at": datetime.now().isoformat(),
     }
-    item = ScanWorkItem(
+    item = build_scan_work_item(
         scan_job_id=job.id,
         execution_context="internal" if wire.identity_key else "external",
         phase_id="P21",

@@ -30,6 +30,7 @@ Tool selection strategy (DeepAudit-inspired, pentest-ai 0% FP approach):
 """
 
 from __future__ import annotations
+from app.services.work_item_contract import build_scan_work_item
 
 import logging
 import re
@@ -370,7 +371,7 @@ def schedule_poc_validation(
         # for a scan with a colliding finding. Our own nested savepoint here
         # rolls back cleanly via the `with` protocol instead.
         with db.begin_nested():
-            val_item = ScanWorkItem(
+            val_item = build_scan_work_item(
                 scan_job_id=job.id,
                 phase_id="P21",
                 target=storage_target,
