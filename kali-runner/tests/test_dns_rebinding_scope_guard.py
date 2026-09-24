@@ -61,11 +61,29 @@ def test_hostname_rebinding_to_cloud_metadata_address_is_rejected(monkeypatch, t
     assert unsafe is True
 
 
-def test_hostname_rebinding_to_rfc1918_is_rejected_when_not_explicitly_scoped(monkeypatch, tmp_path):
+def test_hostname_rebinding_to_rfc1918_is_allowed_matching_is_unsafe_target_trust_model(monkeypatch, tmp_path):
+    # RFC1918 is deliberately NOT blocked here -- _is_unsafe_target already
+    # dropped that restriction (PRIVATE_NET_RE only blocks loopback/link-local)
+    # because the runner shares the docker bridge with in-scope lab targets.
+    # This function used to re-block RFC1918 through DNS resolution instead of
+    # literal-IP matching, silently re-breaking that exact trust model: every
+    # hostname-scoped lab scan (juice-shop, dvwa, ...) had 100% of its
+    # kali_runner jobs rejected with 400, confirmed live on scan #40.
     runner = _load_runner(monkeypatch, tmp_path)
     monkeypatch.setattr(runner.socket, "getaddrinfo", _fake_getaddrinfo(["10.0.0.5"]))
     unsafe, reason = runner._disallowed_dns_rebind("example.com", ["example.com"])
-    assert unsafe is True
+    assert unsafe is False
+
+
+def test_juice_shop_lab_target_on_docker_compose_bridge_is_allowed(monkeypatch, tmp_path):
+    # The exact live regression: a docker-compose service hostname resolves
+    # (via the shared compose network's internal DNS) to a private bridge
+    # address, and authorized_scope only ever contains the hostname itself,
+    # never a CIDR. Must not be treated as a rebinding attack.
+    runner = _load_runner(monkeypatch, tmp_path)
+    monkeypatch.setattr(runner.socket, "getaddrinfo", _fake_getaddrinfo(["172.20.0.5"]))
+    unsafe, reason = runner._disallowed_dns_rebind("juice-shop-local", ["juice-shop-local"])
+    assert unsafe is False
 
 
 def test_private_address_allowed_when_explicitly_authorized_by_cidr(monkeypatch, tmp_path):

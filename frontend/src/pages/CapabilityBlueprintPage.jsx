@@ -165,8 +165,8 @@ function RuntimeBlock({ title, value, lines }) {
       <div style={{ fontSize: 11, fontWeight: 800, color: "var(--ink-muted)", textTransform: "uppercase", letterSpacing: ".06em" }}>{title}</div>
       <div style={{ marginTop: 5, fontSize: 18, fontWeight: 800, color: "var(--ink)", overflowWrap: "anywhere" }}>{value}</div>
       <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 4 }}>
-        {(lines || []).length ? lines.map((line) => (
-          <div key={line} style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--ink-muted)", overflowWrap: "anywhere" }}>{line}</div>
+        {(lines || []).length ? lines.map((line, index) => (
+          <div key={`${index}-${line}`} style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--ink-muted)", overflowWrap: "anywhere" }}>{line}</div>
         )) : (
           <div style={{ fontSize: 12, color: "var(--ink-muted)" }}>sem dados ainda</div>
         )}

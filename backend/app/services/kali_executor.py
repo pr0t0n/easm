@@ -250,6 +250,11 @@ TOOL_TO_PROFILE: dict[str, str] = {
     "dalfox": "dalfox_xss",
     "browser-xss": "browser_xss",  # headless chromium → dispara XSS client-side (DOM)
     "chromium-capture": "chromium_capture",  # CDP: captura requisicoes/storage/cookies p/ analise BL
+    "retire-js": "retire_js_scan",  # deteccao generica de componentes JS vulneraveis/desatualizados
+    "prompt-injection-probe": "prompt_injection_probe",  # probe generico de prompt injection em chatbots/IA
+    "self-register-probe": "self_register_probe",  # auto-registro generico de conta de teste descartavel
+    "xss-verification-probe": "xss_verification_probe",  # confirmacao real de XSS via browser CDP
+    "finding-disclosure-probe": "finding_disclosure_probe",  # submissao generica de finding via contato/feedback
     "wapiti": "wapiti_scan",
     "wpscan": "wpscan_basic",
     "interactsh-client": "interactsh_oob",

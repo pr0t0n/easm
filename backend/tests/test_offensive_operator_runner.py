@@ -133,6 +133,138 @@ def test_mcp_payload_contains_authorized_scope(monkeypatch) -> None:
     assert payload["arguments"]["scan_id"] == 8
 
 
+def test_chromium_capture_dispatch_populates_generic_spa_routes(monkeypatch) -> None:
+    # Regression: this is the ACTUAL live P08 dispatch path (every real scan
+    # goes through _call_mcp_execution -> mcp_server -> kali_runner), unlike
+    # browser_capture_service.py's _run_chromium_capture, which only the rare
+    # "_lab_fast_path" helper calls. Confirmed live on Juice Shop scans #40-44:
+    # chromium-capture only ever saw the ~6 XHRs that fire on "/" because
+    # nothing on this path ever populated extra_args (ROUTES was always
+    # empty), so the app's real REST surface (basket, profile, search, ...)
+    # was never discovered.
+    from app.services.browser_capture_service import _GENERIC_SPA_ROUTES
+
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, str]:
+            return {"status": "failed", "error": "test_terminal_response"}
+
+    def fake_post(url, json, timeout):
+        captured["payload"] = json
+        return FakeResponse()
+
+    monkeypatch.setattr(
+        "app.services.offensive_operator_runner.requests.post",
+        fake_post,
+    )
+    _call_mcp_execution(
+        {
+            "phase_id": "P08",
+            "skill_id": "skill.discovery.endpoint_discovery",
+            "tool_name": "chromium-capture",
+            "profile": "chromium_capture",
+            "target": "http://juice-shop-local:3000",
+            "arguments": {"target": "http://juice-shop-local:3000"},
+        },
+        authorized_scope=["juice-shop-local"],
+        scan_id=44,
+    )
+
+    extra_args = captured["payload"]["arguments"]["extra_args"]
+    assert len(extra_args) == 4
+    assert extra_args[3] == ",".join(_GENERIC_SPA_ROUTES)
+    # mcp_server's own extra_args guardrail (_apply_guardrail) drops any
+    # element where str(arg).strip() is falsy -- an empty-string placeholder
+    # for the unused TOKEN/USER/PASS slots would silently vanish there,
+    # shifting ROUTES left into an earlier positional slot. Confirmed live on
+    # scan #45: this put the ROUTES csv in cdp_capture.py's TOKEN slot,
+    # corrupting localStorage. Every element must be non-empty.
+    for arg in extra_args:
+        assert str(arg).strip(), f"empty extra_arg would be dropped by mcp_server's guardrail: {extra_args!r}"
+
+
+def test_chromium_capture_dispatch_always_targets_the_origin_not_the_phase_endpoint(monkeypatch) -> None:
+    # chromium-capture's ROUTES navigation is only meaningful relative to the
+    # SPA's own root -- the phase loop's "effective target" for this call can
+    # be whatever narrow endpoint the current phase iteration is probing for
+    # OTHER tools. Confirmed live on scan #46: dispatched against
+    # "/redirect?to=https" instead of "/", so hash-route navigation happened
+    # on top of a redirect page instead of the app shell.
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, str]:
+            return {"status": "failed", "error": "test_terminal_response"}
+
+    def fake_post(url, json, timeout):
+        captured["payload"] = json
+        return FakeResponse()
+
+    monkeypatch.setattr(
+        "app.services.offensive_operator_runner.requests.post",
+        fake_post,
+    )
+    _call_mcp_execution(
+        {
+            "phase_id": "P13",
+            "skill_id": "skill.vuln.business_logic",
+            "tool_name": "chromium-capture",
+            "profile": "chromium_capture",
+            "target": "http://juice-shop-local:3000/redirect?to=https",
+            "arguments": {"target": "http://juice-shop-local:3000/redirect?to=https"},
+        },
+        authorized_scope=["juice-shop-local"],
+        scan_id=46,
+    )
+
+    # kali_runner's {target} substitution reads the request's top-level
+    # "target" (its JobRequest model has no nested arguments.target at all)
+    # -- that is the field that actually matters for what cdp_capture.py
+    # navigates to.
+    assert captured["payload"]["target"] == "http://juice-shop-local:3000/"
+
+
+def test_chromium_capture_dispatch_does_not_override_caller_supplied_extra_args(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, str]:
+            return {"status": "failed", "error": "test_terminal_response"}
+
+    def fake_post(url, json, timeout):
+        captured["payload"] = json
+        return FakeResponse()
+
+    monkeypatch.setattr(
+        "app.services.offensive_operator_runner.requests.post",
+        fake_post,
+    )
+    _call_mcp_execution(
+        {
+            "phase_id": "P08",
+            "skill_id": "skill.discovery.endpoint_discovery",
+            "tool_name": "chromium-capture",
+            "profile": "chromium_capture",
+            "target": "http://juice-shop-local:3000",
+            "arguments": {"target": "http://juice-shop-local:3000", "extra_args": ["already-set"]},
+        },
+        authorized_scope=["juice-shop-local"],
+        scan_id=44,
+    )
+
+    assert captured["payload"]["arguments"]["extra_args"] == ["already-set"]
+
+
 def test_all_controlled_pentest_phases_can_advance_with_successful_tool_results() -> None:
     # P20/P21/P22 are real evidence-adjudication reviewers now (not Kali
     # placeholders), so they require "strong" evidence (a reproducible

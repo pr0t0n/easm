@@ -2546,7 +2546,27 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
                 phase_task_budget=int(settings.offensive_operator_phase_task_budget or 1),
             )
             _touch_worker_heartbeat(db, scan_mode=scan_mode, status="idle", scan_id=None, task_name=None)
-            db.refresh(job)
+            # NOT db.refresh(job): run_offensive_operator_scan releases/recreates
+            # the DB session around every external tool wait (see
+            # _release_db_session_before_external_wait), which clears this
+            # session's identity map. `job` still points at the instance loaded
+            # before that call -- refreshing IT raises SQLAlchemy's "Instance
+            # '<ScanJob at 0x...>' is not persistent within this Session" the
+            # moment a wait happened to straddle the call, which fails the
+            # whole task (burning all 3 retries) instead of just re-reading the
+            # row. Confirmed live on scan #42 (Juice Shop aggressive): failed
+            # at the P11->P12 phase-budget handoff this way. Re-fetch by id
+            # instead, mirroring the same resilient pattern the inner runner
+            # already uses in _refresh_scan_job_after_wait for the identical
+            # class of staleness.
+            try:
+                job = db.get(ScanJob, scan_id) or job
+            except Exception:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                job = db.get(ScanJob, scan_id) or job
             if str(job.status or "").lower() in HALTED_SCAN_STATUSES:
                 db.commit()
                 return _halted_scan_result(job.status)

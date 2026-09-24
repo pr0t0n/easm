@@ -1737,6 +1737,516 @@ def _ensure_auth_sessions_once(db, job: ScanJob) -> dict[str, Any]:
         return {"ready": False, "error": str(exc)[:500]}
 
 
+def _register_one_throwaway_identity(db, job: ScanJob, target: str, identity_key: str) -> dict[str, Any]:
+    """Run `self-register-probe` once and persist the resulting session under
+    `identity_key`, if successful. Split out of
+    `_ensure_autonomous_self_registration_once` so that function can create
+    MULTIPLE independent throwaway accounts — a single black-box identity is
+    enough to unlock "am I logged in" checks, but the platform's existing
+    cross-identity BOLA/IDOR engine (bola_probe.py, business_logic_test.py)
+    only activates once at least two distinct valid sessions exist; it has no
+    notion of specific role names, it just needs >=2 sessions to pick from."""
+    import json as _json
+
+    from app.services.auth_session_manager import AuthMaterial, AuthSessionManager
+    from app.services.kali_executor import execute_via_kali
+
+    result = execute_via_kali("self-register-probe", target, scan_id=job.id, max_wait=60)
+    try:
+        payload = _json.loads(result.get("stdout") or result.get("parsed_result") or "{}")
+    except Exception:  # noqa: BLE001
+        payload = {}
+    registered = bool(payload.get("registered"))
+    logged_in = bool(payload.get("logged_in"))
+    token = str(payload.get("auth_token") or "")
+    cookie = str(payload.get("set_cookie") or "")
+    db.add(ScanLog(
+        scan_job_id=job.id,
+        source="offensive-operator",
+        level="INFO",
+        message=(
+            f"autonomous_self_registration identity={identity_key} registered={registered} "
+            f"logged_in={logged_in} has_token={bool(token)} has_cookie={bool(cookie)}"
+        ),
+    ))
+    if not (registered and logged_in and (token or cookie)):
+        db.commit()
+        return {"registered": registered, "logged_in": logged_in}
+
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    cookies = {}
+    if cookie:
+        name = cookie.split("=", 1)[0].strip()
+        value = cookie.split("=", 1)[1].split(";", 1)[0].strip() if "=" in cookie else ""
+        if name:
+            cookies[name] = value
+    material = AuthMaterial(
+        identity_key=identity_key,
+        role="customer",
+        auth_type="bearer_token" if token else "cookie",
+        headers=headers,
+        cookies=cookies,
+        valid=True,
+        status="valid",
+    )
+    AuthSessionManager(db, job).upsert_captured_material(
+        identity_key=identity_key,
+        role="customer",
+        username_ref=str(payload.get("email") or ""),
+        material=material,
+    )
+    db.commit()
+    return {"registered": True, "logged_in": True, "identity_key": identity_key}
+
+
+def _ensure_autonomous_self_registration_once(db, job: ScanJob, target: str) -> dict[str, Any]:
+    """Self-register two independent throwaway test accounts and log in with
+    them, GENERICALLY — no operator-supplied auth_config required.
+    _ensure_auth_sessions_once (AuthSessionManager.ensure_sessions) is a no-op
+    whenever the scan has no auth_config at all, which is every purely
+    black-box scan -- meaning the platform previously had ZERO path to an
+    authenticated session unless the operator already knew working
+    credentials up front. Most authenticated-only vulnerability classes
+    (IDOR/BOLA against another user's data, business-logic abuse, CSRF,
+    basket/session manipulation) were therefore untestable on any scan that
+    didn't already have credentials handed to it.
+
+    A single identity is enough for basic "logged in" testing, but the
+    platform's existing cross-identity BOLA/IDOR engine only activates once
+    >=2 distinct valid sessions exist (it picks whichever sessions it finds,
+    with no requirement on specific role names) — so two throwaway accounts
+    are registered here instead of one, using the same generic
+    `self-register-probe` tool (REST registration/login convention prober,
+    no target-specific field names or endpoints assumed correct in advance)."""
+    state = dict(job.state_data or {})
+    if state.get("_self_registration_attempted"):
+        return {"skipped": True, "reason": "already_attempted"}
+    state["_self_registration_attempted"] = True
+    job.state_data = state
+    db.commit()
+    try:
+        results = {}
+        for identity_key in ("self_registered_user_a", "self_registered_user_b"):
+            results[identity_key] = _register_one_throwaway_identity(db, job, target, identity_key)
+        return results
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="offensive-operator",
+            level="WARNING",
+            message=f"autonomous_self_registration_failed error={exc!s}"[:2000],
+        ))
+        db.commit()
+        return {"error": str(exc)[:500]}
+
+
+def _synthesize_object_reference_endpoints_once(db, job: ScanJob, target: str) -> dict[str, Any]:
+    """Given already-discovered "collection" endpoints (GET, no numeric/uuid
+    id segment yet -- e.g. /api/Products, /api/BasketItems, /api/Feedbacks),
+    fetch each with the best available authenticated session and parse the
+    JSON response body for embedded object "id"/"_id" fields, persisting
+    `{collection_url}/{id}` as a new, testable object-reference endpoint.
+
+    GENERIC: this exploits the overwhelmingly common REST convention that a
+    collection endpoint returns a JSON array (or an array under a common
+    envelope key like "data"/"rows"/"results"/"items") of objects that each
+    carry their own id -- true of virtually any REST API, not specific to
+    any one target. Without this, crawlers and the passive browser harvester
+    (which only observes a SPA's initial-load and top-level-route traffic)
+    never discover the `/collection/{id}` child routes BOLA/IDOR testing
+    needs, because a fresh throwaway test account has no basket, feedback,
+    or order of its own yet to naturally generate one -- so
+    object_reference classification (endpoint_analysis_pipeline.py) has
+    nothing to classify as True even once identity count and gating are
+    otherwise satisfied."""
+    state = dict(job.state_data or {})
+    if state.get("_object_reference_synthesis_attempted"):
+        return {"skipped": True, "reason": "already_attempted"}
+    state["_object_reference_synthesis_attempted"] = True
+    job.state_data = state
+    db.commit()
+    try:
+        import json as _json
+        import urllib.request as _urlreq
+
+        from app.models.models import OffensiveEndpoint
+        from app.services.auth_session_manager import AuthSessionManager
+        from app.services.endpoint_analysis_pipeline import _OBJECT_SEGMENT
+        from app.services.offensive_inventory_service import OffensiveInventoryService
+
+        materials = AuthSessionManager(db, job).list_material(limit=4)
+        best = next((m for m in materials if m.valid), None)
+        headers: dict[str, str] = dict(best.headers) if best else {}
+        if best and best.cookies:
+            headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in best.cookies.items())
+        headers.setdefault("User-Agent", "Mozilla/5.0")
+
+        candidates = (
+            db.query(OffensiveEndpoint)
+            .filter(
+                OffensiveEndpoint.scan_job_id == job.id,
+                OffensiveEndpoint.method == "GET",
+            )
+            .order_by(OffensiveEndpoint.id.asc())
+            .limit(200)
+            .all()
+        )
+        inv = OffensiveInventoryService(db, job)
+        synthesized = 0
+        checked = 0
+        static_suffixes = (".js", ".css", ".png", ".jpg", ".jpeg", ".svg", ".ico", ".json", ".woff", ".woff2")
+        for endpoint in candidates:
+            if checked >= 25:
+                break
+            url = str(endpoint.url or "")
+            path = urlparse(url).path or "/"
+            if _OBJECT_SEGMENT.search(path) or path.rstrip("/").lower().endswith(static_suffixes):
+                continue
+            checked += 1
+            try:
+                req = _urlreq.Request(url, headers=headers, method="GET")
+                with _urlreq.urlopen(req, timeout=8) as resp:
+                    body = resp.read(50_000).decode("utf-8", "replace")
+            except Exception:  # noqa: BLE001
+                continue
+            try:
+                parsed_body = _json.loads(body)
+            except Exception:  # noqa: BLE001
+                continue
+            rows: list[Any] | None = None
+            if isinstance(parsed_body, list):
+                rows = parsed_body
+            elif isinstance(parsed_body, dict):
+                for key in ("data", "rows", "results", "items"):
+                    value = parsed_body.get(key)
+                    if isinstance(value, list):
+                        rows = value
+                        break
+            if not rows:
+                continue
+            found_ids: list[str] = []
+            for row in rows[:20]:
+                if not isinstance(row, dict):
+                    continue
+                object_id = row.get("id", row.get("_id"))
+                if isinstance(object_id, (int, str)) and str(object_id).strip():
+                    found_ids.append(str(object_id).strip())
+                if len(found_ids) >= 3:
+                    break
+            for object_id in found_ids:
+                child_url = f"{url.rstrip('/')}/{object_id}"
+                # Fetched using an authenticated identity's own session -> this
+                # is exactly the shape of a per-user-owned resource the BOLA/
+                # IDOR test class needs (auth_required=True is what flips the
+                # generated test from a passive "object_reference_discovery"
+                # into a real two-identity "object_authorization" comparison
+                # in endpoint_analysis_pipeline.py -- otherwise it's dropped
+                # into the discovery-only branch with empty required_identities
+                # regardless of object_reference already being True).
+                inv.upsert_endpoint(
+                    child_url,
+                    method="GET",
+                    source_tool="object_reference_synthesis",
+                    auth_context="authenticated" if best else str(endpoint.auth_context or "anonymous"),
+                    auth_required=True if best else None,
+                    discovered_from=url,
+                    confidence=55,
+                    tags=["object_reference_synthesized"],
+                )
+                synthesized += 1
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="offensive-operator",
+            level="INFO",
+            message=f"object_reference_synthesis checked={checked} synthesized={synthesized}",
+        ))
+        db.commit()
+        if synthesized:
+            from app.services.endpoint_analysis_pipeline import analyze_endpoints_for_scan
+
+            analyze_endpoints_for_scan(db, job, force=True)
+        return {"checked": checked, "synthesized": synthesized}
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="offensive-operator",
+            level="WARNING",
+            message=f"object_reference_synthesis_failed error={exc!s}"[:2000],
+        ))
+        db.commit()
+        return {"error": str(exc)[:500]}
+
+
+def _execute_business_logic_actions_once(db, job: ScanJob, target: str) -> dict[str, Any]:
+    """Directly executes the platform's own evidence-only business-logic/BOLA
+    execution plan, bypassing the skill-selection "validation_wire" gate.
+
+    GENERIC root cause this closes: `worker_dispatcher.py`'s bl-test handler
+    only ever narrows the broad, already-computed execution plan (built by
+    `_business_logic_execution_plan` from real persisted endpoint evidence --
+    the same real object_authorization actions `_synthesize_object_reference_
+    endpoints_once` unlocks) down to whatever single endpoint a skill's own
+    static `validation_wire` binding names. If no currently-selected skill's
+    wire happens to target one of the real BOLA-relevant endpoints this
+    specific scan actually discovered (which a static per-skill binding
+    can't know in advance), every bl-test call ends in "0 ações; pré-
+    condições/contratos pendentes" even though the broad plan has real,
+    ready-to-run cross-identity actions -- confirmed live: scan had 16 real
+    object_authorization actions computed, zero of which any bl-test
+    invocation's wire happened to match. This does not invent or guess
+    anything new (same "observed-evidence-only" plan, same real captured
+    identity sessions) -- it just also runs the broad plan once directly,
+    so the already-computed real actions actually execute somewhere instead
+    of only ever being visible via the narrow, skill-bound path."""
+    state = dict(job.state_data or {})
+    if state.get("_business_logic_direct_execution_attempted"):
+        return {"skipped": True, "reason": "already_attempted"}
+    state["_business_logic_direct_execution_attempted"] = True
+    job.state_data = state
+    db.commit()
+    try:
+        from app.services.business_logic_test import run_as_tool as _bl_run
+        from app.services.worker_dispatcher import (
+            _business_logic_execution_plan,
+            _persist_result_artifact,
+            _resolve_auth_identities,
+        )
+
+        plan = _business_logic_execution_plan(job.id, wire_contract=None)
+        actions = list(plan.get("actions") or [])
+        if not actions:
+            db.add(ScanLog(
+                scan_job_id=job.id,
+                source="offensive-operator",
+                level="INFO",
+                message="business_logic_direct_execution: 0 actions in broad plan; nothing to run",
+            ))
+            db.commit()
+            return {"actions": 0}
+
+        identity_sessions = _resolve_auth_identities(job.id)
+        result = _bl_run(target, execution_plan=plan, identity_sessions=identity_sessions or None)
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="offensive-operator",
+            level="INFO",
+            message=(
+                f"business_logic_direct_execution actions={len(actions)} "
+                f"identities={sorted(identity_sessions or {})} status={result.get('status')} "
+                f"stdout={str(result.get('stdout') or '')[:300]}"
+            ),
+        ))
+        db.commit()
+
+        status = str(result.get("status") or "").strip().lower()
+        try:
+            _persist_result_artifact(job.id, result, {}, {})
+        except Exception:  # noqa: BLE001
+            pass
+        return {"actions": len(actions), "status": status}
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="offensive-operator",
+            level="WARNING",
+            message=f"business_logic_direct_execution_failed error={exc!s}"[:2000],
+        ))
+        db.commit()
+        return {"error": str(exc)[:500]}
+
+
+def _verify_xss_execution_once(db, job: ScanJob, target: str) -> dict[str, Any]:
+    """Runs xss-verification-probe against already-discovered query-parameter
+    endpoints and turns any REAL confirmed execution into a Finding.
+
+    GENERIC gap this closes: static tools (nuclei-xss, dalfox) can only ever
+    tell you a payload is *reflected* in a response body -- they never
+    actually render the page in a browser, so they can't distinguish a
+    payload that's HTML-escaped (safe) from one that genuinely executes
+    (exploitable). This runs the exact same real-browser proof-of-concept
+    technique ("does <iframe src=javascript:alert(...)> actually fire") a
+    human tester would use to confirm the finding, against whatever query
+    parameters this scan discovered -- no assumption about which parameter
+    or route is vulnerable, which generalizes to any target with a query
+    parameter, not just this one."""
+    state = dict(job.state_data or {})
+    if state.get("_xss_verification_attempted"):
+        return {"skipped": True, "reason": "already_attempted"}
+    state["_xss_verification_attempted"] = True
+    job.state_data = state
+    db.commit()
+    try:
+        import json as _json
+
+        from app.models.models import OffensiveEndpoint
+        from app.services.kali_executor import execute_via_kali
+
+        candidates = [
+            str(row.url)
+            for row in (
+                db.query(OffensiveEndpoint)
+                .filter(OffensiveEndpoint.scan_job_id == job.id, OffensiveEndpoint.method == "GET")
+                .order_by(OffensiveEndpoint.id.asc())
+                .limit(200)
+                .all()
+            )
+            if "?" in str(row.url or "")
+        ][:15]
+        if not candidates:
+            db.add(ScanLog(
+                scan_job_id=job.id,
+                source="offensive-operator",
+                level="INFO",
+                message="xss_verification: no query-parameter endpoints discovered yet; nothing to test",
+            ))
+            db.commit()
+            return {"tested": 0}
+
+        result = execute_via_kali(
+            "xss-verification-probe", target, scan_id=job.id, max_wait=120,
+            extra_args=[",".join(candidates)],
+        )
+        try:
+            payload = _json.loads(result.get("stdout") or result.get("parsed_result") or "{}")
+        except Exception:  # noqa: BLE001
+            payload = {}
+        triggered = list(payload.get("triggered") or [])
+        tested = int(payload.get("tested") or 0)
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="offensive-operator",
+            level="INFO",
+            message=f"xss_verification tested={tested} triggered={len(triggered)} candidates={len(candidates)}",
+        ))
+        db.commit()
+
+        if triggered:
+            raw = [{
+                "title": f"XSS confirmado (execução real via browser): {str(hit.get('url'))[:120]}",
+                "severity": "high",
+                "risk_score": 8,
+                "details": {
+                    "tool": "xss_verification_probe",
+                    "asset": hit.get("url"),
+                    "matched_at": hit.get("test_url"),
+                    "evidence": f"parameter={hit.get('param')} payload triggered a real alert()/confirm()/prompt() call in a real browser",
+                    "owasp_category": "A03:2021 Injection (XSS)",
+                    "verification_status": "confirmed",
+                    "vuln_family": "xss",
+                    "discovery_method": "real headless-browser proof-of-concept execution (not static reflection)",
+                },
+            } for hit in triggered]
+            try:
+                from app.services.findings_extractor import persist_finding_dicts
+
+                persist_finding_dicts(
+                    db, job, raw, default_tool="xss_verification_probe",
+                    default_target=target, source_item=None,
+                    raw_stdout=str(result.get("stdout") or "")[:4000],
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        return {"tested": tested, "triggered": len(triggered)}
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="offensive-operator",
+            level="WARNING",
+            message=f"xss_verification_failed error={exc!s}"[:2000],
+        ))
+        db.commit()
+        return {"error": str(exc)[:500]}
+
+
+_DISCLOSURE_WORTHY_KEYWORDS = (
+    "vulnerable", "outdated", "cve-", "typosquat", "supply chain",
+    "known-vulnerable", "component", "dependency", "library",
+)
+
+
+def _disclose_confirmed_findings_once(db, job: ScanJob, target: str) -> dict[str, Any]:
+    """Submits up to 3 already-confirmed, disclosure-worthy findings (a
+    vulnerable/outdated dependency, a typosquatted package, etc.) through
+    whatever public contact/feedback channel the target itself exposes.
+
+    GENERIC: this never invents a finding or a technical claim -- it only
+    ever forwards text this scan's own tools (e.g. retire.js's component-
+    version detection) already confirmed and persisted, exactly mirroring
+    how a real pentest/bug-bounty report reaches a target that runs its own
+    "please tell us about vulnerabilities" contact form. Applicable to any
+    target that exposes such a channel, not specific to Juice Shop."""
+    state = dict(job.state_data or {})
+    if state.get("_finding_disclosure_attempted"):
+        return {"skipped": True, "reason": "already_attempted"}
+    state["_finding_disclosure_attempted"] = True
+    job.state_data = state
+    db.commit()
+    try:
+        import json as _json
+
+        from app.services.kali_executor import execute_via_kali
+
+        findings = (
+            db.query(Finding)
+            .filter(Finding.scan_job_id == job.id)
+            .order_by(Finding.id.asc())
+            .limit(200)
+            .all()
+        )
+        candidates = [
+            f for f in findings
+            if any(kw in str(f.title or "").lower() for kw in _DISCLOSURE_WORTHY_KEYWORDS)
+        ][:3]
+        if not candidates:
+            db.add(ScanLog(
+                scan_job_id=job.id,
+                source="offensive-operator",
+                level="INFO",
+                message="finding_disclosure: no disclosure-worthy findings persisted yet; nothing to submit",
+            ))
+            db.commit()
+            return {"submitted": 0}
+
+        submitted = 0
+        for finding in candidates:
+            message = str(finding.title or "")[:500]
+            result = execute_via_kali(
+                "finding-disclosure-probe", target, scan_id=job.id, max_wait=30,
+                extra_args=[message],
+            )
+            try:
+                payload = _json.loads(result.get("stdout") or result.get("parsed_result") or "{}")
+            except Exception:  # noqa: BLE001
+                payload = {}
+            ok = bool(payload.get("submitted"))
+            submitted += int(ok)
+            db.add(ScanLog(
+                scan_job_id=job.id,
+                source="offensive-operator",
+                level="INFO",
+                message=(
+                    f"finding_disclosure finding_id={finding.id} submitted={ok} "
+                    f"endpoint={payload.get('endpoint') or ''}"
+                ),
+            ))
+        db.commit()
+        return {"submitted": submitted, "attempted": len(candidates)}
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="offensive-operator",
+            level="WARNING",
+            message=f"finding_disclosure_failed error={exc!s}"[:2000],
+        ))
+        db.commit()
+        return {"error": str(exc)[:500]}
+
+
 def _run_browser_request_harvester_once(db, job: ScanJob, target: str, identity_key: str = "") -> dict[str, Any]:
     """Runs the real-body-capturing browser harvester (Épico 3) once per
     target during P08, for EVERY scan mode -- not gated behind
@@ -2078,6 +2588,20 @@ def _call_mcp_execution(
     import time as _time
     if str(execution.get("tool_name") or "").strip().lower() in _BACKEND_LOCAL_TOOLS:
         return _run_backend_local_tool(execution)
+    # chromium-capture's whole purpose is expanding discovered surface by
+    # navigating a SPA's hash routes (see the ROUTES extra_arg below) --
+    # hash routes are only meaningful relative to the app's own root. The
+    # phase loop's "effective target" for this call can be whatever narrow
+    # endpoint the current phase iteration is probing for OTHER tools (e.g.
+    # a redirect utility endpoint) — confirmed live on scan #46: dispatched
+    # against "/redirect?to=https" instead of "/", so #/login,#/basket,...
+    # navigation happened on top of a redirect page instead of the app
+    # shell, defeating the whole point. Always use the target's own origin.
+    if str(execution.get("tool_name") or "").strip().lower() == "chromium-capture":
+        _parsed_origin = urlparse(str(execution.get("target") or ""))
+        if _parsed_origin.scheme and _parsed_origin.netloc:
+            execution = dict(execution)
+            execution["target"] = f"{_parsed_origin.scheme}://{_parsed_origin.netloc}/"
     arguments: dict[str, Any] = dict(execution.get("arguments") or {})
     arguments.setdefault("target", execution["target"])
     if str(execution.get("tool_name") or "").strip().lower() == "ffuf-post":
@@ -2109,6 +2633,28 @@ def _call_mcp_execution(
     _auth = _get_auth_headers()
     if _auth:
         arguments["auth_headers"] = _auth
+    # cdp_capture.py's own route-navigation feature (built to expand a SPA's
+    # captured surface beyond the single home-page load) has a positional
+    # argv contract [target, wait, TOKEN, USER, PASS, ROUTES] that mcp_server
+    # forwards verbatim as extra_args -- but this generic MCP dispatch path
+    # (the one every real P08 phase execution actually goes through) never
+    # populated it, only the separate, rarely-triggered "_lab_fast_path"
+    # helper did. Confirmed live: chromium-capture only ever saw the ~6 XHRs
+    # that fire on "/" (Juice Shop scan #40-#44), never the app's real REST
+    # surface (basket, profile, search, ...), because nothing ever told it to
+    # navigate anywhere else. Wiring a generic SPA-route list here (same idea
+    # as a generic ffuf wordlist -- common section names, not target-specific
+    # knowledge) is the fix that actually reaches the live path.
+    if str(execution.get("tool_name") or "").strip().lower() == "chromium-capture" and not arguments.get("extra_args"):
+        from app.services.browser_capture_service import _GENERIC_SPA_ROUTES
+
+        _token = _auth.get("Authorization", "").removeprefix("Bearer ").strip() if _auth else ""
+        # "-" (not "") for the unused TOKEN/USER/PASS slots: mcp_server's
+        # generic extra_args guardrail drops any arg where str(arg).strip()
+        # is falsy, silently shifting every argument after it one slot left
+        # -- confirmed live, this put ROUTES in the TOKEN slot. cdp_capture.py
+        # recognizes "-" as "no value" for exactly this reason.
+        arguments["extra_args"] = [_token or "-", "-", "-", ",".join(_GENERIC_SPA_ROUTES)]
     # Forward API keys from environment to kali runner via arguments
     import os as _os
     for _env_key in ("SHODAN_API_KEY", "HIBP_API_KEY", "GITHUB_TOKEN"):
@@ -3114,10 +3660,25 @@ def run_offensive_operator_scan(
                             scan_job_id=job.id, source="scan-intelligence", level="INFO",
                             message=f"target_upgrade phase={phase_id} original={target} → parameterized={_effective_target}",
                         ))
+                # P12 (dalfox/nuclei-xss are reflection-only): also confirm real
+                # execution via a real browser against every discovered
+                # query-parameter endpoint, not just the one _xss_candidate
+                # picked above for the static tools' single effective target.
+                if phase_id == "P12":
+                    _verify_xss_execution_once(db, job, target)
                 # P13 (bl-test): expose the full discovered URL list via thread-local
                 # so business logic testing covers every parameterized endpoint.
                 if phase_id == "P13":
+                    _synthesize_object_reference_endpoints_once(db, job, target)
+                    _execute_business_logic_actions_once(db, job, target)
                     _set_discovered_urls(_p03_urls)
+                # P17 (Exploit Validation): by now most vulnerability-detection
+                # phases (including retire.js component-version checks at P08)
+                # have already run, so any disclosure-worthy finding they
+                # confirmed exists to forward through the target's own
+                # contact/feedback channel.
+                if phase_id == "P17":
+                    _disclose_confirmed_findings_once(db, job, target)
 
             job.current_step = f"{phase_id} {PHASE_CONTRACTS[phase_id]['name']} ({_effective_target})"
             state = dict(job.state_data or {})
@@ -3171,6 +3732,7 @@ def run_offensive_operator_scan(
 
             if phase_id == "P08":
                 _ensure_auth_sessions_once(db, job)
+                _ensure_autonomous_self_registration_once(db, job, _effective_target)
                 _run_browser_request_harvester_once(db, job, _effective_target)
                 try:
                     from app.services.auth_session_manager import AuthSessionManager

@@ -814,8 +814,8 @@ function MitreHeatmap({ rows }) {
       {byCategory.map(([category, cells]) => (
         <div key={category} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           <span style={{ fontWeight: 600, fontSize: 10, lineHeight: "13px", color: TV.text, height: 26 }}>{category}</span>
-          {cells.map((c) => (
-            <div key={c.mitre_id} title={`${c.mitre_id} — ${c.display_name}: ${c.outcome}`} style={{
+          {cells.map((c, index) => (
+            <div key={`${category}-${c.mitre_id}-${index}`} title={`${c.mitre_id} — ${c.display_name}: ${c.outcome}`} style={{
               height: 24, borderRadius: 4, background: OUTCOME_COLOR[c.outcome], border: `1px solid ${TV.border}`,
               display: "flex", alignItems: "center", padding: "0 6px", overflow: "hidden",
             }}>

@@ -7,6 +7,7 @@ import sys
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import EmailStr, TypeAdapter, ValidationError
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -16,7 +17,7 @@ from app.api.deps import apply_company_scope, get_current_user, require_admin, r
 from app.core.config import settings
 from app.core.security import get_password_hash, verify_password
 from app.db.session import get_db
-from app.models.models import AccessGroup, AgentActivityLog, AgentTraceEvent, AppSetting, AuditEvent, ExecutedToolRun, OperationLine, ScanAuthorization, ScanJob, ScanLog, ScanWorkItem, ScheduledScan, User, VulnerabilityLearning, WorkerHeartbeat, user_access_groups
+from app.models.models import AccessGroup, AgentActivityLog, AgentTraceEvent, AppSetting, AuditEvent, BasAgent, BasEnrollmentToken, BasJob, BasNetworkSegmentTag, BasSchedule, ExecutedToolRun, OperationLine, ScanAuthorization, ScanJob, ScanLog, ScanWorkItem, ScheduledScan, User, VulnerabilityLearning, WorkerHeartbeat, user_access_groups
 from app.services.audit_service import log_audit
 from app.services.policy_service import ensure_default_policy
 from app.services.policy_service import is_target_allowed
@@ -37,6 +38,14 @@ from app.graph.mission import MISSION_ITEMS
 
 
 router = APIRouter(prefix="/api", tags=["management"])
+email_adapter = TypeAdapter(EmailStr)
+
+
+def _validated_email(value) -> str:
+    try:
+        return str(email_adapter.validate_python(str(value or "").strip())).lower()
+    except ValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email invalido") from exc
 
 def _warm_skill_rag_for_scan() -> dict:
     try:
@@ -2213,6 +2222,21 @@ def delete_access_group(group_id: int, db: Session = Depends(get_db), current_us
         .filter(ScheduledScan.access_group_id == group_id)
         .update({ScheduledScan.access_group_id: None}, synchronize_session=False)
     )
+    bas_enrollment_token_links = db.query(BasEnrollmentToken).filter(
+        BasEnrollmentToken.access_group_id == group_id
+    ).update({BasEnrollmentToken.access_group_id: None}, synchronize_session=False)
+    bas_agent_links = db.query(BasAgent).filter(BasAgent.access_group_id == group_id).update(
+        {BasAgent.access_group_id: None}, synchronize_session=False
+    )
+    bas_schedule_links = db.query(BasSchedule).filter(BasSchedule.access_group_id == group_id).update(
+        {BasSchedule.access_group_id: None}, synchronize_session=False
+    )
+    bas_job_links = db.query(BasJob).filter(BasJob.access_group_id == group_id).update(
+        {BasJob.access_group_id: None}, synchronize_session=False
+    )
+    bas_network_segment_links = db.query(BasNetworkSegmentTag).filter(
+        BasNetworkSegmentTag.access_group_id == group_id
+    ).update({BasNetworkSegmentTag.access_group_id: None}, synchronize_session=False)
     db.delete(row)
     db.commit()
     return {
@@ -2221,6 +2245,11 @@ def delete_access_group(group_id: int, db: Session = Depends(get_db), current_us
             "users": int(user_links),
             "scans": int(scan_links or 0),
             "schedules": int(schedule_links or 0),
+            "bas_enrollment_tokens": int(bas_enrollment_token_links or 0),
+            "bas_agents": int(bas_agent_links or 0),
+            "bas_schedules": int(bas_schedule_links or 0),
+            "bas_jobs": int(bas_job_links or 0),
+            "bas_network_segments": int(bas_network_segment_links or 0),
         },
     }
 
@@ -2266,10 +2295,10 @@ def list_users(db: Session = Depends(get_db), current_user: User = Depends(requi
 
 @router.post("/users")
 def create_user(payload: dict, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
-    email = (payload.get("email") or "").strip().lower()
+    email = _validated_email(payload.get("email"))
     password = (payload.get("password") or "").strip()
-    if not email or not password:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="email e password obrigatorios")
+    if not password:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="password obrigatorio")
     exists = db.query(User).filter(User.email == email).first()
     if exists:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email ja cadastrado")
@@ -2292,9 +2321,7 @@ def update_user(user_id: int, payload: dict, db: Session = Depends(get_db), curr
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario nao encontrado")
 
     if "email" in payload:
-        email = str(payload.get("email") or "").strip().lower()
-        if not email:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email obrigatorio")
+        email = _validated_email(payload.get("email"))
         exists = db.query(User).filter(User.email == email, User.id != user_id).first()
         if exists:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email ja cadastrado")
@@ -2335,19 +2362,6 @@ def delete_user(user_id: int, db: Session = Depends(get_db), current_user: User 
     return {"ok": True}
 
 
-@router.put("/users/{user_id}/password")
-def admin_change_user_password(user_id: int, payload: dict, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario nao encontrado")
-    new_password = (payload.get("new_password") or "").strip()
-    if not new_password:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Nova senha obrigatoria")
-    user.password_hash = get_password_hash(new_password)
-    db.commit()
-    return {"ok": True}
-
-
 @router.put("/users/me/password")
 def change_own_password(payload: dict, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     current_password = (payload.get("current_password") or "").strip()
@@ -2358,6 +2372,19 @@ def change_own_password(payload: dict, db: Session = Depends(get_db), current_us
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Nova senha obrigatoria")
 
     current_user.password_hash = get_password_hash(new_password)
+    db.commit()
+    return {"ok": True}
+
+
+@router.put("/users/{user_id}/password")
+def admin_change_user_password(user_id: int, payload: dict, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario nao encontrado")
+    new_password = (payload.get("new_password") or "").strip()
+    if not new_password:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Nova senha obrigatoria")
+    user.password_hash = get_password_hash(new_password)
     db.commit()
     return {"ok": True}
 

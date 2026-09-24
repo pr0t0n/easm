@@ -18,7 +18,7 @@ class TokenResponse(BaseModel):
 
 class MeResponse(BaseModel):
     id: int
-    email: EmailStr
+    email: str
     is_admin: bool
     group_ids: list[int]
 

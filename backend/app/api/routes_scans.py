@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Response, status
 from sqlalchemy import case as sa_case, func, or_, text
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from app.core.config import settings
 from app.api.deps import (
@@ -619,6 +619,14 @@ def _target_tokens(value: str | None) -> list[str]:
 def _primary_target_token(value: str | None) -> str:
     tokens = _target_tokens(value)
     return tokens[0] if tokens else str(value or "").strip().lower()
+
+
+def _as_utc_datetime(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def _extract_scan_easm_payload(scan: ScanJob | None) -> tuple[dict[str, Any], dict[str, Any], str]:
@@ -3413,6 +3421,14 @@ def delete_scan(scan_id: int, db: Session = Depends(get_db), current_user: User 
     db.query(EndpointObservation).filter(EndpointObservation.scan_job_id == scan_id).delete(synchronize_session=False)
     db.query(ScanExecutionContext).filter(ScanExecutionContext.scan_job_id == scan_id).delete(synchronize_session=False)
     db.query(ProcessorCheckpoint).filter(ProcessorCheckpoint.scan_job_id == scan_id).delete(synchronize_session=False)
+    # Same gap as above, for two more tables added after this endpoint was
+    # written: bas_jobs (NO ACTION on scan_job_id) and observed_requests
+    # (NO ACTION on both scan_job_id and endpoint_id — must go before
+    # OffensiveEndpoint below). reset_operational_scans already handles both;
+    # delete_scan never got the same treatment, so any scan with a BAS run or
+    # captured browser/replay traffic 500s here with a ForeignKeyViolation.
+    db.query(BasJob).filter(BasJob.scan_job_id == scan_id).delete(synchronize_session=False)
+    db.query(ObservedRequest).filter(ObservedRequest.scan_job_id == scan_id).delete(synchronize_session=False)
     db.query(OffensiveJsAsset).filter(OffensiveJsAsset.scan_job_id == scan_id).delete(synchronize_session=False)
     db.query(OffensiveEndpoint).filter(OffensiveEndpoint.scan_job_id == scan_id).delete(synchronize_session=False)
     db.query(OffensiveService).filter(OffensiveService.scan_job_id == scan_id).delete(synchronize_session=False)
@@ -9241,8 +9257,9 @@ def get_temporal_analysis(
     
     now = datetime.now(timezone.utc)
     for finding in findings:
-        if finding.created_at:
-            age_days = (now - finding.created_at).days
+        finding_created_at = _as_utc_datetime(finding.created_at)
+        if finding_created_at:
+            age_days = (now - finding_created_at).days
             if age_days <= 7:
                 age_distribution["0_to_7_days"] += 1
             elif age_days <= 30:
@@ -9267,7 +9284,8 @@ def get_temporal_analysis(
     remediation_rate = (len(remediated_findings) / max(1, len(findings))) * 100 if findings else 0
     
     # Estimativa de velocidade (findings remediados em período)
-    days_elapsed = (now - scan.created_at).days if scan.created_at else 1
+    scan_created_at = _as_utc_datetime(scan.created_at)
+    days_elapsed = (now - scan_created_at).days if scan_created_at else 1
     weekly_remediation_rate = (len(remediated_findings) / max(1, days_elapsed)) * 7 * 100
     
     # ── 3. HISTORICAL RATINGS (via AssetRatingHistory) ──────────────────────
@@ -10315,7 +10333,22 @@ def get_cockpit(
     if normalized_target:
         scan_query = scan_query.filter(ScanJob.target_query.ilike(f"%{normalized_target}%"))
 
-    scan_rows = scan_query.order_by(ScanJob.id.desc()).limit(50).all()
+    scan_rows = (
+        scan_query
+        .options(
+            load_only(
+                ScanJob.id,
+                ScanJob.target_query,
+                ScanJob.status,
+                ScanJob.current_step,
+                ScanJob.mission_progress,
+                ScanJob.created_at,
+            )
+        )
+        .order_by(ScanJob.id.desc())
+        .limit(50)
+        .all()
+    )
     scans_dropdown = [
         {
             "id": s.id,

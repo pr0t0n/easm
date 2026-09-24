@@ -246,8 +246,12 @@ def default_phase_contracts(skills_root: Path | str | None = None) -> dict[str, 
          # nuclei-js-secrets: finds API keys, JWT tokens hardcoded in production bundles
          # nuclei-js-analysis: source maps, debug endpoints, webpack chunk enumeration
          # gau: historical JS URLs from AlienVault/Wayback (catches removed but cached endpoints)
+         # retire-js: generic outdated/vulnerable JS library detection against
+         # the public retire.js vulnerability database (OWASP "Vulnerable and
+         # Outdated Components") — a category no prior tool in this phase
+         # covered at all.
          # Output feeds P10/P12/P13 with discovered endpoints and real browser API requests.
-         ["nuclei-js-secrets", "nuclei-js-analysis", "gau", "nuclei-exposure", "katana"]),
+         ["nuclei-js-secrets", "nuclei-js-analysis", "gau", "nuclei-exposure", "katana", "retire-js"]),
         ("P09", "Vulnerability Template Scan", "Nuclei CVE/misconfiguration templates + content discovery",
          ["skill.discovery.endpoint_discovery"], ["nuclei"],
          ["ffuf", "gobuster", "nikto", "nmap-vuln", "wpscan",
@@ -276,7 +280,8 @@ def default_phase_contracts(skills_root: Path | str | None = None) -> dict[str, 
          ["wapiti", "nikto",
           "curl",
           "nuclei-xss",   # HackerOne: #1 class (652 reports) — reflected, stored, DOM, blind
-          "nuclei-csrf"]), # HackerOne: 110 CSRF reports — login CSRF, OAuth CSRF
+          "nuclei-csrf",  # HackerOne: 110 CSRF reports — login CSRF, OAuth CSRF
+          "xss-verification-probe"]),  # real-browser confirmation, not just reflection
         ("P13", "Access Control & Business Logic", "Validate object/authorization boundaries and business-logic flows",
          # FIAÇÃO: skills antes ÓRFÃS agora ligadas à fase — business_logic (chromium-capture),
          # bola_bfla, csrf, mass-assignment (api_security).
@@ -288,7 +293,11 @@ def default_phase_contracts(skills_root: Path | str | None = None) -> dict[str, 
           "skill.vuln.bola_bfla", "skill.vuln.csrf", "skill.vuln.api_security"], ["bl-test"],
          ["arjun", "chromium-capture", "curl",
           "nuclei-idor",     # HackerOne: 73 IDOR/broken access control reports
-          "nuclei-redirect"]), # HackerOne: 69 open redirect reports — auth flow redirects
+          "nuclei-redirect", # HackerOne: 69 open redirect reports — auth flow redirects
+          # prompt-injection-probe: generic OWASP LLM Top 10 coverage for any
+          # target exposing a conversational AI/chatbot feature — a category
+          # no prior tool in this phase (or any phase) covered at all.
+          "prompt-injection-probe"]),
         ("P14", "Auth Boundary Testing", "Test authentication and session boundaries without brute-force",
          ["skill.vuln.auth_bypass"], ["nuclei-auth-bypass"],
          # hydra/medusa REMOVED: they were being skipped (noisy brute-force, blocked by WAF/rate-limit)
@@ -503,6 +512,24 @@ def default_tool_catalog() -> list[ToolCatalogEntry]:
         # chromium-capture roda no kali (profile chromium_capture); bl-test é
         # backend-local (curto-circuitado em _call_mcp_execution, profile sentinela).
         entry("chromium-capture", "chromium_capture", ["client_side_analysis", "dom_xss", "api_capture"], "generic_json_parser"),
+        # Generic vulnerable/outdated JS component detection (retire.js public
+        # vuln DB) — OWASP "Vulnerable and Outdated Components". No target-
+        # specific knowledge: identifies whatever library+version a page's
+        # <script src> tags reveal and reports real CVEs/advisories for it.
+        entry("retire-js", "retire_js_scan", ["vulnerable_components", "outdated_dependency"], "generic_json_parser"),
+        # Generic LLM/AI chatbot prompt-injection probe (OWASP LLM Top 10) —
+        # discovers a candidate chatbot endpoint via common naming
+        # conventions (if the target isn't already one) and sends a fixed
+        # set of well-known injection techniques, no target-specific
+        # knowledge of any policy text or secrets.
+        entry("prompt-injection-probe", "prompt_injection_probe", ["prompt_injection", "llm_jailbreak"], "generic_json_parser"),
+        # Generic throwaway-account self-registration + login — see
+        # _ensure_autonomous_self_registration_once in offensive_operator_runner.py
+        # for the actual P08 hook that runs it and persists the resulting
+        # session into AuthSessionManager for reuse by every later phase.
+        entry("self-register-probe", "self_register_probe", ["autonomous_authentication", "throwaway_identity"], "generic_json_parser"),
+        entry("xss-verification-probe", "xss_verification_probe", ["reflected_xss", "dom_xss"], "generic_json_parser"),
+        entry("finding-disclosure-probe", "finding_disclosure_probe", ["responsible_disclosure", "vulnerability_reporting"], "generic_json_parser"),
         entry("bl-test", "business_logic_backend", ["business_logic", "idor_bola", "mass_assignment", "sensitive_data_exposure"], "generic_json_parser"),
         entry("credential-boundary-review", "backend_control", ["credential_exposure_boundary", "data_minimization"], "generic_json_parser"),
         entry("post-exploitation-boundary-review", "backend_control", ["impact_projection", "post_exploitation_boundary"], "generic_json_parser"),

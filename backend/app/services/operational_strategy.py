@@ -231,10 +231,16 @@ def build_mcp_adapter_contract(
 
 def scan_strategy_snapshot(scan_job: Any) -> dict[str, Any]:
     state = dict(getattr(scan_job, "state_data", None) or {})
-    strategy = dict(state.get("operational_strategy") or {})
-    selection = dict(state.get("tool_selection_contract") or {})
-    selected_skill = dict(state.get("selected_skill") or {})
-    invocation = dict(state.get("skill_invocation") or {})
+    strategy_value = state.get("operational_strategy")
+    selection_value = state.get("tool_selection_contract")
+    selected_skill_value = state.get("selected_skill")
+    invocation_value = state.get("skill_invocation")
+    strategy = dict(strategy_value) if isinstance(strategy_value, dict) else {}
+    selection = dict(selection_value) if isinstance(selection_value, dict) else {}
+    selected_skill = dict(selected_skill_value) if isinstance(selected_skill_value, dict) else {}
+    if isinstance(selected_skill_value, str) and selected_skill_value.strip():
+        selected_skill = {"skill_id": selected_skill_value.strip()}
+    invocation = dict(invocation_value) if isinstance(invocation_value, dict) else {}
     return {
         "scan_id": getattr(scan_job, "id", None),
         "target": getattr(scan_job, "target_query", ""),
@@ -250,7 +256,7 @@ def scan_strategy_snapshot(scan_job: Any) -> dict[str, Any]:
             "strategic_rag_context": list(state.get("strategic_rag_context") or [])[:8],
             "mcp_adapter_contract": selection.get("mcp_adapter_contract") or {},
             "last_events": list(strategy.get("events") or [])[-12:],
-            "authorization_gate": dict(state.get("authorization_gate") or {}),
-            "scan_profile": dict(state.get("scan_profile") or {}),
+            "authorization_gate": dict(state["authorization_gate"]) if isinstance(state.get("authorization_gate"), dict) else {},
+            "scan_profile": dict(state["scan_profile"]) if isinstance(state.get("scan_profile"), dict) else {},
         },
     }

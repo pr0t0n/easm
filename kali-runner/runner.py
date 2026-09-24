@@ -223,12 +223,24 @@ def _resolve_all_host_ips(host: str) -> list[str]:
 
 def _disallowed_dns_rebind(host: str, authorized_scope: list[str] | None) -> tuple[bool, str]:
     """SEC-004: a hostname's own literal string can pass _is_target_in_scope
-    while its DNS record resolves to a private/loopback/link-local address —
-    classic DNS rebinding. Reject unless that specific resolved address is
-    itself an explicit, authorized IP/CIDR scope entry (preserves the
-    existing, intentional RFC1918 trust for targets the operator explicitly
-    scoped by IP/CIDR — see PRIVATE_NET_RE's docstring — while catching a
-    public-looking domain silently resolving somewhere never authorized).
+    while its DNS record resolves to a loopback/link-local/unspecified
+    address -- classic DNS rebinding against the runner itself or a cloud
+    metadata endpoint (169.254.169.254). Reject unless that specific
+    resolved address is itself an explicit, authorized IP/CIDR scope entry.
+
+    RFC1918 private addresses are deliberately NOT in this block list --
+    _is_unsafe_target above already dropped that restriction (see its
+    PRIVATE_NET_RE comment: "the runner shares the docker bridge with
+    in-scope test targets ... we trust the upstream ScanAuthorization gate
+    instead"). Blocking them here too silently re-broke that exact case:
+    every lab target resolved by hostname (juice-shop, dvwa, ...) rather
+    than by literal IP resolves to a private container address on the
+    shared compose network, so 100% of hostname-scoped kali_runner jobs
+    were rejected with 400 the moment SEC-004 landed -- confirmed live on
+    scan #40 (aggressive Juice Shop run): all 211 mcp tool dispatches
+    across every phase failed with return_code=None, the entire scan ran
+    on ZAP-baseline leftovers alone. Keeping this function's block list in
+    sync with PRIVATE_NET_RE's is the fix, not an allowlist grown per-host.
     A no-op for literal IP targets; those are covered by the scope check
     itself, not DNS.
     """
@@ -246,7 +258,7 @@ def _disallowed_dns_rebind(host: str, authorized_scope: list[str] | None) -> tup
             addr = ipaddress.ip_address(ip)
         except ValueError:
             continue
-        if not (addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved or addr.is_multicast):
+        if not (addr.is_loopback or addr.is_link_local or addr.is_unspecified):
             continue
         explicitly_authorized = False
         for root in cidr_roots:
@@ -257,7 +269,7 @@ def _disallowed_dns_rebind(host: str, authorized_scope: list[str] | None) -> tup
             except ValueError:
                 continue
         if not explicitly_authorized:
-            return True, f"host {host!r} resolves to private/loopback address {ip} not explicitly authorized (possible DNS rebinding)"
+            return True, f"host {host!r} resolves to loopback/link-local address {ip} not explicitly authorized (possible DNS rebinding)"
     return False, ""
 
 

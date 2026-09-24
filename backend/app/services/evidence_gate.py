@@ -146,6 +146,23 @@ def get_verification_status(tool_name: str, finding: dict[str, Any]) -> str:
     if tool == "adaptive_probe":
         return str(details.get("verification_status") or "candidate")
 
+    # app_pentest's own vuln checks (_check_sqli, _check_xss, ...) already do
+    # real behavioral verification before calling something CONFIRMED -- e.g.
+    # sql_injection is only CONFIRMED when a login-bypass payload actually
+    # authenticated (auth["sqli_bypass"]) or an injected quote produced a SQL
+    # error absent from the baseline response, never from a signature match.
+    # Falling through to the generic "candidate" default here discarded that
+    # verification and permanently capped every app_pentest finding at
+    # "candidate" (then further downgraded to "inconclusive" downstream by
+    # the grounding gate, since app_pentest never has a raw_stdout to ground
+    # against) regardless of how solid its own evidence was. Confirmed live
+    # on scan #41: a real SQLi admin-login bypass (proven by Juice Shop's own
+    # score-board registering the "Login Admin" challenge as solved) was
+    # persisted as "inconclusive", starving any downstream logic gated on
+    # verification_status=="confirmed" of a proven, reusable exploit.
+    if tool == "app_pentest":
+        return str(details.get("verification_status") or "candidate")
+
     # Nuclei matchers are detections; family validators decide confirmation.
     if tool.startswith("nuclei"):
         return "candidate"

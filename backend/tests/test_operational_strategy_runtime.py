@@ -59,3 +59,18 @@ def test_scan_strategy_snapshot_exposes_runtime_state() -> None:
     assert snapshot["current"]["agent"]["id"] == "exploit_validator"
     assert snapshot["current"]["selected_skill"]["skill_id"] == "api-security"
     assert snapshot["current"]["mcp_adapter_contract"]["contract_id"] == "adapter:risk_assessment:api-security"
+
+
+def test_scan_strategy_snapshot_accepts_legacy_string_selected_skill() -> None:
+    scan = SimpleNamespace(
+        id=51,
+        target_query="example.com",
+        status="completed",
+        state_data={"selected_skill": "skill.reporting.evidence_quality"},
+    )
+
+    snapshot = scan_strategy_snapshot(scan)
+
+    assert snapshot["current"]["selected_skill"] == {
+        "skill_id": "skill.reporting.evidence_quality",
+    }

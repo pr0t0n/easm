@@ -48,12 +48,17 @@ def refresh(payload: dict, db: Session = Depends(get_db)):
     if not subject:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token invalido ou expirado")
 
-    user = db.query(User).filter(User.email == subject, User.is_active == True).first()  # noqa: E712
+    query = db.query(User).filter(User.is_active == True)  # noqa: E712
+    if str(subject).isdigit():
+        user = query.filter(User.id == int(subject)).first()
+    else:
+        user = query.filter(User.email == subject).first()
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Usuario nao encontrado ou inativo")
 
-    new_access = create_access_token(user.email)
-    new_refresh = create_refresh_token(user.email)
+    token_subject = str(user.id)
+    new_access = create_access_token(token_subject)
+    new_refresh = create_refresh_token(token_subject)
     return {
         "access_token": new_access,
         "refresh_token": new_refresh,

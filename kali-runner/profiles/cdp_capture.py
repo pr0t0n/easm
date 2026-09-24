@@ -16,11 +16,24 @@ senão se TOKEN → injeta token. Depois navega ROUTES p/ expandir a superfície
 import asyncio, json, subprocess, time, urllib.request, sys, os, re
 import websockets
 
+def _argv(i: str, default: str = "") -> str:
+    # mcp_server's generic extra_args guardrail drops any arg where
+    # str(arg).strip() is falsy (mcp_server.py's _apply_guardrail), so a
+    # positional "" placeholder for an unused slot (e.g. no USER/PASS when
+    # only TOKEN+ROUTES are set) silently vanishes from the list instead of
+    # reaching this script as an empty string -- shifting every argument
+    # after it one slot to the left. Confirmed live: ROUTES ended up
+    # injected into the TOKEN slot this way. "-" is the placeholder for "no
+    # value" precisely because it survives that non-empty-string filter.
+    v = i
+    return "" if v == "-" else v
+
+
 URL = sys.argv[1] if len(sys.argv) > 1 else "http://juice-shop:3000"
 WAIT = int(sys.argv[2]) if len(sys.argv) > 2 else 10
-TOKEN = sys.argv[3] if len(sys.argv) > 3 else ""
-USER = sys.argv[4] if len(sys.argv) > 4 else ""
-PASS = sys.argv[5] if len(sys.argv) > 5 else ""
+TOKEN = _argv(sys.argv[3]) if len(sys.argv) > 3 else ""
+USER = _argv(sys.argv[4]) if len(sys.argv) > 4 else ""
+PASS = _argv(sys.argv[5]) if len(sys.argv) > 5 else ""
 ROUTES = [r for r in (sys.argv[6].split(",") if len(sys.argv) > 6 and sys.argv[6] else []) if r.strip()]
 
 udir = f"/tmp/cdp-{os.getpid()}"

@@ -156,7 +156,7 @@ def analyze_endpoint_contract(
         and (
             explicit_template_reference
             or id_parameter_observed
-            or (concrete_reference and (is_api or is_sensitive))
+            or concrete_reference
         )
     )
     auth_observed = auth_required is True
