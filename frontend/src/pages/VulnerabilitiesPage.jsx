@@ -5,6 +5,31 @@ import ScanSelect from "../components/ScanSelect";
 import DomainsPage from "./DomainsPage";
 import "../styles/dashboard.css";
 
+async function downloadArtifactEvidence(artifact) {
+  // Evidence files are already redacted at write time; we stream the file
+  // content through the authenticated API so the operator downloads the proof
+  // itself instead of just seeing a server-side path.
+  try {
+    const resp = await client.get(`/api/pentest/artifacts/${artifact.id}/download`, {
+      responseType: "blob",
+      _skipToast: true,
+    });
+    const disposition = resp.headers?.["content-disposition"] || "";
+    const match = /filename="?([^"]+)"?/.exec(disposition);
+    const filename = match?.[1] || `evidence-artifact-${artifact.id}.txt`;
+    const url = window.URL.createObjectURL(new Blob([resp.data]));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.URL.revokeObjectURL(url);
+  } catch {
+    alert("Não foi possível baixar a evidência deste artefato (o arquivo pode ter expirado por retenção).");
+  }
+}
+
 const SEV_LABEL = { critical: "Crítico", high: "Alto", medium: "Médio", low: "Baixo", info: "Info" };
 const SEV_ORDER = ["critical", "high", "medium", "low", "info"];
 const PAGE_SIZE = 100;
@@ -329,9 +354,15 @@ export default function VulnerabilitiesPage() {
                   <div style={{ marginTop: 12 }}>
                     <b style={{ fontSize: 12 }}>Artifacts vinculados</b>
                     {evidenceArtifacts.slice(0, 8).map((artifact) => (
-                      <div key={artifact.id} className="vuln-code sk-mono" style={{ marginTop: 6 }}>
-                        #{artifact.id} · {artifact.tool_name || "ferramenta"} · {artifact.validation_status || "—"} · {artifact.artifact_type || "artifact"}
-                        {artifact.workspace_path ? <><br />{artifact.workspace_path}</> : null}
+                      <div key={artifact.id} className="vuln-code sk-mono" style={{ marginTop: 6, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+                        <span>#{artifact.id} · {artifact.tool_name || "ferramenta"} · {artifact.validation_status || "—"} · {artifact.artifact_type || "artifact"}</span>
+                        {artifact.workspace_path ? (
+                          <button type="button" className="btn-secondary" style={{ flexShrink: 0 }} onClick={() => downloadArtifactEvidence(artifact)}>
+                            Baixar evidência
+                          </button>
+                        ) : (
+                          <span style={{ flexShrink: 0, color: "var(--ink-muted)" }}>sem arquivo</span>
+                        )}
                       </div>
                     ))}
                   </div>
