@@ -101,7 +101,7 @@ def test_real_broad_actions_are_executed_directly_with_both_identities(monkeypat
     job = _job()
     result = runner._execute_business_logic_actions_once(db, job, "http://target.local")
 
-    assert result == {"actions": 2, "status": "completed"}
+    assert result == {"actions": 2, "status": "completed", "findings_created": 0}
     assert job.state_data["_business_logic_direct_execution_attempted"] is True
     assert len(bl_run_calls) == 1
     target_arg, kwargs = bl_run_calls[0]
@@ -110,6 +110,59 @@ def test_real_broad_actions_are_executed_directly_with_both_identities(monkeypat
     assert kwargs["identity_sessions"] == identities
     assert len(persist_calls) == 1
     assert persist_calls[0][0] == job.id
+
+
+def test_confirmed_bypass_is_persisted_as_a_finding(monkeypatch):
+    """A real "authorization bypass confirmed" bl-test result must produce a
+    Finding row, not just a ScanLog line + evidence artifact -- confirmed
+    live on scan #60: the direct-execution engine found a real cross-identity
+    bypass but nothing ever called persist_finding_dicts for it."""
+    import app.services.worker_dispatcher as dispatcher_module
+    import app.services.business_logic_test as bl_module
+
+    plan = {
+        "actions": [{"endpoint": "http://target.local/api/BasketItems/3", "required_identities": ["user_a", "user_b"]}],
+        "blocked": [], "policy": "observed-evidence-only",
+    }
+    monkeypatch.setattr(dispatcher_module, "_business_logic_execution_plan", lambda scan_id, wire_contract=None: plan)
+    monkeypatch.setattr(dispatcher_module, "_resolve_auth_identities", lambda scan_id, identity_keys=None: {"user_a": {}, "user_b": {}})
+    monkeypatch.setattr(dispatcher_module, "_persist_result_artifact", lambda *a, **k: None)
+
+    bl_finding = {
+        "title": "Broken Access Control confirmado: GET retornou 200 para identidade não proprietária",
+        "severity": "high",
+        "risk_score": 9,
+        "details": {"verification_status": "confirmed", "vuln_family": "broken_access_control"},
+    }
+
+    def _fake_run_as_tool(target, **kwargs):
+        return {
+            "status": "done",
+            "stdout": "business_logic: authorization bypass confirmed",
+            "parsed": {"vulnerable": True},
+            "business_logic_findings": [bl_finding],
+        }
+
+    monkeypatch.setattr(bl_module, "run_as_tool", _fake_run_as_tool)
+
+    persist_calls = []
+    import app.services.findings_extractor as extractor_module
+    monkeypatch.setattr(
+        extractor_module, "persist_finding_dicts",
+        lambda db, job, findings, **k: persist_calls.append((findings, k)) or 1,
+    )
+
+    db = _FakeDb()
+    job = _job()
+    result = runner._execute_business_logic_actions_once(db, job, "http://target.local")
+
+    assert result == {"actions": 1, "status": "done", "findings_created": 1}
+    assert len(persist_calls) == 1
+    findings_arg, kwargs = persist_calls[0]
+    assert findings_arg == [bl_finding]
+    assert kwargs["default_tool"] == "bl-test"
+    assert kwargs["default_target"] == "http://target.local"
+    assert "authorization bypass confirmed" in kwargs["raw_stdout"]
 
 
 def test_execution_exception_is_caught_and_logged(monkeypatch):

@@ -2045,7 +2045,43 @@ def _execute_business_logic_actions_once(db, job: ScanJob, target: str) -> dict[
             _persist_result_artifact(job.id, result, {}, {})
         except Exception:  # noqa: BLE001
             pass
-        return {"actions": len(actions), "status": status}
+
+        # This call bypasses the normal ScanWorkItem/execute_via_kali pipeline
+        # (it invokes run_as_tool directly), so nothing else ever routes its
+        # findings_extracted/business_logic_findings into a persisted Finding
+        # row -- confirmed live: a "authorization bypass confirmed" bl-test
+        # result produced zero Finding rows for scan #60 because only the
+        # ScanLog line and evidence artifact were written above.
+        created_count = 0
+        try:
+            import json as _json
+
+            from app.services.findings_extractor import persist_finding_dicts
+
+            bl_findings = list(result.get("business_logic_findings") or result.get("findings_extracted") or [])
+            if bl_findings:
+                raw_stdout = str(result.get("stdout") or "")
+                parsed = result.get("parsed")
+                if parsed:
+                    try:
+                        raw_stdout = f"{raw_stdout}\n{_json.dumps(parsed, default=str)}"
+                    except (TypeError, ValueError):
+                        pass
+                created_count = persist_finding_dicts(
+                    db, job, bl_findings,
+                    default_tool="bl-test",
+                    default_target=str(target),
+                    raw_stdout=raw_stdout or None,
+                )
+        except Exception as exc:  # noqa: BLE001
+            db.add(ScanLog(
+                scan_job_id=job.id,
+                source="offensive-operator",
+                level="WARNING",
+                message=f"business_logic_direct_execution_finding_persist_failed error={exc!s}"[:2000],
+            ))
+            db.commit()
+        return {"actions": len(actions), "status": status, "findings_created": created_count}
     except Exception as exc:  # noqa: BLE001
         db.rollback()
         db.add(ScanLog(
@@ -3283,7 +3319,24 @@ def run_offensive_operator_scan(
     authorized_scope = authorized_scope_from_target_query(str(job.target_query or ""))
     from app.services.methodology_planner import contracts_from_plan, resolve_methodology_plan
 
+    # resolve_methodology_plan() issues up to len(PHASE_ORDER) synchronous RAG
+    # queries plus one LLM call (_llm_select) with no DB activity in between.
+    # When the LLM backend is slow/degraded this routinely runs well past
+    # Postgres's idle-in-transaction timeout -- the caller's earlier
+    # db.commit() left `job` expired (expire_on_commit), so the very first
+    # attribute read on it above (job.target_query) had already opened a new
+    # implicit transaction that then sat idle for the whole RAG/LLM call.
+    # watchdog's idle_transaction_reaper kills that connection mid-call,
+    # which silently dropped the whole scan attempt (confirmed live on scan
+    # #62: reaper killed pid 19572 and pid 21412, ~118s apart, both on the
+    # unchanged `SELECT scan_jobs... WHERE id = 62` refresh query, every
+    # single retry re-entering this same dead end). Release the session
+    # before the call, same pattern used around every other external
+    # RAG/LLM/Kali wait in this file.
+    _job_id_before_plan = int(job.id)
+    _release_db_session_before_external_wait(db)
     methodology_plan = resolve_methodology_plan(job)
+    job = _refresh_scan_job_after_wait(db, _job_id_before_plan) or job
     active_phase_contracts = contracts_from_plan(methodology_plan)
     db.add(job)
     db.add(ScanLog(

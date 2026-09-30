@@ -1573,25 +1573,27 @@ export default function ScansPage() {
   const showMsg = (m) => { setStatusMsg(m); setTimeout(() => setStatusMsg(""), 4000); };
 
   const createScan = async ({ target, scanLevel, executionPlan, accessGroupId, accessGroupName, scopeAuthorizationAttested, authPayload, apiPayload, sourcePayload }) => {
-    const targets = String(target).split(";").map((t) => t.trim()).filter(Boolean);
-    let firstInternalScan = null;
-    for (const tgt of targets) {
-      const payload = { target_query: tgt, scan_level: scanLevel || "full", execution_plan: executionPlan || "external_only" };
-      if (accessGroupId)   payload.access_group_id   = Number(accessGroupId);
-      if (accessGroupName) payload.access_group_name = accessGroupName;
-      payload.scope_authorization_attested = Boolean(scopeAuthorizationAttested);
-      if (authPayload)     payload.auth_config        = authPayload;
-      if (apiPayload)      payload.api_scan_config    = apiPayload;
-      if (sourcePayload && (sourcePayload.source_path || sourcePayload.repository_url)) payload.source_config = sourcePayload;
-      const { data } = await client.post("/api/scans", payload);
-      if (!firstInternalScan && payload.execution_plan === "internal_then_external") firstInternalScan = data;
-    }
-    showMsg(firstInternalScan ? "Missão criada. Capture a credencial para iniciar o G1 interno." : "Missão lançada com sucesso!");
+    // Um único alvo textual pode conter vários targets separados por vírgula
+    // ou ponto e vírgula (ex.: "a.com, b.com; c.com"). O backend já sabe
+    // interpretar essa lista dentro de UM único ScanJob (ver parse_scope_targets
+    // em strategy_runtime.py), então enviamos target_query como veio, sem
+    // fatiar em múltiplas chamadas — isso evitava criar 1 scan por alvo.
+    const targetQuery = String(target || "").trim();
+    const payload = { target_query: targetQuery, scan_level: scanLevel || "full", execution_plan: executionPlan || "external_only" };
+    if (accessGroupId)   payload.access_group_id   = Number(accessGroupId);
+    if (accessGroupName) payload.access_group_name = accessGroupName;
+    payload.scope_authorization_attested = Boolean(scopeAuthorizationAttested);
+    if (authPayload)     payload.auth_config        = authPayload;
+    if (apiPayload)      payload.api_scan_config    = apiPayload;
+    if (sourcePayload && (sourcePayload.source_path || sourcePayload.repository_url)) payload.source_config = sourcePayload;
+    const { data } = await client.post("/api/scans", payload);
+    const isInternalScan = payload.execution_plan === "internal_then_external";
+    showMsg(isInternalScan ? "Missão criada. Capture a credencial para iniciar o G1 interno." : "Missão lançada com sucesso!");
     setComposer(false);
-    if (firstInternalScan) {
-      setScans((prev) => [firstInternalScan, ...prev.filter((scan) => Number(scan.id) !== Number(firstInternalScan.id))]);
-      setSelected(firstInternalScan);
-      setAutoCaptureScanId(firstInternalScan.id);
+    if (isInternalScan) {
+      setScans((prev) => [data, ...prev.filter((scan) => Number(scan.id) !== Number(data.id))]);
+      setSelected(data);
+      setAutoCaptureScanId(data.id);
     }
     loadScans();
   };
