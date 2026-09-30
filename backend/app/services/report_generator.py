@@ -105,6 +105,26 @@ def _severity_order(sev: str) -> int:
     return {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}.get(sev, 5)
 
 
+# Padrão único de exibição de alvo nos relatórios: NUNCA limita o teste, só o que
+# aparece na célula/linha. Um alvo único longo é truncado; uma string multi-alvo
+# (";"/"," — ex.: target_query com 28 hosts) vira "primeiro +N". Evita que um nome
+# gigante estoure a largura da tabela e force quebra de página.
+TARGET_DISPLAY_MAX = 42
+
+
+def _short_target(value: Any, max_chars: int = TARGET_DISPLAY_MAX) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    parts = [p.strip() for p in re.split(r"[;,]", raw) if p.strip()]
+    if len(parts) > 1:
+        first = parts[0]
+        if len(first) > max_chars:
+            first = first[: max_chars - 1] + "…"
+        return f"{first} +{len(parts) - 1}"
+    return raw if len(raw) <= max_chars else raw[: max_chars - 1] + "…"
+
+
 def generate_executive_report(
     db: Session,
     scan_id: int,
@@ -236,7 +256,7 @@ def generate_executive_report(
         <tr>
           <td><span class="sev-badge" style="background:{color}">{sev.upper()}</span></td>
           <td>{f.title or ""} {new_badge} {cve}</td>
-          <td>{f.domain or ""}</td>
+          <td style="font-size:11px;word-break:break-word">{_html.escape(_short_target(f.domain))}</td>
           <td style="font-size:11px;color:#666">{evidence}</td>
           <td style="font-size:11px">{owasp}</td>
         </tr>"""
@@ -256,7 +276,7 @@ def generate_executive_report(
             if not items:
                 continue
             label, color = class_labels[cls]
-            domains_in_class = sorted({str(f.domain or "") for f in items})
+            domains_in_class = sorted({_short_target(f.domain) for f in items if f.domain})
             rows.append(f"""
             <div class="risk-class">
               <h4 style="color:{color}">{label} — {len(domains_in_class)} subdomínios</h4>
@@ -281,12 +301,18 @@ def generate_executive_report(
         rows = sorted(by_owasp.items(), key=lambda x: -len(x[1]))
 
         def _owasp_sev_badges(flist: list) -> str:
-            badges = []
-            for f in sorted(flist, key=lambda f: _severity_order(f.severity or "info"))[:3]:
-                sev = f.severity or "info"
-                c = _severity_color(sev)
-                badges.append(f'<span class="sev-badge" style="background:{c}">{sev.upper()}</span>')
-            return "".join(badges)
+            # Distribuição real de severidade por categoria (contagem), não apenas
+            # os 3 primeiros badges — antes repetia o mesmo rótulo e não somava.
+            counts: dict[str, int] = {}
+            for f in flist:
+                s = str(f.severity or "info").lower()
+                counts[s] = counts.get(s, 0) + 1
+            order = [("critical", "#c0392b"), ("high", "#e67e22"), ("medium", "#f39c12"), ("low", "#3498db"), ("info", "#95a5a6")]
+            badges = [
+                f'<span class="sev-badge" style="background:{c}">{counts[s]} {s[:1].upper()}</span>'
+                for s, c in order if counts.get(s)
+            ]
+            return "".join(badges) or "—"
 
         items = "".join(
             f'<tr><td>{cat}</td><td>{len(flist)}</td><td>{_owasp_sev_badges(flist)}</td></tr>'
@@ -431,16 +457,8 @@ def generate_executive_report(
   <!-- OWASP BREAKDOWN -->
   {owasp_section()}
 
-  <!-- RECOMMENDATIONS -->
-  <div class="section">
-    <h2>✅ Recomendações Prioritárias</h2>
-    {_build_reco_html(findings)}
-    <div class="reco-item" style="background:#f0f7ff;border-color:#3498db">
-      <strong>Geral:</strong> Implementar WAF + proteção de origem (restringir acesso direto ao IP do servidor).
-      Configurar HSTS, CSP e X-Frame-Options no nível do load balancer/CDN para herança automática.
-      Revisar todos os subdomínios de desenvolvimento ({len(high_risk_targets.get("dev_environment", []))} encontrados) — remover ou colocar atrás de VPN/IP allowlist.
-    </div>
-  </div>
+  <!-- RECOMMENDATIONS: removidas aqui — duplicavam a "🛡 Matriz de Ação — Blue Team"
+       do relatório técnico, que embute esta seção EASM. -->
 
   <!-- FOOTER -->
   <div class="footer">
@@ -1569,7 +1587,6 @@ def generate_pentest_report(
                 f'<td>{_html.escape(str(_adj.reason_code))}<br><span style="font-size:10px;color:#777">confiança {_adj.confidence:.2f}</span></td>'
                 f'<td>{_html.escape(_missing)}</td>'
                 f'<td>{_html.escape(_answer_text)}</td>'
-                f'<td>{_html.escape(_closure_text)}</td>'
                 '</tr>'
             )
         if _adj_rows:
@@ -1580,7 +1597,7 @@ def generate_pentest_report(
                 'que originou a lacuna. A proposta da LLM é consultiva; o veredito final é produzido pelo '
                 'evidence gate após execução real.</p>'
                 '<table class="findings-table paginate" data-page-size="15"><thead><tr>'
-                '<th>Finding</th><th>Veredito</th><th>Causa</th><th>O que falta</th><th>Resposta/PoC</th><th>CVE, exploit e path</th>'
+                '<th>Finding</th><th>Veredito</th><th>Causa</th><th>O que falta</th><th>Resposta/PoC</th>'
                 f'</tr></thead><tbody>{"".join(_adj_rows)}</tbody></table></div>'
             )
     except Exception as _adj_err:
@@ -1631,6 +1648,18 @@ def generate_pentest_report(
                              margin: 32px 0 16px 0; font-size: 14px; font-weight: 600; }}
     .footer {{ text-align: center; font-size: 11px; color: #aaa; margin-top: 32px; padding-bottom: 24px; }}
     @media (max-width: 700px) {{ .pentest-grid {{ grid-template-columns: repeat(2, 1fr); }} }}
+    /* Controle de quebra de página na impressão/PDF: seções e linhas não partem
+       no meio; o cabeçalho da tabela repete a cada página. */
+    .findings-table {{ table-layout: fixed; }}
+    .findings-table th, .findings-table td {{ word-break: break-word; overflow-wrap: anywhere; }}
+    @media print {{
+      .section {{ break-inside: avoid; }}
+      .findings-table tr {{ break-inside: avoid; }}
+      .findings-table thead {{ display: table-header-group; }}
+      h2, h3 {{ break-after: avoid; }}
+      .stat-card, .risk-class, .reco-item {{ break-inside: avoid; }}
+      pre {{ white-space: pre-wrap !important; word-break: break-all; overflow-x: visible !important; }}
+    }}
   </style>
 </head>
 <body>
