@@ -12,6 +12,7 @@ const AccountPage = lazy(() => import("./pages/AccountPage"));
 const DashboardPage = lazy(() => import("./pages/DashboardPage"));
 const AttackEvolutionPage = lazy(() => import("./pages/AttackEvolutionPage"));
 const RedTeamReportPage = lazy(() => import("./pages/RedTeamReportPage"));
+const TechReportViewer = lazy(() => import("./pages/TechReportViewer"));
 const ScanOperationsPage = lazy(() => import("./pages/ScanOperationsPage"));
 const OperationsCenterPage = lazy(() => import("./pages/OperationsCenterPage"));
 const UserManagementPage = lazy(() => import("./pages/UserManagementPage"));
@@ -93,6 +94,7 @@ export default function App() {
                   <Routes>
                     <Route path="/" element={<DashboardPage />} />
                     <Route path="/relatorios" element={<RedTeamReportPage />} />
+                    <Route path="/relatorios/tecnico/:scanId" element={<TechReportViewer />} />
                     <Route path="/relatorios-legacy" element={<Navigate to="/relatorios" replace />} />
                     <Route path="/relatorios/bas" element={<BasReportPage />} />
                     <Route path="/evolucao" element={<AttackEvolutionPage />} />

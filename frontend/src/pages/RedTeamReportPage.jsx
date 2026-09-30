@@ -176,63 +176,13 @@ export default function RedTeamReportPage() {
     }
   };
 
-  // Abre o relatório técnico autenticado (via axios c/ JWT) — link direto dava 401
-  const openTechReport = async () => {
+  // Abre o visualizador do relatório técnico numa URL própria com o número do
+  // teste (/relatorios/tecnico/:id) — permite dar refresh e acompanhar a
+  // evolução do status ao vivo, em vez de uma janela em branco a cada geração.
+  const openTechReport = () => {
     const sid = data?.scan?.id;
     if (!sid) return;
-    const reportWindow = window.open("", "_blank");
-    if (reportWindow) {
-      reportWindow.document.write(`
-        <!doctype html>
-        <html lang="pt-BR">
-          <head><title>Gerando relatório técnico...</title></head>
-          <body style="font-family:system-ui,-apple-system,Segoe UI,sans-serif;padding:32px;color:#1f2937">
-            <h1 style="font-size:20px;margin:0 0 8px">Gerando relatório técnico completo</h1>
-            <p style="margin:0;color:#64748b">Carregando evidências e preparando o HTML...</p>
-          </body>
-        </html>
-      `);
-      reportWindow.document.close();
-    }
-    try {
-      const res = await client.get(`/api/scans/${sid}/pentest-report`, {
-        responseType: "text",
-        transformResponse: [(value) => value],
-        _skipToast: true,
-      });
-      const html = String(res.data || "");
-      if (reportWindow && !reportWindow.closed) {
-        reportWindow.document.open();
-        reportWindow.document.write(html);
-        reportWindow.document.close();
-      } else {
-        const blob = new Blob([html], { type: "text/html;charset=utf-8" });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = `pentest-report-scan-${sid}.html`;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        setTimeout(() => URL.revokeObjectURL(url), 60000);
-      }
-    } catch (err) {
-      if (reportWindow && !reportWindow.closed) {
-        reportWindow.document.open();
-        reportWindow.document.write(`
-          <!doctype html>
-          <html lang="pt-BR">
-            <head><title>Falha ao gerar relatório</title></head>
-            <body style="font-family:system-ui,-apple-system,Segoe UI,sans-serif;padding:32px;color:#991b1b">
-              <h1 style="font-size:20px;margin:0 0 8px">Falha ao abrir o relatório técnico</h1>
-              <p style="margin:0;color:#7f1d1d">${err?.response?.data?.detail || "Endpoint indisponível ou sessão sem permissão."}</p>
-            </body>
-          </html>
-        `);
-        reportWindow.document.close();
-      }
-      window.alert("Não foi possível abrir o relatório técnico (indisponível ou sem permissão).");
-    }
+    window.open(`/relatorios/tecnico/${sid}`, "_blank", "noopener,noreferrer");
   };
 
   // Baixa o HTML do relatório técnico (via axios c/ JWT — link direto dá 401).
