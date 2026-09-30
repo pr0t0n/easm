@@ -231,9 +231,20 @@ class CVEEnrichmentService:
                         details["cvss_v31"] = cvss_v31
                         details["cvss_v3"] = cvss_v3
                         details["nvd_cvss"] = best_cvss_f
-                        # Upgrade severity: CVSS >= 9.0 → critical
-                        if best_cvss_f >= 9.0 and str(f.severity or "").lower() == "high":
-                            f.severity = "critical"
+                        # Floor severity at the CVSS v3 band (0.1-3.9 low,
+                        # 4.0-6.9 medium, 7.0-8.9 high, 9.0-10.0 critical). The
+                        # old guard only fired for high→critical, so a CVSS-9.8
+                        # finding stored as "medium" never became critical.
+                        _sev_order = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+                        _band = (
+                            "critical" if best_cvss_f >= 9.0
+                            else "high" if best_cvss_f >= 7.0
+                            else "medium" if best_cvss_f >= 4.0
+                            else "low" if best_cvss_f > 0
+                            else "info"
+                        )
+                        if _sev_order[_band] > _sev_order.get(str(f.severity or "info").lower(), 0):
+                            f.severity = _band
                             details["severity_upgraded_by_cvss"] = True
                             changed = True
                     except (TypeError, ValueError):

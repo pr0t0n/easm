@@ -195,6 +195,24 @@ CVE_REPRODUCTION_GUIDE: dict[str, dict] = {
 }
 
 
+def _severity_from_cvss_v3(score: float) -> str:
+    """CVSS v3.x qualitative bands (0.1-3.9 low, 4.0-6.9 medium, 7.0-8.9 high,
+    9.0-10.0 critical). Derived from the numeric base score because the NVD
+    `baseSeverity` string is CVSS v2 for cvssMetricV2 entries — and CVSS v2 has
+    no "critical" band, so a 9.8 came back as "HIGH". That was the reported bug:
+    the platform effectively classified with CVSS v2 bands and never produced
+    criticals."""
+    if score >= 9.0:
+        return "critical"
+    if score >= 7.0:
+        return "high"
+    if score >= 4.0:
+        return "medium"
+    if score > 0.0:
+        return "low"
+    return "info"
+
+
 def _fetch_nvd_cve(cve_id: str) -> dict:
     """Busca dados completos de uma CVE no NVD."""
     if cve_id in _NVD_CACHE:
@@ -239,7 +257,10 @@ def _fetch_nvd_cve(cve_id: str) -> dict:
             cvss_data = dict(m.get("cvssData") or {})
             try:
                 cvss = float(cvss_data.get("baseScore") or 0)
-                severity = str(cvss_data.get("baseSeverity") or "MEDIUM").lower()
+                # Derive the band from the numeric score with CVSS v3 bands — do
+                # NOT trust baseSeverity (it is v2 for cvssMetricV2 and caps at
+                # HIGH, hiding 9.0-10.0 criticals).
+                severity = _severity_from_cvss_v3(cvss) if cvss > 0 else str(cvss_data.get("baseSeverity") or "medium").lower()
             except (TypeError, ValueError):
                 pass
             break

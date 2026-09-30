@@ -2951,6 +2951,18 @@ def persist_finding_dicts(
         except (KeyError, TypeError, ValueError):
             cvss_val = None
 
+        # ── Severity ↔ CVSS/família (upgrade-only) ────────────────────────────
+        # Sem isto, um finding com CVSS 9.8 permanecia "medium" e NoSQLi/SQLi/RCE
+        # ficavam "high" sem CVSS — o relatório mostrava ZERO críticos.
+        from app.services.vuln_family import classify_family as _cf_sev
+        _fam_sev = _cf_sev(
+            title=title, tool=tool_col, owasp=str(details.get("owasp_category") or ""),
+            cve=cve_id, learning_family=(details.get("learning_source") or {}).get("vuln_family"),
+        )
+        severity, cvss_val = _reconcile_severity_cvss(severity, cvss_val, _fam_sev)
+        if cvss_val is not None:
+            details["cvss"] = cvss_val
+
         # Pull verification_status from enriched details
         v_status = str(details.get("verification_status") or "candidate")
 
@@ -3079,6 +3091,53 @@ def _severity_to_cvss(severity: str) -> float:
     return {"critical": 9.2, "high": 8.1, "medium": 5.6, "low": 3.1, "info": 0.0}.get(
         str(severity or "").lower(), 0.0
     )
+
+
+_SEVERITY_ORDER = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
+# High-impact vuln classes that are critical-class by nature; when a parser omits
+# a CVSS we attach a representative score so the report/inventory reflect the risk.
+_CRITICAL_VULN_FAMILIES = {"rce", "sqli", "nosql_injection", "ssti", "deserialization"}
+_FAMILY_REPRESENTATIVE_CVSS = {
+    "rce": 9.8, "sqli": 9.8, "nosql_injection": 9.8, "ssti": 9.8, "deserialization": 9.8,
+}
+
+
+def _severity_from_cvss(cvss: float | None) -> str | None:
+    if cvss is None:
+        return None
+    if cvss >= 9.0:
+        return "critical"
+    if cvss >= 7.0:
+        return "high"
+    if cvss >= 4.0:
+        return "medium"
+    if cvss > 0.0:
+        return "low"
+    return None
+
+
+def _reconcile_severity_cvss(severity: str, cvss: float | None, family: str | None) -> tuple[str, float | None]:
+    """Upgrade-only reconciliation of severity against CVSS and vuln class.
+
+    A finding must never sit below its CVSS band (a CVSS 9.8 is critical by
+    definition) nor below the class floor for high-impact families (RCE/SQLi/
+    NoSQLi/SSTI/deser). Never downgrades, so a tool's own higher rating is kept.
+    Root-causes reports showing zero criticals while CVSS-9.8 and NoSQL-injection
+    findings were stored as medium/high.
+    """
+    best = str(severity or "info").lower()
+    if best not in _SEVERITY_ORDER:
+        best = "info"
+    resolved_cvss = cvss
+    band = _severity_from_cvss(cvss)
+    if band and _SEVERITY_ORDER[band] > _SEVERITY_ORDER[best]:
+        best = band
+    if family in _CRITICAL_VULN_FAMILIES:
+        if _SEVERITY_ORDER["critical"] > _SEVERITY_ORDER[best]:
+            best = "critical"
+        if resolved_cvss is None:
+            resolved_cvss = _FAMILY_REPRESENTATIVE_CVSS.get(family)
+    return best, resolved_cvss
 
 
 # Remediation fallback by OWASP category — used when a parser didn't supply one,

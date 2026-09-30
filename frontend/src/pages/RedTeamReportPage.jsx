@@ -1,10 +1,75 @@
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import client from "../api/client";
 import CompanyScopeSelect from "../components/CompanyScopeSelect";
 import { remediationPriority, remediationSla } from "../lib/reportQuality";
 import "../styles/dashboard.css";
 
 /* Relatório de Exposição (Red Team) — dado 100% real de /api/cockpit. */
+
+function _truncate(s, max) {
+  const v = String(s || "");
+  return v.length <= max ? v : `${v.slice(0, max)}…`;
+}
+
+// Searchable + paginated scan/target picker — the native <select> was unusable
+// once a company had many scans/targets.
+function ScanSearchSelect({ scans, value, onChange, accessGroupId }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [page, setPage] = useState(0);
+  const PAGE = 12;
+  const boxRef = useRef(null);
+
+  useEffect(() => {
+    const onDoc = (e) => { if (boxRef.current && !boxRef.current.contains(e.target)) setOpen(false); };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, []);
+  useEffect(() => { setPage(0); }, [query, open]);
+
+  const list = Array.isArray(scans) ? scans : [];
+  const q = query.trim().toLowerCase();
+  const filtered = q ? list.filter((s) => `#${s.id} ${s.target_query || ""} ${s.status || ""}`.toLowerCase().includes(q)) : list;
+  const pages = Math.max(1, Math.ceil(filtered.length / PAGE));
+  const safePage = Math.min(page, pages - 1);
+  const pageItems = filtered.slice(safePage * PAGE, safePage * PAGE + PAGE);
+  const selected = list.find((s) => String(s.id) === String(value));
+  const label = selected ? `#${selected.id} ${_truncate(selected.target_query, 44)}` : `Último scan${accessGroupId ? " da empresa" : ""}`;
+  const pick = (v) => { onChange(v); setOpen(false); setQuery(""); };
+  const optStyle = (active) => ({ display: "block", width: "100%", textAlign: "left", padding: "7px 10px", border: "none", borderBottom: "1px solid var(--line,#f0f0f0)", background: active ? "var(--brand-50,#eef2ff)" : "transparent", cursor: "pointer", fontSize: 12.5, color: "var(--ink,#222)" });
+  const pagerBtn = { padding: "2px 10px", border: "1px solid var(--line,#ddd)", borderRadius: 6, background: "#fff", cursor: "pointer" };
+
+  return (
+    <div ref={boxRef} style={{ position: "relative", minWidth: 260 }}>
+      <button type="button" onClick={() => setOpen((v) => !v)} className="scan-select" style={{ width: "100%", textAlign: "left", cursor: "pointer" }} aria-haspopup="listbox" aria-expanded={open}>
+        {label} <span style={{ float: "right", opacity: 0.6 }}>▾</span>
+      </button>
+      {open && (
+        <div style={{ position: "absolute", zIndex: 30, top: "calc(100% + 4px)", left: 0, right: 0, background: "var(--surface,#fff)", border: "1px solid var(--line,#ddd)", borderRadius: 8, boxShadow: "0 8px 24px rgba(0,0,0,.12)", overflow: "hidden" }}>
+          <div style={{ padding: 6, borderBottom: "1px solid var(--line,#eee)" }}>
+            <input autoFocus type="text" value={query} onChange={(e) => setQuery(e.target.value)} placeholder={`Buscar entre ${list.length} scans/alvos…`} style={{ width: "100%", padding: "6px 8px", borderRadius: 6, border: "1px solid var(--line,#ddd)", fontSize: 13 }} />
+          </div>
+          <div style={{ maxHeight: 240, overflowY: "auto" }}>
+            <button type="button" onClick={() => pick("")} style={optStyle(!value)}>Último scan{accessGroupId ? " da empresa" : ""}</button>
+            {pageItems.map((s) => (
+              <button key={s.id} type="button" onClick={() => pick(String(s.id))} style={optStyle(String(s.id) === String(value))}>
+                <b>#{s.id}</b> {_truncate(s.target_query, 56)}{s.status ? ` · ${s.status}` : ""}
+              </button>
+            ))}
+            {pageItems.length === 0 && <div style={{ padding: 10, fontSize: 12, color: "var(--ink-muted,#888)" }}>Nenhum scan corresponde.</div>}
+          </div>
+          {filtered.length > PAGE && (
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: 6, borderTop: "1px solid var(--line,#eee)", fontSize: 11, color: "var(--ink-muted,#888)" }}>
+              <button type="button" onClick={() => setPage((p) => Math.max(0, p - 1))} disabled={safePage <= 0} style={{ ...pagerBtn, opacity: safePage <= 0 ? 0.4 : 1 }}>‹</button>
+              <span>{filtered.length} · pág {safePage + 1}/{pages}</span>
+              <button type="button" onClick={() => setPage((p) => Math.min(pages - 1, p + 1))} disabled={safePage >= pages - 1} style={{ ...pagerBtn, opacity: safePage >= pages - 1 ? 0.4 : 1 }}>›</button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
 const SEV_LABEL = { critical: "Crítico", high: "Alto", medium: "Médio", low: "Baixo", info: "Info" };
 const STATUS_LABEL = { confirmed: "Confirmado", candidate: "Candidato", hypothesis: "Hipótese", refuted: "Refutado", confirmado: "Confirmado", candidato: "Candidato" };
@@ -155,6 +220,28 @@ export default function RedTeamReportPage() {
     }
   };
 
+  // Baixa o HTML do relatório técnico (via axios c/ JWT — link direto dá 401).
+  const downloadTechHtml = async () => {
+    const sid = data?.scan?.id;
+    if (!sid) return;
+    try {
+      const res = await client.get(`/api/scans/${sid}/pentest-report`, {
+        responseType: "blob",
+        _skipToast: true,
+      });
+      const url = URL.createObjectURL(new Blob([res.data], { type: "text/html;charset=utf-8" }));
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `pentest-report-scan-${sid}.html`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    } catch {
+      window.alert("Não foi possível baixar o HTML do relatório.");
+    }
+  };
+
   if (loading) {
     return <main className="dash"><div className="content" style={{ padding: "32px 40px" }}><div className="dash-state"><div><div className="spin" /><p className="st-title">Gerando relatório…</p></div></div></div></main>;
   }
@@ -172,15 +259,13 @@ export default function RedTeamReportPage() {
         {/* Ações (não imprimem) */}
         <section className="report-actions no-print">
           <CompanyScopeSelect value={accessGroupId} onChange={(value) => { setAccessGroupId(value); setScanId(""); }} style={{ minWidth: 220 }} />
-          <select value={scanId} onChange={(e) => setScanId(e.target.value)} aria-label="Selecionar scan do relatório">
-            <option value="">Último scan{accessGroupId ? " da empresa" : ""}</option>
-            {(data?.scans || []).map((s) => (
-              <option key={s.id} value={s.id}>#{s.id} {s.target_query}</option>
-            ))}
-          </select>
+          <ScanSearchSelect scans={data?.scans || []} value={scanId} onChange={setScanId} accessGroupId={accessGroupId} />
           <div className="report-actions-right">
-            <button className="sk-btn-ghost" onClick={exportCsv}>Exportar CSV</button>
-            <button className="sk-btn-ghost" onClick={() => window.print()}>Imprimir / PDF</button>
+            <button className="sk-btn-ghost" onClick={exportCsv}>Baixar CSV</button>
+            <button className="sk-btn-ghost" onClick={() => window.print()}>Baixar PDF</button>
+            {scan?.id && (
+              <button className="sk-btn-ghost" onClick={downloadTechHtml}>Baixar HTML</button>
+            )}
             {scan?.id && (
               <button className="sk-btn-primary" onClick={openTechReport}>Relatório técnico completo</button>
             )}

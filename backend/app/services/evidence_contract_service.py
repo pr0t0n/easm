@@ -271,7 +271,11 @@ def apply_finding_validation(db: Session, finding: Finding) -> ValidationDecisio
     details["verification_status"] = decision.status
     finding.verification_status = decision.status
     if decision.severity_cap:
-        finding.severity = _cap_severity(str(finding.severity or "info"), decision.severity_cap)
+        finding.severity = _cap_severity(
+            str(finding.severity or "info"),
+            decision.severity_cap,
+            floor=_severity_floor_from_cvss(finding.cvss),
+        )
     finding.details = details
     db.add(finding)
     # Finding, JSON details and coverage are one validation lifecycle.
@@ -336,11 +340,35 @@ def _steps_from_result(result: dict[str, Any]) -> list[str]:
     return steps
 
 
-def _cap_severity(severity: str, cap: str) -> str:
+def _severity_floor_from_cvss(cvss) -> str | None:
+    """CVSS v3 band a finding can never drop below, regardless of evidence."""
+    try:
+        score = float(cvss)
+    except (TypeError, ValueError):
+        return None
+    if score >= 9.0:
+        return "critical"
+    if score >= 7.0:
+        return "high"
+    if score >= 4.0:
+        return "medium"
+    if score > 0.0:
+        return "low"
+    return None
+
+
+def _cap_severity(severity: str, cap: str, floor: str | None = None) -> str:
     order = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
-    if order.get(severity.lower(), 0) > order.get(cap.lower(), 4):
-        return cap.lower()
-    return severity.lower()
+    result = severity.lower()
+    if order.get(result, 0) > order.get(cap.lower(), 4):
+        result = cap.lower()
+    # The evidence cap must never hide the inherent technical severity implied by
+    # the CVSS score: a CVSS 9.8 finding stays "critical" even while unconfirmed —
+    # verification_status already conveys the confidence. Capping it to medium/high
+    # was the reported "no criticals in the report" bug.
+    if floor and order.get(floor, 0) > order.get(result, 0):
+        result = floor
+    return result
 
 
 def _sync_linked_vulnerability(db: Session, finding: Finding) -> None:

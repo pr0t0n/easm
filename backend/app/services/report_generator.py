@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import html as _html
+import re
 from collections import defaultdict
 from datetime import datetime
 from typing import Any
@@ -721,7 +722,20 @@ def generate_pentest_report(
 
     # ── Helpers ───────────────────────────────────────────────────────────────
     now = datetime.now().strftime("%d/%m/%Y %H:%M UTC")
-    domains_str = job.target_query or str(scan_id)
+    # target_query may hold dozens of targets joined by ; or , — rendering the
+    # raw string as "Alvos:" produced a huge unwrapped blob at the top of the
+    # report. Show a compact summary + a collapsible full list instead.
+    domains_list = [t.strip() for t in re.split(r"[;,\n]+", str(job.target_query or "")) if t.strip()]
+    domains_count = len(domains_list)
+    if domains_count > 6:
+        domains_compact = ", ".join(domains_list[:6]) + f" … (+{domains_count - 6})"
+    elif domains_list:
+        domains_compact = ", ".join(domains_list)
+    else:
+        domains_compact = str(scan_id)
+    domains_str = domains_compact
+    domains_title = (f"{domains_list[0]} +{domains_count - 1} alvos" if domains_count > 1 else (domains_list[0] if domains_list else str(scan_id)))
+    domains_full_html = ", ".join(_html.escape(d) for d in domains_list)
 
     def _sev_color(s: str) -> str:
         return {"critical": "#c0392b", "high": "#e67e22",
@@ -1563,7 +1577,7 @@ def generate_pentest_report(
                 '<p style="font-size:12px;color:#666;margin-bottom:12px">Cada wire retorna ao endpoint, parâmetro, '
                 'identidade e evidência que originaram a lacuna. A proposta da LLM é consultiva; o veredito final '
                 'é produzido pelo evidence gate após execução real.</p>'
-                '<table class="findings-table"><thead><tr>'
+                '<table class="findings-table paginate" data-page-size="15"><thead><tr>'
                 '<th>Finding</th><th>Veredito</th><th>Causa</th><th>O que falta</th><th>Teste de retorno</th><th>Resposta/PoC</th><th>CVE, exploit e path</th>'
                 f'</tr></thead><tbody>{"".join(_adj_rows)}</tbody></table></div>'
             )
@@ -1576,7 +1590,7 @@ def generate_pentest_report(
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Relatório de Pentest — {domains_str}</title>
+  <title>Relatório de Pentest — {domains_title}</title>
   <style>
     * {{ box-sizing: border-box; margin: 0; padding: 0; }}
     body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
@@ -1617,7 +1631,9 @@ def generate_pentest_report(
   <div class="pentest-header">
     <h1>🔴 Relatório ScriptKidd.o</h1>
     <div class="meta">
-      Alvos: <strong>{domains_str}</strong> &nbsp;|&nbsp;
+      Alvos: <strong>{domains_compact}</strong>
+      {f'<details style="display:inline-block;margin-left:8px;vertical-align:top"><summary style="cursor:pointer;display:inline;color:#ffd0d0">ver todos ({domains_count})</summary><div style="margin-top:6px;font-weight:400;max-width:900px">{domains_full_html}</div></details>' if domains_count > 6 else ''}
+      &nbsp;|&nbsp;
       Gerado: {now} &nbsp;|&nbsp;
       Scan ID: #{scan_id}
       {f'&nbsp;|&nbsp; Scan anterior: #{previous_scan_id}' if previous_scan_id else ''}
@@ -1724,6 +1740,41 @@ def generate_pentest_report(
   {easm_body}
 
 </div>
+<script>
+(function() {{
+  var PS_DEFAULT = 15;
+  function paginate(table) {{
+    var size = parseInt(table.getAttribute('data-page-size') || PS_DEFAULT, 10);
+    var tbody = table.tBodies[0];
+    if (!tbody) return;
+    var rows = Array.prototype.slice.call(tbody.rows);
+    if (rows.length <= size) return;
+    var page = 0, pages = Math.ceil(rows.length / size);
+    var nav = document.createElement('div');
+    nav.className = 'no-print';
+    nav.style.cssText = 'display:flex;gap:8px;align-items:center;justify-content:flex-end;margin-top:10px;font-size:12px;color:#666';
+    var info = document.createElement('span');
+    var prev = document.createElement('button');
+    var next = document.createElement('button');
+    prev.textContent = '‹ anterior'; next.textContent = 'próxima ›';
+    [prev, next].forEach(function(b) {{ b.style.cssText = 'padding:4px 10px;border:1px solid #ccc;border-radius:6px;background:#fff;cursor:pointer'; }});
+    function render() {{
+      rows.forEach(function(r, i) {{ r.style.display = (i >= page*size && i < (page+1)*size) ? '' : 'none'; }});
+      info.textContent = rows.length + ' itens · página ' + (page+1) + '/' + pages;
+      prev.disabled = page <= 0; next.disabled = page >= pages-1;
+      prev.style.opacity = prev.disabled ? 0.4 : 1; next.style.opacity = next.disabled ? 0.4 : 1;
+    }}
+    prev.onclick = function() {{ if (page>0) {{ page--; render(); }} }};
+    next.onclick = function() {{ if (page<pages-1) {{ page++; render(); }} }};
+    nav.appendChild(info); nav.appendChild(prev); nav.appendChild(next);
+    table.parentNode.insertBefore(nav, table.nextSibling);
+    render();
+    window.addEventListener('beforeprint', function() {{ rows.forEach(function(r) {{ r.style.display = ''; }}); }});
+    window.addEventListener('afterprint', function() {{ render(); }});
+  }}
+  document.querySelectorAll('table.paginate').forEach(paginate);
+}})();
+</script>
 </body>
 </html>"""
 
