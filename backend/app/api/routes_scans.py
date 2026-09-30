@@ -11089,6 +11089,29 @@ def get_report_extras(
     }
 
 
+@router.get("/scans/{scan_id}/valid-executive-report", response_class=Response)
+def get_valid_executive_report(
+    scan_id: int,
+    company: str | None = Query(default=None, description="Nome da empresa dona do relatório (cabeçalho)"),
+    previous_scan_id: int | None = Query(default=None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Relatório Executivo v2 (HTML) com o nome da empresa no cabeçalho e 100%
+    dado real da plataforma. `company` sobrepõe o nome derivado do grupo de acesso."""
+    job = _authorized_scan_query(db, current_user).filter(ScanJob.id == scan_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Scan não encontrado")
+    from app.services.report_generator import generate_valid_executive_report
+
+    html = generate_valid_executive_report(db, scan_id, company_name=company, previous_scan_id=previous_scan_id)
+    return Response(
+        content=html,
+        media_type="text/html; charset=utf-8",
+        headers={"Content-Disposition": f'inline; filename="relatorio-valid-executivo-scan{scan_id}.html"'},
+    )
+
+
 @router.get("/scans/{scan_id}/methodology-coverage")
 def get_methodology_coverage(
     scan_id: int,

@@ -89,6 +89,7 @@ export default function RedTeamReportPage() {
   const [error, setError] = useState("");
   const [reportContract, setReportContract] = useState(null);
   const [extras, setExtras] = useState(null);
+  const [companyName, setCompanyName] = useState("");
 
   useEffect(() => {
     setLoading(true);
@@ -187,6 +188,24 @@ export default function RedTeamReportPage() {
     window.open(`/relatorios/tecnico/${sid}`, "_blank", "noopener,noreferrer");
   };
 
+  // Abre o Relatório Executivo v2 (VALID) com o nome da empresa no cabeçalho.
+  const openValidExec = async () => {
+    const sid = data?.scan?.id;
+    if (!sid) return;
+    try {
+      const res = await client.get(`/api/scans/${sid}/valid-executive-report`, {
+        params: companyName.trim() ? { company: companyName.trim() } : {},
+        responseType: "blob",
+        _skipToast: true,
+      });
+      const url = URL.createObjectURL(new Blob([res.data], { type: "text/html;charset=utf-8" }));
+      window.open(url, "_blank", "noopener,noreferrer");
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    } catch {
+      window.alert("Não foi possível gerar o Relatório Executivo.");
+    }
+  };
+
   // Baixa o HTML do relatório técnico (via axios c/ JWT — link direto dá 401).
   const downloadTechHtml = async () => {
     const sid = data?.scan?.id;
@@ -227,6 +246,16 @@ export default function RedTeamReportPage() {
         <section className="report-actions no-print">
           <CompanyScopeSelect value={accessGroupId} onChange={(value) => { setAccessGroupId(value); setScanId(""); }} style={{ minWidth: 220 }} />
           <ScanSearchSelect scans={data?.scans || []} value={scanId} onChange={setScanId} accessGroupId={accessGroupId} />
+          {scan?.id && (
+            <input
+              type="text"
+              value={companyName}
+              onChange={(e) => setCompanyName(e.target.value)}
+              placeholder="Empresa dona do relatório"
+              aria-label="Nome da empresa dona do relatório"
+              style={{ padding: "7px 11px", borderRadius: 8, border: "1px solid var(--line)", fontSize: 13, minWidth: 200 }}
+            />
+          )}
           <div className="report-actions-right">
             <button className="sk-btn-ghost" onClick={exportCsv}>Baixar CSV</button>
             <button className="sk-btn-ghost" onClick={() => window.print()}>Baixar PDF</button>
@@ -234,7 +263,10 @@ export default function RedTeamReportPage() {
               <button className="sk-btn-ghost" onClick={downloadTechHtml}>Baixar HTML</button>
             )}
             {scan?.id && (
-              <button className="sk-btn-primary" onClick={openTechReport}>Relatório técnico completo</button>
+              <button className="sk-btn-ghost" onClick={openTechReport}>Relatório técnico completo</button>
+            )}
+            {scan?.id && (
+              <button className="sk-btn-primary" onClick={openValidExec}>Relatório Executivo</button>
             )}
           </div>
         </section>

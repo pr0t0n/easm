@@ -1830,3 +1830,199 @@ def _root_domain(domain: str) -> str:
             return ".".join(parts[-3:])
         return ".".join(parts[-2:])
     return domain
+
+
+def generate_valid_executive_report(
+    db: Session,
+    scan_id: int,
+    company_name: str | None = None,
+    previous_scan_id: int | None = None,
+) -> str:
+    """Relatório Executivo (v2) com identidade da empresa dona do relatório.
+
+    100% dado real da plataforma: severidade, rating por densidade de risco por
+    alvo, risco por framework, superfície de ataque e plano P0/P1. O cabeçalho
+    usa o NOME DA EMPRESA (parâmetro/─grupo de acesso) — sem logo fixo.
+    """
+    from app.models.models import Finding, ScanJob
+    from app.services.risk_service import (
+        _grade_from_score,
+        _log_exposure_penalty,
+        compute_framework_scores,
+    )
+    from app.services.strategy_runtime import parse_scope_targets
+    from app.services.vuln_family import classify_family, family_label
+
+    job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
+    if not job:
+        return "<html><body><h1>Scan não encontrado</h1></body></html>"
+
+    company = (str(company_name or "").strip()
+               or str(getattr(getattr(job, "access_group", None), "name", "") or "").strip()
+               or "Empresa")
+    findings = [f for f in db.query(Finding).filter(Finding.scan_job_id == scan_id).all() if not getattr(f, "is_false_positive", False)]
+
+    _SEV = ("critical", "high", "medium", "low", "info")
+    sev = {s: 0 for s in _SEV}
+    for f in findings:
+        k = str(f.severity or "info").lower()
+        if k in sev:
+            sev[k] += 1
+
+    scope_hosts = parse_scope_targets(str(job.target_query or ""))
+    host_set = {str(f.domain or "").strip().lower() for f in findings if f.domain}
+    n_targets = max(1, len(scope_hosts), len(host_set))
+    density = {k: sev[k] / n_targets for k in ("critical", "high", "medium", "low")}
+    score = max(0.0, round(100.0 - _log_exposure_penalty(density["critical"], density["high"], density["medium"], density["low"]), 1))
+    grade = _grade_from_score(score)
+
+    triaged = sum(1 for f in findings if str(f.verification_status or "").lower() in ("confirmed", "refuted"))
+    try:
+        frameworks = compute_framework_scores(severity_count=sev, findings_total=float(len(findings)), findings_triaged=float(triaged), n_targets=float(n_targets))
+    except Exception:
+        frameworks = {}
+
+    # Superfície de ataque por host
+    by_host: dict[str, dict] = {}
+    for f in findings:
+        host = str(f.domain or "").strip() or "—"
+        row = by_host.setdefault(host, {"host": host, "critical": 0, "high": 0, "medium": 0, "low": 0, "total": 0})
+        k = str(f.severity or "info").lower()
+        if k in row:
+            row[k] += 1
+        row["total"] += 1
+    surface = sorted(by_host.values(), key=lambda r: (r["critical"], r["high"], r["total"]), reverse=True)[:15]
+
+    # Plano P0/P1 (crítico/alto), ordenado por CVSS
+    _rank = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+    top = sorted(
+        [f for f in findings if str(f.severity or "").lower() in ("critical", "high")],
+        key=lambda f: (_rank.get(str(f.severity or "info").lower(), 9), -(float(f.cvss) if f.cvss is not None else 0.0)),
+    )[:20]
+
+    now = datetime.now().strftime("%d/%m/%Y %H:%M")
+    domains_list = [t.strip() for t in re.split(r"[;,\n]+", str(job.target_query or "")) if t.strip()]
+    alvos_compact = (", ".join(domains_list[:4]) + (f" +{len(domains_list) - 4}" if len(domains_list) > 4 else "")) or str(scan_id)
+
+    grade_color = {"A": "#1f8a59", "B": "#2f9e6f", "C": "#d4a500", "D": "#e07b39", "F": "#c0392b"}.get(grade, "#c0392b")
+
+    def _bar(label, count, color):
+        total = max(1, len(findings))
+        pct = round(100 * count / total, 1)
+        return (
+            f'<div class="vbar"><div class="vbar-l"><span>{label}</span><b>{count}</b></div>'
+            f'<div class="vbar-track"><i style="width:{pct}%;background:{color}"></i></div></div>'
+        )
+
+    fw_html = ""
+    _FWL = {"iso27001": "ISO 27001", "nist": "NIST CSF", "cis_v8": "CIS v8", "pci": "PCI DSS"}
+    for key, fw in (frameworks or {}).items():
+        fs = float(fw.get("score") or 0)
+        fc = "#1f8a59" if fs >= 70 else "#d4a500" if fs >= 40 else "#c0392b"
+        fw_html += (
+            f'<div class="fw-row"><div class="fw-l"><span>{_FWL.get(key, key)}</span>'
+            f'<b style="color:{fc}">{fs:.0f}% · {_html.escape(str(fw.get("grade") or "—"))}</b></div>'
+            f'<div class="fw-track"><i style="width:{max(0, min(100, fs))}%;background:{fc}"></i></div></div>'
+        )
+    fw_html = fw_html or '<p class="muted">Risco por framework indisponível.</p>'
+
+    surface_rows = "".join(
+        f'<tr><td class="mono">{_html.escape(_short_target(r["host"]))}</td>'
+        f'<td class="num"><b>{r["total"]}</b></td>'
+        f'<td class="num" style="color:#c0392b">{r["critical"] or "—"}</td>'
+        f'<td class="num" style="color:#e07b39">{r["high"] or "—"}</td>'
+        f'<td class="num">{r["medium"] or "—"}</td><td class="num">{r["low"] or "—"}</td></tr>'
+        for r in surface
+    ) or '<tr><td colspan="6" class="muted">Sem superfície classificável.</td></tr>'
+
+    def _freco(f):
+        det = dict(f.details or {})
+        return str(f.recommendation or det.get("remediation") or "Corrigir conforme OWASP / boas práticas.")[:240]
+
+    top_rows = "".join(
+        f'<tr><td><span class="sev" style="background:{_severity_color(str(f.severity or "info").lower())}">{str(f.severity or "info").upper()}</span></td>'
+        f'<td><b>{_html.escape(str(f.title or "")[:120])}</b><small>{_html.escape(_freco(f))}</small></td>'
+        f'<td class="mono">{_html.escape(_short_target(f.domain))}</td>'
+        f'<td class="num">{(f"{float(f.cvss):.1f}" if f.cvss is not None else "—")}</td></tr>'
+        for f in top
+    ) or '<tr><td colspan="4" class="muted">Não há achados críticos ou altos neste ciclo.</td></tr>'
+
+    jewels = [j for j in (dict(job.state_data or {}).get("crown_jewels") or []) if isinstance(j, dict)]
+
+    return f"""<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Relatório Executivo — {_html.escape(company)}</title>
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #eef1f5; color: #1f2a37; line-height: 1.5; }}
+  .page {{ max-width: 1060px; margin: 0 auto; padding: 28px 24px 48px; }}
+  .cap {{ display:flex; align-items:center; justify-content:space-between; gap:20px; background:linear-gradient(120deg,#0b2545 0%,#13315c 100%); color:#fff; border-radius:16px; padding:28px 32px; margin-bottom:22px; flex-wrap:wrap; }}
+  .cap .brand {{ font-size:26px; font-weight:800; letter-spacing:-.01em; }}
+  .cap .sub {{ font-size:13px; color:#b8c7de; margin-top:4px; }}
+  .cap .meta {{ font-size:12px; color:#9fb3d1; margin-top:10px; }}
+  .grade {{ text-align:center; background:rgba(255,255,255,.08); border:1px solid rgba(255,255,255,.18); border-radius:14px; padding:14px 22px; }}
+  .grade .g {{ font-size:44px; font-weight:800; line-height:1; }}
+  .grade .s {{ font-size:12px; color:#c8d6ea; margin-top:6px; }}
+  .kpis {{ display:grid; grid-template-columns:repeat(5,1fr); gap:12px; margin-bottom:22px; }}
+  .kpi {{ background:#fff; border-radius:12px; padding:16px; text-align:center; box-shadow:0 1px 4px rgba(10,30,60,.06); }}
+  .kpi .n {{ font-size:30px; font-weight:800; }}
+  .kpi .l {{ font-size:11px; color:#64748b; margin-top:4px; }}
+  .card {{ background:#fff; border-radius:12px; padding:22px 24px; box-shadow:0 1px 4px rgba(10,30,60,.06); margin-bottom:18px; }}
+  .card h2 {{ font-size:16px; font-weight:700; margin-bottom:14px; padding-bottom:8px; border-bottom:2px solid #eef1f5; }}
+  .grid2 {{ display:grid; grid-template-columns:1fr 1fr; gap:18px; }}
+  .vbar, .fw-row {{ margin-bottom:10px; }}
+  .vbar-l, .fw-l {{ display:flex; justify-content:space-between; font-size:12.5px; margin-bottom:4px; }}
+  .vbar-track, .fw-track {{ height:9px; background:#eef1f5; border-radius:6px; overflow:hidden; }}
+  .vbar-track i, .fw-track i {{ display:block; height:100%; border-radius:6px; }}
+  table {{ width:100%; border-collapse:collapse; font-size:12.5px; table-layout:fixed; }}
+  th {{ text-align:left; background:#f6f8fb; padding:8px 10px; font-size:11px; color:#64748b; text-transform:uppercase; letter-spacing:.05em; border-bottom:2px solid #e5e9f0; }}
+  td {{ padding:9px 10px; border-bottom:1px solid #f0f3f7; vertical-align:top; word-break:break-word; overflow-wrap:anywhere; }}
+  td small {{ display:block; color:#64748b; font-size:11px; margin-top:3px; }}
+  .num {{ text-align:right; font-variant-numeric:tabular-nums; }}
+  .mono {{ font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11.5px; color:#0b3b8c; }}
+  .sev {{ display:inline-block; color:#fff; font-size:10px; font-weight:700; padding:2px 7px; border-radius:5px; white-space:nowrap; }}
+  .muted {{ color:#94a3b8; font-style:italic; }}
+  .foot {{ text-align:center; font-size:11px; color:#94a3b8; margin-top:26px; }}
+  @media print {{ body {{ background:#fff; }} .card, .kpi {{ break-inside:avoid; box-shadow:none; border:1px solid #e5e9f0; }} table tr {{ break-inside:avoid; }} thead {{ display:table-header-group; }} h2 {{ break-after:avoid; }} }}
+  @media (max-width:760px) {{ .kpis {{ grid-template-columns:repeat(2,1fr); }} .grid2 {{ grid-template-columns:1fr; }} }}
+</style></head>
+<body><div class="page">
+  <div class="cap">
+    <div>
+      <div class="brand">{_html.escape(company)}</div>
+      <div class="sub">Relatório Executivo de Vulnerabilidades</div>
+      <div class="meta">Alvos: <strong>{_html.escape(alvos_compact)}</strong> &nbsp;·&nbsp; Ciclo #{scan_id} &nbsp;·&nbsp; {now}
+      {f'&nbsp;·&nbsp; Δ vs #{previous_scan_id}' if previous_scan_id else ''}</div>
+    </div>
+    <div class="grade"><div class="g" style="color:{grade_color}">{grade}</div><div class="s">rating {score:.0f}/100 · densidade por alvo</div></div>
+  </div>
+
+  <div class="kpis">
+    <div class="kpi"><div class="n" style="color:{grade_color}">{grade}</div><div class="l">Grade de exposição</div></div>
+    <div class="kpi"><div class="n" style="color:#c0392b">{sev['critical']}</div><div class="l">Críticos</div></div>
+    <div class="kpi"><div class="n" style="color:#e07b39">{sev['high']}</div><div class="l">Altos</div></div>
+    <div class="kpi"><div class="n">{n_targets}</div><div class="l">Alvos avaliados</div></div>
+    <div class="kpi"><div class="n">{len(jewels)}</div><div class="l">Joias da coroa</div></div>
+  </div>
+
+  <div class="grid2">
+    <div class="card"><h2>📈 Distribuição por severidade</h2>
+      {_bar('Crítico', sev['critical'], '#c0392b')}{_bar('Alto', sev['high'], '#e07b39')}
+      {_bar('Médio', sev['medium'], '#d4a500')}{_bar('Baixo', sev['low'], '#3498db')}{_bar('Info', sev['info'], '#95a5a6')}
+      <p class="sub" style="font-size:11px;color:#94a3b8;margin-top:8px">{len(findings)} achados em {n_targets} alvo(s)</p>
+    </div>
+    <div class="card"><h2>🧭 Risco por framework</h2>{fw_html}</div>
+  </div>
+
+  <div class="card"><h2>🎯 Plano de ação — Críticos e Altos</h2>
+    <table><thead><tr><th style="width:78px">Sev.</th><th>Achado & recomendação</th><th style="width:190px">Alvo</th><th class="num" style="width:60px">CVSS</th></tr></thead>
+    <tbody>{top_rows}</tbody></table>
+  </div>
+
+  <div class="card"><h2>🛰️ Superfície de ataque</h2>
+    <table><thead><tr><th>Ativo</th><th class="num">Vulns</th><th class="num">Crít.</th><th class="num">Altas</th><th class="num">Méd.</th><th class="num">Baixas</th></tr></thead>
+    <tbody>{surface_rows}</tbody></table>
+  </div>
+
+  <div class="foot">Relatório gerado automaticamente pela plataforma ScriptKidd.o · {now} · confidencial — uso interno de {_html.escape(company)}</div>
+</div></body></html>"""
