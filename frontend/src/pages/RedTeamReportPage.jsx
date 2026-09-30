@@ -158,15 +158,21 @@ export default function RedTeamReportPage() {
   const SURFACE_SEV = ["critical", "high", "medium", "low"];
   const classMax = Math.max(1, ...vulnByClass.flatMap((r) => SURFACE_SEV.map((s) => r[s] || 0)));
 
-  // Exporta vulnerabilidades em CSV (id, url, recomendação, cve, cvss/risco)
+  // Exporta o CSV completo (id, alvo, host, família, severidade, cvss, cve,
+  // verificação, url, recomendação). dedupe=false ⇒ inventário integral, igual
+  // ao Anexo B do relatório (todos os achados e alvos, sem colapsar repetidos).
   const exportCsv = async () => {
     const sid = data?.scan?.id;
     try {
       const res = await client.get("/api/findings/export.csv", {
-        params: sid ? { scan_id: sid } : (accessGroupId ? { access_group_id: accessGroupId } : {}),
+        params: {
+          dedupe: false,
+          ...(sid ? { scan_id: sid } : (accessGroupId ? { access_group_id: accessGroupId } : {})),
+        },
         responseType: "blob",
+        _skipToast: true,
       });
-      const url = URL.createObjectURL(res.data);
+      const url = URL.createObjectURL(new Blob([res.data], { type: "text/csv;charset=utf-8" }));
       const a = document.createElement("a");
       a.href = url;
       a.download = `vulnerabilidades${sid ? `-scan-${sid}` : ""}.csv`;
@@ -179,16 +185,7 @@ export default function RedTeamReportPage() {
     }
   };
 
-  // Abre o visualizador do relatório técnico numa URL própria com o número do
-  // teste (/relatorios/tecnico/:id) — permite dar refresh e acompanhar a
-  // evolução do status ao vivo, em vez de uma janela em branco a cada geração.
-  const openTechReport = () => {
-    const sid = data?.scan?.id;
-    if (!sid) return;
-    window.open(`/relatorios/tecnico/${sid}`, "_blank", "noopener,noreferrer");
-  };
-
-  // Abre o Relatório Executivo v2 (VALID) com o nome da empresa no cabeçalho.
+  // Abre o Relatório Executivo v2 com o nome da empresa no cabeçalho.
   const openValidExec = async () => {
     const sid = data?.scan?.id;
     if (!sid) return;
@@ -206,25 +203,22 @@ export default function RedTeamReportPage() {
     }
   };
 
-  // Baixa o HTML do relatório técnico (via axios c/ JWT — link direto dá 401).
-  const downloadTechHtml = async () => {
+  // Abre o Relatório Técnico v2 — mesmo design, com inventário completo,
+  // attack paths, MITRE/NIST/CIS/ISO, CVEs e catálogo de recomendações.
+  const openValidTech = async () => {
     const sid = data?.scan?.id;
     if (!sid) return;
     try {
-      const res = await client.get(`/api/scans/${sid}/pentest-report`, {
+      const res = await client.get(`/api/scans/${sid}/valid-technical-report`, {
+        params: companyName.trim() ? { company: companyName.trim() } : {},
         responseType: "blob",
         _skipToast: true,
       });
       const url = URL.createObjectURL(new Blob([res.data], { type: "text/html;charset=utf-8" }));
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `pentest-report-scan-${sid}.html`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
+      window.open(url, "_blank", "noopener,noreferrer");
       setTimeout(() => URL.revokeObjectURL(url), 60000);
     } catch {
-      window.alert("Não foi possível baixar o HTML do relatório.");
+      window.alert("Não foi possível gerar o Relatório Técnico.");
     }
   };
 
@@ -258,12 +252,8 @@ export default function RedTeamReportPage() {
           )}
           <div className="report-actions-right">
             <button className="sk-btn-ghost" onClick={exportCsv}>Baixar CSV</button>
-            <button className="sk-btn-ghost" onClick={() => window.print()}>Baixar PDF</button>
             {scan?.id && (
-              <button className="sk-btn-ghost" onClick={downloadTechHtml}>Baixar HTML</button>
-            )}
-            {scan?.id && (
-              <button className="sk-btn-ghost" onClick={openTechReport}>Relatório técnico completo</button>
+              <button className="sk-btn-primary" onClick={openValidTech}>Relatório Técnico</button>
             )}
             {scan?.id && (
               <button className="sk-btn-primary" onClick={openValidExec}>Relatório Executivo</button>

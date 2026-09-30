@@ -1832,197 +1832,1200 @@ def _root_domain(domain: str) -> str:
     return domain
 
 
-def generate_valid_executive_report(
-    db: Session,
-    scan_id: int,
-    company_name: str | None = None,
-    previous_scan_id: int | None = None,
-) -> str:
-    """Relatório Executivo (v2) com identidade da empresa dona do relatório.
 
-    100% dado real da plataforma: severidade, rating por densidade de risco por
-    alvo, risco por framework, superfície de ataque e plano P0/P1. O cabeçalho
-    usa o NOME DA EMPRESA (parâmetro/─grupo de acesso) — sem logo fixo.
-    """
-    from app.models.models import Finding, ScanJob
-    from app.services.risk_service import (
-        _grade_from_score,
-        _log_exposure_penalty,
-        compute_framework_scores,
+# ══════════════════════════════════════════════════════════════════════════════
+# Relatórios VALID v2 — HTML PURO, dado 100% real da plataforma
+# ------------------------------------------------------------------------------
+# Reproduzem o design VALID (capa escura #27272C, acento #1767E5, Archivo, papel
+# #f3f2f2, rampa de severidade log). Nada de mock: severidade, rating por
+# densidade/alvo, risco por framework, superfície, heatmap por classe, caminhos
+# de ataque, MITRE ATT&CK, NIST/CIS/ISO, CVEs e inventário completo vêm do banco.
+# O nome da EMPRESA dona do relatório é variável (capa + cabeçalho).
+# ══════════════════════════════════════════════════════════════════════════════
+import math as _math
+
+_V_BLUE = "#1767E5"
+_V_INK = "#201e1d"
+_V_MUTED = "#605d5d"
+_SEV_CELL = {"critical": "#7c1405", "high": "#dd2b0f", "medium": "#ff9783", "low": "#d7d3d3", "info": "#eae7e7"}
+_SEV_FG = {"critical": "#fff", "high": "#fff", "medium": "#201e1d", "low": "#201e1d", "info": "#605d5d"}
+_SEV_PT = {"critical": "Crítico", "high": "Alto", "medium": "Médio", "low": "Baixo", "info": "Info"}
+_SEV_ABBR = {"critical": "Crít", "high": "Alto", "medium": "Méd", "low": "Baixo", "info": "Info"}
+_SEV_KEYS = ("critical", "high", "medium", "low", "info")
+_SEV_W = {"critical": 10.0, "high": 5.0, "medium": 2.0, "low": 1.0, "info": 0.5}
+_HEAT_RAMP = ["#ffe0d9", "#ffc4b8", "#ff9783", "#ff563c", "#dd2b0f", "#ae1800", "#7c1405"]
+_VERIF_PT = {"confirmed": "Confirmado", "hypothesis": "Hipótese", "candidate": "Candidato",
+             "refuted": "Refutado", "pending_retest": "Reteste"}
+
+# SLA de referência por prioridade (proposta — não é compromisso contratual).
+_PRIO = {
+    "critical": ("P0", "#7c1405", "#fff", "7 dias"),
+    "high": ("P1", "#dd2b0f", "#fff", "30 dias"),
+    "medium": ("P2", "#ff9783", "#201e1d", "90 dias"),
+    "low": ("P3", "#d7d3d3", "#201e1d", "180 dias"),
+    "info": ("Obs", "transparent", "#201e1d", "—"),
+}
+
+# família → (ISO/IEC 27001:2022 Anexo A, CIS Controls v8) — mapeamento de
+# referência curado (metadado de compliance, como o mapa MITRE/CSF). "—" quando
+# não há correspondência de alta confiança.
+_FAMILY_ISO_CIS: dict[str, tuple[str, str]] = {
+    "rce": ("8.28 · 8.25", "16.1 · 16.12"), "command_injection": ("8.28", "16.1"),
+    "sqli": ("8.28", "16.1"), "nosql_injection": ("8.28", "16.1"),
+    "xss": ("8.28 · 8.29", "16.1 · 16.11"), "xxe": ("8.28", "16.1"),
+    "path_traversal": ("8.28", "16.1"), "lfri": ("8.28", "16.1"),
+    "file_upload": ("8.28 · 8.26", "16.1"), "header_injection": ("8.28", "16.1"),
+    "prototype_pollution": ("8.28", "16.11"), "deserialization": ("8.28", "16.1"),
+    "ssti": ("8.28", "16.1"), "ssrf": ("8.28 · 8.20", "16.1 · 13.3"),
+    "vulnerable_dependency": ("8.8", "7.4 · 2.2"), "misconfiguration": ("8.9", "4.1"),
+    "security_headers": ("8.9 · 8.26", "16.7"), "cors": ("8.9 · 8.26", "16.7"),
+    "idor": ("5.15 · 8.3", "6.8 · 16.10"), "broken_access_control": ("5.15 · 8.3", "6.8 · 16.10"),
+    "bola_bfla": ("5.15 · 8.3", "6.8 · 16.10"), "mass_assignment": ("5.15 · 8.28", "6.8 · 16.1"),
+    "auth_bypass": ("5.17 · 8.5", "6.3 · 6.8"), "jwt_oauth": ("5.17 · 8.5", "6.3"),
+    "type_juggling": ("5.17 · 8.28", "6.3 · 16.1"),
+    "business_logic": ("8.28 · 5.15", "16.1 · 16.10"),
+    "secrets": ("5.17 · 8.24", "3.11 · 16.9"), "info_exposure": ("8.12 · 5.12", "3.11 · 4.8"),
+    "excessive_data_exposure": ("8.12 · 5.12", "3.11"), "tls_ssl": ("8.24", "3.10"),
+    "subdomain_takeover": ("8.9 · 5.9", "4.8 · 1.1"), "graphql_api": ("8.28 · 8.26", "16.1"),
+    "websocket": ("8.28 · 8.26", "16.1"), "csrf": ("8.28", "16.1"),
+    "open_redirect": ("8.28", "16.1"), "race_condition": ("8.28", "16.1"),
+    "dos": ("8.6 · 8.20", "12.2"), "outros": ("8.8", "12.2 · 4.4"),
+}
+
+_FW_LABEL = {"iso27001": "ISO 27001", "nist": "NIST CSF", "cis_v8": "CIS v8", "pci": "PCI DSS"}
+
+
+def _v_grade_color(grade: str) -> str:
+    return {"A": "#4cc13e", "B": "#4cc13e", "C": "#f4c10b", "D": "#f4c10b", "F": "#ec3013"}.get(str(grade), "#ec3013")
+
+
+def _num(n) -> str:
+    """Milhar em pt-BR (1.234). NUNCA usar '.replace(",", ".")' direto num bloco de
+    f-strings concatenadas — o replace vaza e corrompe vírgulas de CSS (repeat(2,1fr))."""
+    try:
+        return f"{int(n):,}".replace(",", ".")
+    except (TypeError, ValueError):
+        return str(n)
+
+
+def _clip(text: str, n: int) -> str:
+    """Trunca em limite de palavra com reticências (evita corte no meio da palavra)."""
+    t = str(text or "").strip()
+    if len(t) <= n:
+        return t
+    cut = t[:n].rsplit(" ", 1)[0]
+    return (cut or t[:n]).rstrip(",;:.") + "…"
+
+
+# CVSS coerente com a severidade — IDÊNTICO à regra do CSV (export.csv). Usa o
+# valor medido quando cai na faixa da severidade; senão traduz a severidade para
+# o piso da faixa CVSS v3, de modo que reclassifique de volta à MESMA severidade.
+_CVSS_FLOOR = {"critical": 9.0, "high": 7.0, "medium": 4.0, "low": 0.1, "info": 0.0}
+
+
+def _cvss_band(score: float) -> str:
+    return ("critical" if score >= 9.0 else "high" if score >= 7.0
+            else "medium" if score >= 4.0 else "low" if score >= 0.1 else "info")
+
+
+def _finding_cvss_num(f) -> float | None:
+    sev = str(getattr(f, "severity", "") or "").strip().lower()
+    measured = None
+    d = f.details if isinstance(getattr(f, "details", None), dict) else {}
+    adj = d.get("adjudicated_cvss")
+    for v in (getattr(f, "cvss", None), d.get("cvss"),
+              adj.get("score") if isinstance(adj, dict) else None):
+        if v is None or str(v).strip() == "":
+            continue
+        try:
+            measured = float(v)
+            break
+        except (TypeError, ValueError):
+            continue
+    if measured is not None and (sev not in _CVSS_FLOOR or _cvss_band(measured) == sev):
+        return measured
+    if sev in _CVSS_FLOOR:
+        return _CVSS_FLOOR[sev]
+    return measured
+
+
+def _finding_cvss(f, dash: str = "—") -> str:
+    v = _finding_cvss_num(f)
+    return f"{v:.1f}" if v is not None else dash
+
+
+def _v_heat(count: int, weight: float, max_weighted: float, height: str = "30px") -> str:
+    """Célula de heatmap com escala logarítmica (igual ao design VALID)."""
+    if not count:
+        return (f'<span class="hc" style="height:{height};background:#eae7e7;color:#9b9797">—</span>')
+    val = count * weight
+    t = (_math.log(val + 1) / _math.log(max_weighted + 1)) if max_weighted > 0 else 0.0
+    k = min(6, int(t * 7))
+    bg = _HEAT_RAMP[k]
+    fg = "#fff" if k >= 4 else "#201e1d"
+    return f'<span class="hc" style="height:{height};background:{bg};color:{fg}">{_num(count)}</span>'
+
+
+def _v_sev(sev: str, abbr: bool = False) -> str:
+    s = str(sev or "info").lower()
+    label = (_SEV_ABBR if abbr else _SEV_PT).get(s, "Info")
+    bg = _SEV_CELL.get(s, "#eae7e7")
+    fg = _SEV_FG.get(s, "#605d5d")
+    extra = "box-shadow:inset 0 0 0 1px #9b9797;" if s == "info" else ""
+    return f'<span class="sev" style="background:{bg};color:{fg};{extra}">{label}</span>'
+
+
+_V_CSS = """
+@import url('https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;800&display=swap');
+*{box-sizing:border-box;margin:0;padding:0;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+html,body{background:#3a3a40}
+body{font-family:'Archivo',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;color:#201e1d;line-height:1.5;font-size:14px}
+@page{size:A4;margin:0}
+.sheet{width:210mm;min-height:296mm;background:#f3f2f2;padding:13mm 14mm 11mm;margin:0 auto 12px;display:flex;flex-direction:column;overflow:hidden}
+.cover{background:#27272C;color:#fff;padding:14mm 14mm 12mm}
+.content{flex:1;min-width:0;padding-top:2px}
+.hd{display:flex;justify-content:space-between;align-items:baseline;border-bottom:2px solid #201e1d;padding-bottom:8px;font-size:11px;letter-spacing:.08em;text-transform:uppercase}
+.hd span:first-child{font-weight:600}
+.brand{color:#1767E5;font-weight:800}
+.cover-hd{display:flex;justify-content:space-between;align-items:baseline;border-bottom:2px solid #fff;padding-bottom:8px;font-size:11px;letter-spacing:.1em;text-transform:uppercase;font-weight:600}
+.ft{display:flex;justify-content:space-between;margin-top:12px;padding-top:10px;font-size:10px;color:#605d5d;letter-spacing:.06em;text-transform:uppercase}
+.cover-ft{color:#fff;border-top:2px solid #fff;margin-top:16px;padding-top:16px}
+a{color:#1767E5;text-decoration:none}
+.eyebrow{font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:#1767E5;font-weight:600}
+.h1{font-size:40px;line-height:1.03;font-weight:800;letter-spacing:-.02em}
+.h2{font-size:26px;line-height:1.1;font-weight:800;letter-spacing:-.015em;margin-top:4px}
+.h2sm{font-size:22px;line-height:1.1;font-weight:800;letter-spacing:-.015em;margin-top:4px}
+.lead{font-size:13px;color:#444141;line-height:1.5}
+.muted{color:#605d5d}
+.up{font-size:11px;letter-spacing:.08em;text-transform:uppercase;font-weight:600}
+.r2{border-top:2px solid #201e1d}
+.r2b{border-bottom:2px solid #201e1d}
+.th{display:grid;align-items:baseline;padding:6px 0;font-size:9.5px;letter-spacing:.05em;text-transform:uppercase;color:#605d5d;font-weight:600;border-bottom:1px solid #bab6b6}
+.tr{display:grid;align-items:start;padding:6px 0;border-bottom:1px solid #d7d3d3;font-size:12px;line-height:1.3}
+.tr:last-child{border-bottom:none}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+.b{font-weight:800}.b6{font-weight:600}
+.sev{display:inline-block;font-weight:800;padding:2px 6px;font-size:10px;white-space:nowrap;align-self:start}
+.hc{display:flex;align-items:center;padding:0 8px;font-weight:800;font-size:12.5px}
+.wrap{overflow-wrap:anywhere;min-width:0}
+.kpis{display:grid;border-top:2px solid #201e1d;border-bottom:2px solid #201e1d}
+.stat-l{font-size:11px;color:#605d5d;text-transform:uppercase;letter-spacing:.06em}
+.cover-brand{padding-top:16mm;display:flex;flex-direction:column;gap:14px}
+.cover-name{font-size:40px;font-weight:800;letter-spacing:-.02em;line-height:1.05}
+.cover-accent{width:96px;height:8px;background:#1767E5}
+.cover-tag{font-size:14px;letter-spacing:.04em;color:#E7E7E8}
+.cover-foot-block{margin-top:auto}
+.cover-type{border-top:8px solid #1767E5;padding:14px 0 18px;display:flex;flex-direction:column;gap:6px}
+.cover-type-l{font-size:11px;letter-spacing:.12em;text-transform:uppercase;font-weight:600}
+.cover-type-t{font-size:34px;line-height:1.05;font-weight:800;letter-spacing:-.02em}
+.cover-type-s{font-size:14px;color:#E7E7E8}
+.cover-meta2{display:grid;grid-template-columns:2fr 1fr;border-top:2px solid #fff}
+.cover-meta2>div{padding:14px 14px 4px 0}
+.cover-meta-r{border-left:2px solid #fff;padding:14px 0 4px 14px}
+.cover-meta-v{font-size:20px;font-weight:800;line-height:1.15;margin-top:4px}
+@media print{html,body{background:#fff}.sheet{margin:0;height:296mm;min-height:296mm;max-height:296mm;overflow:hidden;page-break-after:always;break-after:page}.sheet:last-child{page-break-after:auto;break-after:auto}.content{overflow:hidden}.tr,.th{break-inside:avoid}}
+@media screen and (max-width:760px){.sheet{width:100%;min-height:0;padding:22px 16px}.h1,.cover-name{font-size:30px}.h2{font-size:22px}}
+"""
+
+
+def _v_hd(company: str, section: str) -> str:
+    return (f'<div class="hd"><span><b class="brand">{_html.escape(company)}</b> · Gestão de Vulnerabilidades</span>'
+            f'<span>{_html.escape(section)}</span></div>')
+
+
+def _v_sheet(company: str, section: str, body: str, ref: str, n: int, total: int) -> str:
+    return (f'<section class="sheet">{_v_hd(company, section)}<div class="content">{body}</div>'
+            f'<div class="ft"><span>{_html.escape(ref)}</span><span>{n:02d} / {total:02d}</span></div></section>')
+
+
+def _v_cover(company: str, kind_top: str, big_title: str, subtitle: str, escopo: str,
+             referencia: str, foot_left: str, total: int) -> str:
+    e = _html.escape
+    return (
+        f'<section class="sheet cover">'
+        f'<div class="cover-hd"><span>{e(kind_top)}</span><span>Confidencial · uso interno</span></div>'
+        f'<div class="cover-brand"><div class="cover-name">{e(company)}</div>'
+        f'<div class="cover-accent"></div>'
+        f'<div class="cover-tag">Gestão contínua de exposição e vulnerabilidades</div></div>'
+        f'<div class="cover-foot-block">'
+        f'<div class="cover-type"><div class="cover-type-l">Tipo de relatório</div>'
+        f'<div class="cover-type-t">{e(big_title)}</div><div class="cover-type-s">{e(subtitle)}</div></div>'
+        f'<div class="cover-meta2"><div><div class="cover-type-l">Escopo</div>'
+        f'<div class="cover-meta-v">{e(escopo)}</div></div>'
+        f'<div class="cover-meta-r"><div class="cover-type-l">Referência</div>'
+        f'<div class="cover-meta-v">{e(referencia)}</div></div></div></div>'
+        f'<div class="ft cover-ft"><span>{e(foot_left)}</span><span>01 / {total:02d}</span></div>'
+        f'</section>'
     )
+
+
+def _v_shell(doc_title: str, sheets: str) -> str:
+    return (f'<!DOCTYPE html><html lang="pt-BR"><head><meta charset="utf-8">'
+            f'<meta name="viewport" content="width=device-width, initial-scale=1">'
+            f'<title>{_html.escape(doc_title)}</title><style>{_V_CSS}</style></head>'
+            f'<body>{sheets}</body></html>')
+
+
+def _host_short(h: str) -> str:
+    h = str(h or "").strip()
+    if not h or h in ("—", "raiz"):
+        return h or "—"
+    first = h.split(".")[0]
+    return first or h
+
+
+def _v_max_weighted(rows: list[dict], keys=("critical", "high", "medium", "low")) -> float:
+    m = 0.0
+    for r in rows:
+        for k in keys:
+            m = max(m, float(r.get(k, 0)) * _SEV_W[k])
+    return m
+
+
+def _v_common(db: "Session", scan_id: int, company_name: str | None):
+    """Agregações reais compartilhadas pelos dois relatórios VALID."""
+    from app.models.models import Finding, ScanJob
+    from app.services.bas_exclusion import exclude_simulated
+    from app.services.risk_service import _grade_from_score, _log_exposure_penalty, compute_framework_scores
     from app.services.strategy_runtime import parse_scope_targets
     from app.services.vuln_family import classify_family, family_label
 
     job = db.query(ScanJob).filter(ScanJob.id == scan_id).first()
     if not job:
-        return "<html><body><h1>Scan não encontrado</h1></body></html>"
+        return None
 
     company = (str(company_name or "").strip()
                or str(getattr(getattr(job, "access_group", None), "name", "") or "").strip()
                or "Empresa")
-    findings = [f for f in db.query(Finding).filter(Finding.scan_job_id == scan_id).all() if not getattr(f, "is_false_positive", False)]
+    findings = (
+        exclude_simulated(db.query(Finding))
+        .filter(Finding.scan_job_id == scan_id, Finding.is_false_positive.isnot(True))
+        .order_by(Finding.id)
+        .all()
+    )
 
-    _SEV = ("critical", "high", "medium", "low", "info")
-    sev = {s: 0 for s in _SEV}
+    sev = {s: 0 for s in _SEV_KEYS}
+    fam_of: dict[int, str] = {}
     for f in findings:
-        k = str(f.severity or "info").lower()
-        if k in sev:
-            sev[k] += 1
+        s = str(f.severity or "info").lower()
+        if s in sev:
+            sev[s] += 1
+        det = f.details if isinstance(f.details, dict) else {}
+        fam_of[f.id] = classify_family(
+            title=f.title, tool=f.tool, owasp=str(det.get("owasp_category") or ""),
+            cve=f.cve, learning_family=(det.get("learning_source") or {}).get("vuln_family"),
+        )
 
     scope_hosts = parse_scope_targets(str(job.target_query or ""))
     host_set = {str(f.domain or "").strip().lower() for f in findings if f.domain}
     n_targets = max(1, len(scope_hosts), len(host_set))
     density = {k: sev[k] / n_targets for k in ("critical", "high", "medium", "low")}
-    score = max(0.0, round(100.0 - _log_exposure_penalty(density["critical"], density["high"], density["medium"], density["low"]), 1))
+    score = max(0.0, round(100.0 - _log_exposure_penalty(
+        density["critical"], density["high"], density["medium"], density["low"]), 1))
     grade = _grade_from_score(score)
-
     triaged = sum(1 for f in findings if str(f.verification_status or "").lower() in ("confirmed", "refuted"))
     try:
-        frameworks = compute_framework_scores(severity_count=sev, findings_total=float(len(findings)), findings_triaged=float(triaged), n_targets=float(n_targets))
+        frameworks = compute_framework_scores(
+            severity_count=sev, findings_total=float(len(findings)),
+            findings_triaged=float(triaged), n_targets=float(n_targets))
     except Exception:
         frameworks = {}
 
-    # Superfície de ataque por host
+    # superfície (host × severidade) e classe (família × severidade)
     by_host: dict[str, dict] = {}
+    by_class: dict[str, dict] = {}
     for f in findings:
+        s = str(f.severity or "info").lower()
         host = str(f.domain or "").strip() or "—"
-        row = by_host.setdefault(host, {"host": host, "critical": 0, "high": 0, "medium": 0, "low": 0, "total": 0})
-        k = str(f.severity or "info").lower()
-        if k in row:
-            row[k] += 1
-        row["total"] += 1
-    surface = sorted(by_host.values(), key=lambda r: (r["critical"], r["high"], r["total"]), reverse=True)[:15]
+        hr = by_host.setdefault(host, {"host": host, **{k: 0 for k in _SEV_KEYS}, "total": 0})
+        if s in hr:
+            hr[s] += 1
+        hr["total"] += 1
+        fam = fam_of[f.id]
+        cr = by_class.setdefault(fam, {"family": fam, "label": family_label(fam),
+                                       **{k: 0 for k in _SEV_KEYS}, "total": 0})
+        if s in cr:
+            cr[s] += 1
+        cr["total"] += 1
 
-    # Plano P0/P1 (crítico/alto), ordenado por CVSS
-    _rank = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
-    top = sorted(
-        [f for f in findings if str(f.severity or "").lower() in ("critical", "high")],
-        key=lambda f: (_rank.get(str(f.severity or "info").lower(), 9), -(float(f.cvss) if f.cvss is not None else 0.0)),
-    )[:20]
+    def _sk(r):
+        return (r["critical"], r["high"], r["medium"], r["low"], r["total"])
+    surface = sorted(by_host.values(), key=_sk, reverse=True)
+    vuln_class = sorted(by_class.values(), key=_sk, reverse=True)
 
-    now = datetime.now().strftime("%d/%m/%Y %H:%M")
-    domains_list = [t.strip() for t in re.split(r"[;,\n]+", str(job.target_query or "")) if t.strip()]
-    alvos_compact = (", ".join(domains_list[:4]) + (f" +{len(domains_list) - 4}" if len(domains_list) > 4 else "")) or str(scan_id)
+    # matriz severidade × verificação
+    verif = {s: {"confirmed": 0, "hypothesis": 0, "candidate": 0} for s in _SEV_KEYS}
+    for f in findings:
+        s = str(f.severity or "info").lower()
+        v = str(f.verification_status or "candidate").lower()
+        if v not in ("confirmed", "hypothesis", "candidate"):
+            v = "candidate"
+        if s in verif:
+            verif[s][v] += 1
 
-    grade_color = {"A": "#1f8a59", "B": "#2f9e6f", "C": "#d4a500", "D": "#e07b39", "F": "#c0392b"}.get(grade, "#c0392b")
+    # catálogo de recomendações (real, deduplicado por texto, ordenado por volume)
+    rec_count: dict[str, int] = {}
+    for f in findings:
+        rec = str(f.recommendation or "").strip()
+        if rec:
+            rec_count[rec] = rec_count.get(rec, 0) + 1
+    rec_sorted = sorted(rec_count.items(), key=lambda kv: (-kv[1], kv[0]))
+    rec_code: dict[str, str] = {txt: f"R{i + 1:02d}" for i, (txt, _c) in enumerate(rec_sorted)}
+    rec_catalog = [(rec_code[txt], txt, c) for txt, c in rec_sorted]
 
-    def _bar(label, count, color):
-        total = max(1, len(findings))
-        pct = round(100 * count / total, 1)
-        return (
-            f'<div class="vbar"><div class="vbar-l"><span>{label}</span><b>{count}</b></div>'
-            f'<div class="vbar-track"><i style="width:{pct}%;background:{color}"></i></div></div>'
-        )
+    # CVEs reais
+    cve_map: dict[str, dict] = {}
+    for f in findings:
+        cid = str(f.cve or "").strip().upper()
+        if not cid.startswith("CVE-"):
+            continue
+        cur = cve_map.get(cid)
+        cvss = _finding_cvss_num(f) or 0.0
+        if (cur is None) or (cvss > cur["cvss"]):
+            cve_map[cid] = {"cve": cid, "cvss": cvss, "title": str(f.title or ""),
+                            "host": str(f.domain or "—"), "severity": str(f.severity or "info").lower()}
+    cve_list = sorted(cve_map.values(), key=lambda r: -r["cvss"])
 
-    fw_html = ""
-    _FWL = {"iso27001": "ISO 27001", "nist": "NIST CSF", "cis_v8": "CIS v8", "pci": "PCI DSS"}
-    for key, fw in (frameworks or {}).items():
-        fs = float(fw.get("score") or 0)
-        fc = "#1f8a59" if fs >= 70 else "#d4a500" if fs >= 40 else "#c0392b"
-        fw_html += (
-            f'<div class="fw-row"><div class="fw-l"><span>{_FWL.get(key, key)}</span>'
-            f'<b style="color:{fc}">{fs:.0f}% · {_html.escape(str(fw.get("grade") or "—"))}</b></div>'
-            f'<div class="fw-track"><i style="width:{max(0, min(100, fs))}%;background:{fc}"></i></div></div>'
-        )
-    fw_html = fw_html or '<p class="muted">Risco por framework indisponível.</p>'
-
-    surface_rows = "".join(
-        f'<tr><td class="mono">{_html.escape(_short_target(r["host"]))}</td>'
-        f'<td class="num"><b>{r["total"]}</b></td>'
-        f'<td class="num" style="color:#c0392b">{r["critical"] or "—"}</td>'
-        f'<td class="num" style="color:#e07b39">{r["high"] or "—"}</td>'
-        f'<td class="num">{r["medium"] or "—"}</td><td class="num">{r["low"] or "—"}</td></tr>'
-        for r in surface
-    ) or '<tr><td colspan="6" class="muted">Sem superfície classificável.</td></tr>'
-
-    def _freco(f):
-        det = dict(f.details or {})
-        return str(f.recommendation or det.get("remediation") or "Corrigir conforme OWASP / boas práticas.")[:240]
-
-    top_rows = "".join(
-        f'<tr><td><span class="sev" style="background:{_severity_color(str(f.severity or "info").lower())}">{str(f.severity or "info").upper()}</span></td>'
-        f'<td><b>{_html.escape(str(f.title or "")[:120])}</b><small>{_html.escape(_freco(f))}</small></td>'
-        f'<td class="mono">{_html.escape(_short_target(f.domain))}</td>'
-        f'<td class="num">{(f"{float(f.cvss):.1f}" if f.cvss is not None else "—")}</td></tr>'
-        for f in top
-    ) or '<tr><td colspan="4" class="muted">Não há achados críticos ou altos neste ciclo.</td></tr>'
-
+    # caminhos de ataque + joias
+    try:
+        from app.services.attack_path import build_attack_paths
+        paths = build_attack_paths(db, scan_id, job=job, max_paths=12)
+    except Exception:
+        paths = {"paths": [], "objectives_total": 0, "paths_with_findings": 0, "objectives_reachable": 0}
     jewels = [j for j in (dict(job.state_data or {}).get("crown_jewels") or []) if isinstance(j, dict)]
 
-    return f"""<!DOCTYPE html>
-<html lang="pt-BR"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Relatório Executivo — {_html.escape(company)}</title>
-<style>
-  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-  body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #eef1f5; color: #1f2a37; line-height: 1.5; }}
-  .page {{ max-width: 1060px; margin: 0 auto; padding: 28px 24px 48px; }}
-  .cap {{ display:flex; align-items:center; justify-content:space-between; gap:20px; background:linear-gradient(120deg,#0b2545 0%,#13315c 100%); color:#fff; border-radius:16px; padding:28px 32px; margin-bottom:22px; flex-wrap:wrap; }}
-  .cap .brand {{ font-size:26px; font-weight:800; letter-spacing:-.01em; }}
-  .cap .sub {{ font-size:13px; color:#b8c7de; margin-top:4px; }}
-  .cap .meta {{ font-size:12px; color:#9fb3d1; margin-top:10px; }}
-  .grade {{ text-align:center; background:rgba(255,255,255,.08); border:1px solid rgba(255,255,255,.18); border-radius:14px; padding:14px 22px; }}
-  .grade .g {{ font-size:44px; font-weight:800; line-height:1; }}
-  .grade .s {{ font-size:12px; color:#c8d6ea; margin-top:6px; }}
-  .kpis {{ display:grid; grid-template-columns:repeat(5,1fr); gap:12px; margin-bottom:22px; }}
-  .kpi {{ background:#fff; border-radius:12px; padding:16px; text-align:center; box-shadow:0 1px 4px rgba(10,30,60,.06); }}
-  .kpi .n {{ font-size:30px; font-weight:800; }}
-  .kpi .l {{ font-size:11px; color:#64748b; margin-top:4px; }}
-  .card {{ background:#fff; border-radius:12px; padding:22px 24px; box-shadow:0 1px 4px rgba(10,30,60,.06); margin-bottom:18px; }}
-  .card h2 {{ font-size:16px; font-weight:700; margin-bottom:14px; padding-bottom:8px; border-bottom:2px solid #eef1f5; }}
-  .grid2 {{ display:grid; grid-template-columns:1fr 1fr; gap:18px; }}
-  .vbar, .fw-row {{ margin-bottom:10px; }}
-  .vbar-l, .fw-l {{ display:flex; justify-content:space-between; font-size:12.5px; margin-bottom:4px; }}
-  .vbar-track, .fw-track {{ height:9px; background:#eef1f5; border-radius:6px; overflow:hidden; }}
-  .vbar-track i, .fw-track i {{ display:block; height:100%; border-radius:6px; }}
-  table {{ width:100%; border-collapse:collapse; font-size:12.5px; table-layout:fixed; }}
-  th {{ text-align:left; background:#f6f8fb; padding:8px 10px; font-size:11px; color:#64748b; text-transform:uppercase; letter-spacing:.05em; border-bottom:2px solid #e5e9f0; }}
-  td {{ padding:9px 10px; border-bottom:1px solid #f0f3f7; vertical-align:top; word-break:break-word; overflow-wrap:anywhere; }}
-  td small {{ display:block; color:#64748b; font-size:11px; margin-top:3px; }}
-  .num {{ text-align:right; font-variant-numeric:tabular-nums; }}
-  .mono {{ font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11.5px; color:#0b3b8c; }}
-  .sev {{ display:inline-block; color:#fff; font-size:10px; font-weight:700; padding:2px 7px; border-radius:5px; white-space:nowrap; }}
-  .muted {{ color:#94a3b8; font-style:italic; }}
-  .foot {{ text-align:center; font-size:11px; color:#94a3b8; margin-top:26px; }}
-  @media print {{ body {{ background:#fff; }} .card, .kpi {{ break-inside:avoid; box-shadow:none; border:1px solid #e5e9f0; }} table tr {{ break-inside:avoid; }} thead {{ display:table-header-group; }} h2 {{ break-after:avoid; }} }}
-  @media (max-width:760px) {{ .kpis {{ grid-template-columns:repeat(2,1fr); }} .grid2 {{ grid-template-columns:1fr; }} }}
-</style></head>
-<body><div class="page">
-  <div class="cap">
-    <div>
-      <div class="brand">{_html.escape(company)}</div>
-      <div class="sub">Relatório Executivo de Vulnerabilidades</div>
-      <div class="meta">Alvos: <strong>{_html.escape(alvos_compact)}</strong> &nbsp;·&nbsp; Ciclo #{scan_id} &nbsp;·&nbsp; {now}
-      {f'&nbsp;·&nbsp; Δ vs #{previous_scan_id}' if previous_scan_id else ''}</div>
-    </div>
-    <div class="grade"><div class="g" style="color:{grade_color}">{grade}</div><div class="s">rating {score:.0f}/100 · densidade por alvo</div></div>
-  </div>
+    total = len(findings)
+    classified = sev["critical"] + sev["high"] + sev["medium"] + sev["low"]
+    return {
+        "job": job, "company": company, "findings": findings, "fam_of": fam_of,
+        "sev": sev, "n_targets": n_targets, "score": score, "grade": grade,
+        "frameworks": frameworks, "surface": surface, "vuln_class": vuln_class,
+        "verif": verif, "rec_catalog": rec_catalog, "rec_code": rec_code,
+        "cve_list": cve_list, "paths": paths, "jewels": jewels, "triaged": triaged,
+        "total": total, "classified": classified, "scope_n": len(scope_hosts),
+        "hosts_n": len(host_set),
+    }
 
-  <div class="kpis">
-    <div class="kpi"><div class="n" style="color:{grade_color}">{grade}</div><div class="l">Grade de exposição</div></div>
-    <div class="kpi"><div class="n" style="color:#c0392b">{sev['critical']}</div><div class="l">Críticos</div></div>
-    <div class="kpi"><div class="n" style="color:#e07b39">{sev['high']}</div><div class="l">Altos</div></div>
-    <div class="kpi"><div class="n">{n_targets}</div><div class="l">Alvos avaliados</div></div>
-    <div class="kpi"><div class="n">{len(jewels)}</div><div class="l">Joias da coroa</div></div>
-  </div>
 
-  <div class="grid2">
-    <div class="card"><h2>📈 Distribuição por severidade</h2>
-      {_bar('Crítico', sev['critical'], '#c0392b')}{_bar('Alto', sev['high'], '#e07b39')}
-      {_bar('Médio', sev['medium'], '#d4a500')}{_bar('Baixo', sev['low'], '#3498db')}{_bar('Info', sev['info'], '#95a5a6')}
-      <p class="sub" style="font-size:11px;color:#94a3b8;margin-top:8px">{len(findings)} achados em {n_targets} alvo(s)</p>
-    </div>
-    <div class="card"><h2>🧭 Risco por framework</h2>{fw_html}</div>
-  </div>
+def _v_ref(scan_id: int) -> str:
+    _MES = ["", "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho",
+            "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"]
+    now = datetime.now()
+    return f"{_MES[now.month]} {now.year} · ciclo #{scan_id}"
 
-  <div class="card"><h2>🎯 Plano de ação — Críticos e Altos</h2>
-    <table><thead><tr><th style="width:78px">Sev.</th><th>Achado & recomendação</th><th style="width:190px">Alvo</th><th class="num" style="width:60px">CVSS</th></tr></thead>
-    <tbody>{top_rows}</tbody></table>
-  </div>
 
-  <div class="card"><h2>🛰️ Superfície de ataque</h2>
-    <table><thead><tr><th>Ativo</th><th class="num">Vulns</th><th class="num">Crít.</th><th class="num">Altas</th><th class="num">Méd.</th><th class="num">Baixas</th></tr></thead>
-    <tbody>{surface_rows}</tbody></table>
-  </div>
+def _v_distribution_bar(sev: dict) -> str:
+    total = max(1, sum(sev.values()))
+    seg = "".join(
+        f'<div style="width:{100 * sev[k] / total:.2f}%;background:{_SEV_CELL[k]}"></div>'
+        for k in _SEV_KEYS if sev[k]
+    )
+    legend = "".join(
+        f'<div style="display:flex;gap:6px;align-items:center"><span style="width:11px;height:11px;'
+        f'background:{_SEV_CELL[k]};flex:none;{"box-shadow:inset 0 0 0 1px #bab6b6" if k=="info" else ""}"></span>'
+        f'<span><b>{sev[k]}</b> {_SEV_PT[k]} · {100 * sev[k] / total:.1f}%</span></div>'
+        for k in _SEV_KEYS
+    )
+    return (
+        f'<div style="display:flex;height:28px;border:2px solid #201e1d">{seg}</div>'
+        f'<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px;padding:8px 0 4px;font-size:11.5px">{legend}</div>'
+    )
 
-  <div class="foot">Relatório gerado automaticamente pela plataforma ScriptKidd.o · {now} · confidencial — uso interno de {_html.escape(company)}</div>
-</div></body></html>"""
+
+def _v_heat_table(rows: list[dict], name_key: str, name_label: str, *, name_col="minmax(0,2fr)",
+                  keys=("critical", "high", "medium", "low"), show_total=True, name_short=False,
+                  height="30px", cap=None) -> str:
+    """Tabela-heatmap família/host × severidade (rampa log)."""
+    rows = rows[:cap] if cap else rows
+    maxw = _v_max_weighted(rows, keys)
+    ncols = len(keys)
+    tot_col = " 56px" if show_total else ""
+    gt = f"{name_col} repeat({ncols},minmax(0,1fr)){tot_col}"
+    heads = "".join(f"<span>{_SEV_PT[k]}</span>" for k in keys)
+    thead = (f'<div class="th" style="grid-template-columns:{gt};gap:3px">'
+             f'<span>{_html.escape(name_label)}</span>{heads}'
+             f'{"<span class=num>Total</span>" if show_total else ""}</div>')
+    body = ""
+    for r in rows:
+        nm = _host_short(r[name_key]) if name_short else r[name_key]
+        cells = "".join(_v_heat(r.get(k, 0), _SEV_W[k], maxw, height) for k in keys)
+        tot = (f'<span class="num b" style="align-self:center">{_num(r["total"])}</span>'
+               if show_total else "")
+        fw = "600" if (r.get("critical") or r.get("high")) else "400"
+        body += (f'<div class="tr" style="grid-template-columns:{gt};gap:3px;padding-bottom:3px;border-bottom:none">'
+                 f'<span class="wrap" style="align-self:center;font-size:12.5px;font-weight:{fw}">{_html.escape(str(nm))}</span>'
+                 f'{cells}{tot}</div>')
+    return f'<div class="r2 r2b">{thead}{body}</div>'
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# RELATÓRIO EXECUTIVO VALID (v2)
+# ──────────────────────────────────────────────────────────────────────────────
+def generate_valid_executive_report(
+    db: "Session",
+    scan_id: int,
+    company_name: str | None = None,
+    previous_scan_id: int | None = None,
+) -> str:
+    from app.services.framework_mapping import attack_for_family, csf_for_family
+    from app.services.vuln_family import family_label
+
+    ctx = _v_common(db, scan_id, company_name)
+    if not ctx:
+        return "<html><body><h1>Scan não encontrado</h1></body></html>"
+    e = _html.escape
+    company, sev, grade, score = ctx["company"], ctx["sev"], ctx["grade"], ctx["score"]
+    n_targets, frameworks, surface = ctx["n_targets"], ctx["frameworks"], ctx["surface"]
+    vuln_class, paths, jewels = ctx["vuln_class"], ctx["paths"], ctx["jewels"]
+    findings, fam_of, total = ctx["findings"], ctx["fam_of"], ctx["total"]
+    gcolor = _v_grade_color(grade)
+    ref = _v_ref(scan_id)
+    crit_high = sev["critical"] + sev["high"]
+    escopo = str(ctx["job"].target_query or "")
+    escopo_c = ", ".join([t.strip() for t in re.split(r"[;,\n]+", escopo) if t.strip()][:2]) or f"scan #{scan_id}"
+    if len(escopo_c) > 46:
+        escopo_c = escopo_c[:45] + "…"
+
+    pages: list[tuple[str, str]] = []
+
+    # ── P2 · Metodologia & rating ────────────────────────────────────────────
+    grade_scale = "".join(
+        f'<div style="padding:8px 10px;background:{"#ec3013" if g==grade else "#eae7e7"};'
+        f'color:{"#fff" if g==grade else "#201e1d"};font-size:22px;font-weight:800;display:flex;'
+        f'justify-content:space-between;align-items:baseline">{g}'
+        f'{"<span style=\'font-size:11px;font-weight:600;text-transform:uppercase\'>atual</span>" if g==grade else ""}</div>'
+        for g in ("A", "B", "C", "D", "F")
+    )
+    calc_rows = [
+        ("Rating consolidado", f"Nota do alvo a partir do volume e severidade dos achados, exposição dos ativos e joias da coroa, normalizada por <b>densidade por alvo</b> (não pelo somatório bruto) e convertida na grade A–F. Valor atual: <b>{score:.0f} · {grade}</b>.", "Plataforma"),
+        ("Nota por framework", "Maturidade estimada para cada framework a partir das evidências reais do scan (penalidade log-amortecida por severidade/configuração/exposição, crédito por WAF e remediação).", "Plataforma"),
+        ("Severidade", "Classificação de cada achado em Crítico/Alto/Médio/Baixo/Info por impacto e explorabilidade (CVSS v3).", "Plataforma"),
+        ("Prioridade P0·P1·P2", "Ordenação por severidade, depois valor do alvo (joia), CVSS e verificação — nunca por critério isolado.", "Plataforma"),
+        ("Risco ponderado (heatmap)", "Quantidade × peso da severidade (<b>C 10 · A 5 · M 2 · B 1</b>) em escala logarítmica, para que poucos críticos não sumam diante de muitos médios.", "Este relatório"),
+        ("Status NIST · ISO", "Cada classe de achado é associada a uma categoria/controle; o status é a maior severidade entre os achados associados.", "Este relatório"),
+        ("Mapeamento MITRE", "Cada classe de vulnerabilidade é associada à técnica ATT&CK que ela habilita; soma de achados e de críticos/altos por técnica.", "Este relatório"),
+    ]
+    calc_html = "".join(
+        f'<div class="tr" style="grid-template-columns:170px minmax(0,1fr) 96px;gap:14px;padding:9px 0">'
+        f'<span class="b">{k}</span><span class="wrap">{v}</span><span class="small">{src}</span></div>'
+        for k, v, src in calc_rows
+    )
+    body = (
+        f'<div style="padding:20px 0 12px"><div class="eyebrow">01 · Metodologia &amp; rating</div>'
+        f'<div class="h2">Como cada número deste relatório é obtido</div></div>'
+        f'<div class="up" style="padding-bottom:6px">Escala de grade</div>'
+        f'<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:3px">{grade_scale}</div>'
+        f'<div style="display:flex;justify-content:space-between;padding:4px 0 16px;font-size:11px" class="muted">'
+        f'<span>Melhor postura</span><span>Pior postura</span></div>'
+        f'<div class="r2 r2b"><div class="th" style="grid-template-columns:170px minmax(0,1fr) 96px;gap:14px">'
+        f'<span>Indicador</span><span>Como é calculado</span><span>Origem</span></div>{calc_html}</div>'
+        f'<div class="lead" style="padding-top:8px">Fonte: findings reais do scan #{scan_id} '
+        f'({total} achados, {n_targets} alvo(s)). Os pesos internos do rating e das notas por framework são '
+        f'definidos pela plataforma de origem.</div>'
+    )
+    pages.append(("Metodologia", body))
+
+    # ── P3 · Sumário executivo ───────────────────────────────────────────────
+    # leitura executiva (derivada de dado real)
+    reads: list[tuple[str, str]] = []
+    if sev["critical"] and surface:
+        top_crit = max(surface, key=lambda r: r["critical"])
+        if top_crit["critical"]:
+            reads.append(("Risco crítico concentrado",
+                          f'{e(_host_short(top_crit["host"]))} detém {top_crit["critical"]} de {sev["critical"]} '
+                          f'crítico(s) do ciclo — priorize a contenção deste ativo.'))
+    plist = paths.get("paths") or []
+    rce_paths = sum(1 for p in plist if any(str(s.get("family")) == "rce" for s in (p.get("steps") or [])))
+    reach = paths.get("objectives_reachable", 0)
+    if plist:
+        reads.append(("Caminhos de ataque mapeados",
+                      f'{len(plist)} caminho(s) correlacionado(s); {rce_paths} termina(m) em execução remota '
+                      f'e {reach} objetivo(s) marcado(s) como alcançável(is).'))
+    if not jewels:
+        reads.append(("Governança bloqueia priorização",
+                      "Nenhuma joia da coroa (ativo crítico de negócio) definida — o risco ainda não é "
+                      "ponderado por valor de negócio."))
+    else:
+        reads.append(("Joias da coroa", f"{len(jewels)} ativo(s) crítico(s) de negócio definido(s) para ponderar prioridade."))
+    worst = None
+    if frameworks:
+        worst = min(frameworks.values(), key=lambda fw: float(fw.get("score") or 0))
+        reads.append(("Maturidade de frameworks",
+                      f'Pior nota: {e(str(worst.get("label") or ""))} em {e(str(worst.get("grade") or "—"))} '
+                      f'({float(worst.get("score") or 0):.0f}/100). Detalhe na conformidade.'))
+    reads_html = "".join(
+        f'<div class="tr" style="grid-template-columns:36px minmax(0,1fr);gap:0 12px;padding:7px 0">'
+        f'<span class="b" style="font-size:19px;color:#1767E5">{i + 1:02d}</span>'
+        f'<div><b>{e(t)}.</b> {e(d)}</div></div>'
+        for i, (t, d) in enumerate(reads[:4])
+    )
+    body = (
+        f'<div style="padding:18px 0 12px"><div class="eyebrow">02 · Sumário executivo · {e(escopo_c)}</div>'
+        f'<div class="h1" style="margin-top:4px">Exposição a vulnerabilidades — visão executiva</div>'
+        f'<div class="muted" style="font-size:13px;margin-top:5px">{ref} · {n_targets} ativo(s) analisado(s) · '
+        f'{total} achados · fonte: plataforma de análise de exposição</div></div>'
+        f'<div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,2fr);border-top:2px solid #201e1d;border-bottom:2px solid #201e1d">'
+        f'<div style="background:{gcolor};color:#fff;padding:14px;display:flex;flex-direction:column;justify-content:space-between;gap:10px">'
+        f'<div class="up">Rating consolidado</div>'
+        f'<div style="display:flex;align-items:baseline;gap:12px"><span style="font-size:62px;line-height:.85;font-weight:800">{grade}</span>'
+        f'<span style="font-size:20px;font-weight:600">{score:.0f}</span></div>'
+        f'<div style="font-size:11.5px;line-height:1.35">Densidade de risco por alvo, escala A–F.</div></div>'
+        f'<div style="display:grid;grid-template-columns:repeat(2,1fr)">'
+        f'<div style="padding:11px 16px;border-left:2px solid #201e1d;border-bottom:2px solid #201e1d"><div class="stat-l">Críticos + altos</div>'
+        f'<div style="font-size:34px;font-weight:800;line-height:1.05;color:#ae1800">{crit_high}</div>'
+        f'<div class="stat-l" style="text-transform:none">{sev["critical"]} críticos · {sev["high"]} altos</div></div>'
+        f'<div style="padding:11px 16px;border-left:2px solid #201e1d;border-bottom:2px solid #201e1d"><div class="stat-l">Achados abertos</div>'
+        f'<div style="font-size:34px;font-weight:800;line-height:1.05">{_num(total)}</div>'
+        f'<div class="stat-l" style="text-transform:none">{crit_high} priorizados no plano</div></div>'
+        f'<div style="padding:11px 16px;border-left:2px solid #201e1d"><div class="stat-l">Ativos analisados</div>'
+        f'<div style="font-size:34px;font-weight:800;line-height:1.05">{n_targets}</div>'
+        f'<div class="stat-l" style="text-transform:none">{len([r for r in surface if r["critical"]])} com críticos</div></div>'
+        f'<div style="padding:11px 16px;border-left:2px solid #201e1d"><div class="stat-l">Joias da coroa</div>'
+        f'<div style="font-size:34px;font-weight:800;line-height:1.05">{len(jewels)}</div>'
+        f'<div class="stat-l" style="text-transform:none">{"definidas" if jewels else "nenhuma definida"}</div></div>'
+        f'</div></div>'
+        f'<div style="padding-top:12px"><div class="up" style="padding-bottom:5px">Leitura executiva</div>'
+        f'<div class="r2">{reads_html}</div></div>'
+        f'<div style="margin-top:auto;border:2px solid #201e1d;padding:11px 14px;display:grid;grid-template-columns:120px minmax(0,1fr);gap:14px;align-items:start">'
+        f'<div class="up" style="color:#ae1800">Decisão requerida</div>'
+        f'<div>Aprovar janela emergencial para os <b>{sev["critical"]} item(ns) P0</b> (crítico), '
+        f'designar donos por ativo{"" if jewels else " e definir as joias da coroa"} antes do próximo ciclo.</div></div>'
+    )
+    pages.append(("Sumário executivo", body))
+
+    # ── P4 · Risco por superfície ────────────────────────────────────────────
+    top_assets = surface[:10]
+    maxtot = max([r["total"] for r in top_assets], default=1)
+    asset_rows = "".join(
+        f'<div class="tr" style="grid-template-columns:minmax(0,1.5fr) minmax(0,2fr) 56px 64px;gap:12px;align-items:center">'
+        f'<span class="wrap b6">{e(_host_short(r["host"]))}</span>'
+        f'<div style="height:10px;background:#eae7e7"><div style="height:10px;width:{100 * r["total"] / maxtot:.1f}%;'
+        f'background:{"#201e1d" if r["critical"] else "#7d7979"}"></div></div>'
+        f'<span class="num">{r["total"]}</span>'
+        f'<span class="num b" style="color:{"#ae1800" if r["critical"] else "#7d7979"}">{r["critical"] or "—"}</span></div>'
+        for r in top_assets
+    ) or '<div class="tr">Sem superfície classificável.</div>'
+    body = (
+        f'<div style="padding:20px 0 12px"><div class="eyebrow">03 · Risco associado</div>'
+        f'<div class="h2">Onde a exposição se concentra por superfície</div></div>'
+        f'<div class="up" style="padding-bottom:6px">Distribuição por severidade · {total} achados</div>'
+        f'{_v_distribution_bar(sev)}'
+        f'<div class="up" style="padding:14px 0 6px">Heatmap · superfície × severidade '
+        f'<span class="muted" style="text-transform:none;font-weight:400">(cor = risco ponderado, escala log)</span></div>'
+        f'{_v_heat_table(surface, "host", "Superfície", name_short=True, cap=6, height="40px")}'
+        f'<div class="up" style="padding:16px 0 6px">Top 10 ativos por volume '
+        f'<span class="muted" style="text-transform:none;font-weight:400">— críticos em destaque</span></div>'
+        f'<div class="r2 r2b"><div class="th" style="grid-template-columns:minmax(0,1.5fr) minmax(0,2fr) 56px 64px;gap:12px">'
+        f'<span>Ativo</span><span>Volume</span><span class="num">Vulns</span><span class="num">Críticas</span></div>{asset_rows}</div>'
+    )
+    pages.append(("Risco por superfície", body))
+
+    # ── P5 · Heatmap por classe ──────────────────────────────────────────────
+    crit_fams = [c for c in vuln_class if c["critical"]]
+    lead = (f'{len(crit_fams)} classe(s) concentram os {sev["critical"]} crítico(s); '
+            f'{e(vuln_class[0]["label"]) if vuln_class else "—"} lidera em volume.') if vuln_class else "Sem achados classificados."
+    body = (
+        f'<div style="padding:20px 0 12px"><div class="eyebrow">04 · Onde está o risco</div>'
+        f'<div class="h2">Risco por classe de vulnerabilidade</div>'
+        f'<div class="lead" style="padding-top:8px">{lead}</div></div>'
+        f'{_v_heat_table(vuln_class, "label", "Classe de vulnerabilidade", cap=18)}'
+        f'<div class="lead" style="padding-top:8px">Cor = risco ponderado (C 10 · A 5 · M 2 · B 1), escala logarítmica. '
+        f'Total inclui achados informativos não exibidos nas colunas de severidade.</div>'
+    )
+    pages.append(("Heatmap por classe", body))
+
+    # ── P6 · Visão de operação (P0/P1) ───────────────────────────────────────
+    p2 = sev["medium"]
+    backlog = sev["low"] + sev["info"]
+    plan_group: dict[str, dict] = {}
+    for f in findings:
+        s = str(f.severity or "info").lower()
+        if s not in ("critical", "high"):
+            continue
+        fam = fam_of[f.id]
+        g = plan_group.setdefault((s, fam), {"sev": s, "fam": fam, "label": family_label(fam),
+                                             "qtd": 0, "hosts": {}, "rec": ""})
+        g["qtd"] += 1
+        h = _host_short(str(f.domain or "—"))
+        g["hosts"][h] = g["hosts"].get(h, 0) + 1
+        if not g["rec"] and f.recommendation:
+            g["rec"] = str(f.recommendation)
+    plan = sorted(plan_group.values(), key=lambda x: (0 if x["sev"] == "critical" else 1, -x["qtd"]))[:8]
+    plan_rows = "".join(
+        f'<div class="tr" style="grid-template-columns:40px minmax(0,1.6fr) minmax(0,1fr) 34px minmax(0,1.7fr);gap:10px;padding:5px 0">'
+        f'<span class="b" style="color:{_PRIO[g["sev"]][1] if _PRIO[g["sev"]][1]!="transparent" else "#201e1d"}">{_PRIO[g["sev"]][0]}</span>'
+        f'<span class="b6 wrap">{e(g["label"])}</span>'
+        f'<span class="wrap muted">{e(", ".join(f"{h} ({n})" for h, n in sorted(g["hosts"].items(), key=lambda kv:-kv[1])[:2]))}</span>'
+        f'<span class="num b">{g["qtd"]}</span>'
+        f'<span class="wrap">{e(_clip(g["rec"] or "Validar e corrigir conforme boas práticas.", 96))}</span></div>'
+        for g in plan
+    ) or '<div class="tr">Não há itens P0/P1 neste ciclo.</div>'
+    body = (
+        f'<div style="padding:14px 0 10px"><div class="eyebrow">05 · Visão de operação</div>'
+        f'<div class="h2">{crit_high} itens P0/P1 resolvem 100% do risco crítico e alto</div></div>'
+        f'<div class="kpis" style="grid-template-columns:repeat(4,1fr)">'
+        f'<div style="padding:10px 14px;background:#7c1405;color:#fff"><div class="up">P0 · emergencial</div>'
+        f'<div style="font-size:34px;font-weight:800;line-height:1.1">{sev["critical"]}</div><div style="font-size:11.5px">SLA proposto ≤ 7 dias</div></div>'
+        f'<div style="padding:10px 14px;background:#dd2b0f;color:#fff"><div class="up">P1 · alta</div>'
+        f'<div style="font-size:34px;font-weight:800;line-height:1.1">{sev["high"]}</div><div style="font-size:11.5px">SLA proposto ≤ 30 dias</div></div>'
+        f'<div style="padding:10px 14px;border-left:2px solid #201e1d"><div class="up muted">P2 · planejada</div>'
+        f'<div style="font-size:34px;font-weight:800;line-height:1.1">{p2}</div><div class="stat-l" style="text-transform:none">SLA proposto ≤ 90 dias</div></div>'
+        f'<div style="padding:10px 14px;border-left:2px solid #201e1d"><div class="up muted">Backlog restante</div>'
+        f'<div style="font-size:34px;font-weight:800;line-height:1.1">{_num(backlog)}</div>'
+        f'<div class="stat-l" style="text-transform:none">baixo + informativo</div></div></div>'
+        f'<div class="up" style="padding:12px 0 5px">Frentes de correção · P0 e P1 agrupados por causa</div>'
+        f'<div class="r2 r2b"><div class="th" style="grid-template-columns:40px minmax(0,1.6fr) minmax(0,1fr) 34px minmax(0,1.7fr);gap:10px">'
+        f'<span>Prio</span><span>Frente</span><span>Ativos</span><span class="num">Qtd</span><span>Ação</span></div>{plan_rows}</div>'
+        f'<div class="lead" style="padding-top:8px">SLAs são proposta de referência, ordenados por severidade e volume real de achados.</div>'
+    )
+    pages.append(("Operação", body))
+
+    # ── P7 · MITRE ATT&CK ────────────────────────────────────────────────────
+    tech: dict[str, dict] = {}
+    for f in findings:
+        m = attack_for_family(fam_of[f.id])
+        if not m:
+            continue
+        s = str(f.severity or "info").lower()
+        slot = tech.setdefault(m["technique"], {"name": m["technique_name"], "tactic": m["tactic_name"],
+                                                "f": 0, "c": 0, "h": 0, "fams": {}})
+        slot["f"] += 1
+        if s == "critical":
+            slot["c"] += 1
+        elif s == "high":
+            slot["h"] += 1
+        slot["fams"][family_label(fam_of[f.id])] = True
+    tech_sorted = sorted(tech.items(), key=lambda kv: (-kv[1]["c"], -kv[1]["f"]))[:8]
+    tech_rows = "".join(
+        f'<div class="tr" style="grid-template-columns:minmax(0,1.2fr) minmax(0,1.5fr) minmax(0,1.6fr) 48px 66px;gap:10px;padding:7px 0'
+        f'{";background:#ffe0d9" if d["c"] else ""}">'
+        f'<span class="b6 wrap">{e(d["tactic"])}</span>'
+        f'<span class="wrap"><b>{e(tid)}</b> {e(d["name"])}</span>'
+        f'<span class="wrap muted">{e(", ".join(list(d["fams"])[:3]))}</span>'
+        f'<span class="num">{d["f"]}</span>'
+        f'<span class="num b" style="color:{"#7c1405" if d["c"] else "#201e1d"}">{d["c"]} · {d["h"]}</span></div>'
+        for tid, d in tech_sorted
+    ) or '<div class="tr">Sem técnicas mapeáveis.</div>'
+    # caminhos alcançáveis (chips)
+    path_rows = ""
+    for p in plist[:6]:
+        steps = p.get("steps") or []
+        chips = ""
+        for i, st in enumerate(steps[:5]):
+            fam = str(st.get("family") or "")
+            lbl = st.get("family_label") or family_label(fam)
+            hot = fam in ("rce", "sqli", "nosql_injection")
+            chips += (f'{"<span>→</span>" if i else ""}<span style="padding:1px 6px;'
+                      f'background:{"#7c1405" if hot else "#eae7e7"};color:{"#fff" if hot else "#201e1d"};'
+                      f'{"font-weight:600" if hot else ""}">{e(str(lbl)[:22])}</span>')
+        extra = f'<span class="muted">+{len(steps) - 5}</span>' if len(steps) > 5 else ""
+        reachable = p.get("objective_reachable")
+        path_rows += (
+            f'<div class="tr" style="grid-template-columns:minmax(0,1.3fr) 84px minmax(0,2.6fr);gap:10px;align-items:center">'
+            f'<span class="b6 wrap">{e(_host_short(str(p.get("target") or "—")))}</span>'
+            f'<span class="up" style="font-size:10px;color:{"#ae1800" if reachable else "#605d5d"}">{"alcançável" if reachable else "mapeado"}</span>'
+            f'<div style="display:flex;flex-wrap:wrap;gap:4px;align-items:center;font-size:11px">{chips}{extra}</div></div>')
+    paths_block = (
+        f'<div class="up" style="padding:16px 0 6px">Caminhos de ataque mapeados '
+        f'<span class="muted" style="text-transform:none;font-weight:400">— {reach} de {len(plist)} alcançável(is)</span></div>'
+        f'<div class="r2 r2b">{path_rows}</div>') if plist else ""
+    body = (
+        f'<div style="padding:20px 0 12px"><div class="eyebrow">06 · Ameaça · MITRE ATT&amp;CK</div>'
+        f'<div class="h2">Técnicas habilitadas pela superfície exposta</div></div>'
+        f'<div class="r2 r2b"><div class="th" style="grid-template-columns:minmax(0,1.2fr) minmax(0,1.5fr) minmax(0,1.6fr) 48px 66px;gap:10px">'
+        f'<span>Tática</span><span>Técnica</span><span>Classes de origem</span><span class="num">Achados</span><span class="num">Crít·Alto</span></div>{tech_rows}</div>'
+        f'<div class="lead" style="padding-top:6px">Mapeamento derivado das classes de vulnerabilidade — indica técnicas '
+        f'habilitadas, não telemetria de ataque.</div>{paths_block}'
+    )
+    pages.append(("MITRE ATT&CK", body))
+
+    # ── P8 · Conformidade NIST/ISO/CIS/PCI ───────────────────────────────────
+    fw_cards = "".join(
+        f'<div style="padding:10px 12px{";border-left:2px solid #201e1d" if i else ""}">'
+        f'<div class="up">{_FW_LABEL.get(k, k)}</div>'
+        f'<div style="display:flex;align-items:baseline;gap:8px">'
+        f'<span style="font-size:30px;font-weight:800;color:{_v_grade_color(str(fw.get("grade")))}">{e(str(fw.get("grade") or "—"))}</span>'
+        f'<span style="font-size:15px;font-weight:600">{float(fw.get("score") or 0):.0f}</span></div></div>'
+        for i, (k, fw) in enumerate((frameworks or {}).items())
+    ) or '<div class="muted" style="padding:10px 0">Notas por framework indisponíveis.</div>'
+    # por família → CSF + regs + crit/high
+    fam_csf: dict[str, dict] = {}
+    for f in findings:
+        fam = fam_of[f.id]
+        c = csf_for_family(fam)
+        key = (c["subcategory"], c["name"]) if c else ("—", family_label(fam))
+        slot = fam_csf.setdefault(key, {"sub": key[0], "name": key[1], "fams": {}, "regs": 0, "c": 0, "h": 0})
+        slot["regs"] += 1
+        slot["fams"][family_label(fam)] = True
+        s = str(f.severity or "info").lower()
+        if s == "critical":
+            slot["c"] += 1
+        elif s == "high":
+            slot["h"] += 1
+    csf_sorted = sorted(fam_csf.values(), key=lambda x: (-x["c"], -x["h"], -x["regs"]))[:9]
+    csf_rows = "".join(
+        f'<div class="tr" style="grid-template-columns:96px minmax(0,2fr) 44px 56px;gap:10px;padding:6px 0'
+        f'{";background:#ffe0d9" if d["c"] else ""}">'
+        f'<span class="b">{e(d["sub"])}</span>'
+        f'<span class="wrap">{e(d["name"])} <span class="muted">· {e(", ".join(list(d["fams"])[:2]))}</span></span>'
+        f'<span class="num">{d["regs"]}</span>'
+        f'<span class="num b" style="color:{"#7c1405" if d["c"] else "#201e1d"}">{d["c"]} · {d["h"]}</span></div>'
+        for d in csf_sorted
+    ) or '<div class="tr">Sem mapeamento de controles.</div>'
+    body = (
+        f'<div style="padding:20px 0 12px"><div class="eyebrow">07 · Conformidade · NIST · ISO · CIS · PCI</div>'
+        f'<div class="h2">Cada classe de achado mapeada ao controle a corrigir</div></div>'
+        f'<div class="kpis" style="grid-template-columns:repeat({max(1,len(frameworks or {}))},1fr)">{fw_cards}</div>'
+        f'<div class="up" style="padding:16px 0 6px">NIST CSF 2.0 · categorias impactadas '
+        f'<span class="muted" style="text-transform:none;font-weight:400">(status = maior severidade associada)</span></div>'
+        f'<div class="r2 r2b"><div class="th" style="grid-template-columns:96px minmax(0,2fr) 44px 56px;gap:10px">'
+        f'<span>Categoria</span><span>Descrição · classes</span><span class="num">Regs</span><span class="num">Crít·Alto</span></div>{csf_rows}</div>'
+        f'<div class="lead" style="padding-top:8px">Notas por framework conforme a plataforma. Mapeamento de categorias '
+        f'derivado das classes de achado; mapa completo ISO/CIS no relatório técnico.</div>'
+    )
+    pages.append(("Conformidade", body))
+
+    # ── P9 · Roadmap + decisões ──────────────────────────────────────────────
+    sys_fams = [c for c in vuln_class if c["family"] in ("misconfiguration", "security_headers", "tls_ssl", "cors") and c["total"]]
+    sys_txt = ", ".join(f'{e(c["label"])} ({c["total"]})' for c in sys_fams[:3]) or "cabeçalhos, TLS e configuração"
+    body = (
+        f'<div style="padding:20px 0 16px"><div class="eyebrow">08 · Plano 90 dias</div>'
+        f'<div class="h2">Conter, corrigir, sustentar</div></div>'
+        f'<div style="display:grid;grid-template-columns:repeat(3,1fr);border-top:2px solid #201e1d;border-bottom:2px solid #201e1d;font-size:13px;line-height:1.45">'
+        f'<div style="padding:14px 14px 16px 0;display:flex;flex-direction:column;gap:8px">'
+        f'<div class="up" style="color:#7c1405">0–7 dias · Conter</div>'
+        f'<div style="font-size:18px;font-weight:800">Eliminar os {sev["critical"]} P0</div>'
+        f'<div style="border-top:1px solid #bab6b6;padding-top:6px">Mitigar/corrigir os achados críticos nos ativos de maior exposição.</div>'
+        f'<div style="border-top:1px solid #bab6b6;padding-top:6px">Revogar segredos expostos e fechar serviços indevidos.</div></div>'
+        f'<div style="padding:14px 14px 16px;border-left:2px solid #201e1d;display:flex;flex-direction:column;gap:8px">'
+        f'<div class="up" style="color:#dd2b0f">8–30 dias · Corrigir</div>'
+        f'<div style="font-size:18px;font-weight:800">Zerar os {sev["high"]} P1</div>'
+        f'<div style="border-top:1px solid #bab6b6;padding-top:6px">Aplicar patches de dependências e hardening de servidores.</div>'
+        f'<div style="border-top:1px solid #bab6b6;padding-top:6px">Reteste de controle de acesso, upload e autenticação.</div></div>'
+        f'<div style="padding:14px 0 16px 14px;border-left:2px solid #201e1d;display:flex;flex-direction:column;gap:8px">'
+        f'<div class="up">31–90 dias · Sustentar</div>'
+        f'<div style="font-size:18px;font-weight:800">Reduzir volume sistêmico</div>'
+        f'<div style="border-top:1px solid #bab6b6;padding-top:6px">Baseline central de configuração e cabeçalhos ({sys_txt}).</div>'
+        f'<div style="border-top:1px solid #bab6b6;padding-top:6px">Hardening de TLS e política de cookies em todas as propriedades.</div></div></div>'
+        f'<div class="up" style="padding:22px 0 8px">Decisões requeridas da liderança</div>'
+        f'<div class="r2">'
+        f'<div class="tr" style="grid-template-columns:36px minmax(0,1fr);gap:12px;align-items:baseline;padding:10px 0">'
+        f'<span class="b" style="font-size:18px;color:#1767E5">A</span><span>Aprovar janela emergencial de mudança para os {sev["critical"]} itens P0.</span></div>'
+        f'<div class="tr" style="grid-template-columns:36px minmax(0,1fr);gap:12px;align-items:baseline;padding:10px 0">'
+        f'<span class="b" style="font-size:18px;color:#1767E5">B</span><span>Definir joias da coroa para ponderar o risco por valor de negócio.</span></div>'
+        f'<div class="tr" style="grid-template-columns:36px minmax(0,1fr);gap:12px;align-items:baseline;padding:10px 0;border-bottom:none">'
+        f'<span class="b" style="font-size:18px;color:#1767E5">C</span><span>Formalizar SLAs por prioridade e dono por ativo.</span></div></div>'
+        f'<div class="kpis" style="grid-template-columns:repeat(3,1fr);margin-top:18px">'
+        f'<div style="padding:10px 12px 10px 0"><div class="stat-l">Críticos → meta</div><div style="font-size:22px;font-weight:800">{sev["critical"]} → 0</div></div>'
+        f'<div style="padding:10px 12px;border-left:2px solid #201e1d"><div class="stat-l">Altos → meta</div><div style="font-size:22px;font-weight:800">{sev["high"]} → 0</div></div>'
+        f'<div style="padding:10px 12px;border-left:2px solid #201e1d"><div class="stat-l">Joias definidas</div><div style="font-size:22px;font-weight:800">{len(jewels)} → ≥ 3</div></div></div>'
+    )
+    pages.append(("Roadmap", body))
+
+    total_pages = 1 + len(pages)
+    cover = _v_cover(company, "Relatório executivo", "Relatório Executivo de Gestão de Vulnerabilidades",
+                     "Caminhos de ataque, priorização e conformidade — visão de decisão",
+                     escopo_c, _v_ref(scan_id).split(" · ")[0], f"Ciclo #{scan_id} · {n_targets} ativos analisados", total_pages)
+    sheets = cover + "".join(_v_sheet(company, sec, body, ref, i + 2, total_pages) for i, (sec, body) in enumerate(pages))
+    return _v_shell(f"Relatório Executivo — {company}", sheets)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# RELATÓRIO TÉCNICO VALID (v2)
+# ──────────────────────────────────────────────────────────────────────────────
+def generate_valid_technical_report(
+    db: "Session",
+    scan_id: int,
+    company_name: str | None = None,
+    previous_scan_id: int | None = None,
+) -> str:
+    from app.services.framework_mapping import attack_for_family, csf_for_family
+    from app.services.vuln_family import clean_finding_title, family_label
+
+    ctx = _v_common(db, scan_id, company_name)
+    if not ctx:
+        return "<html><body><h1>Scan não encontrado</h1></body></html>"
+    e = _html.escape
+    company, sev, grade, score = ctx["company"], ctx["sev"], ctx["grade"], ctx["score"]
+    n_targets, frameworks, surface = ctx["n_targets"], ctx["frameworks"], ctx["surface"]
+    vuln_class, paths = ctx["vuln_class"], ctx["paths"]
+    findings, fam_of, total = ctx["findings"], ctx["fam_of"], ctx["total"]
+    verif, rec_catalog, rec_code = ctx["verif"], ctx["rec_catalog"], ctx["rec_code"]
+    cve_list, classified = ctx["cve_list"], ctx["classified"]
+    ref = _v_ref(scan_id)
+    hosts_n = ctx["hosts_n"] or len({str(f.domain or "").strip().lower() for f in findings if f.domain})
+    crit_high = sev["critical"] + sev["high"]
+    escopo = str(ctx["job"].target_query or "")
+    escopo_c = ", ".join([t.strip() for t in re.split(r"[;,\n]+", escopo) if t.strip()][:2]) or f"scan #{scan_id}"
+    if len(escopo_c) > 46:
+        escopo_c = escopo_c[:45] + "…"
+    ids = [f.id for f in findings]
+    id_lo, id_hi = (min(ids), max(ids)) if ids else (0, 0)
+
+    pages: list[tuple[str, str]] = []
+
+    # ── P2 · Sumário & base ──────────────────────────────────────────────────
+    toc = [
+        ("01", "Risco técnico · severidade × classe"), ("02", "Definição de prioridade"),
+        ("03", "Caminhos de ataque (attack path)"), ("04", "Vulnerabilidades por ativo"),
+        ("05", "Tabela de recomendações"), ("06", "NIST CSF · CIS v8 · ISO 27001"),
+        ("07", "CVEs identificados e dicionário"), ("A", "Anexo · críticos e altos"),
+        ("B", "Anexo · inventário completo"), ("C", "Anexo · catálogo de recomendações"),
+    ]
+    toc_html = "".join(
+        f'<div style="display:flex;gap:12px;align-items:baseline;padding:5px 0;border-bottom:1px solid #d7d3d3">'
+        f'<span class="b" style="font-size:15px;color:#1767E5;min-width:26px">{n}</span>'
+        f'<span class="b6" style="font-size:12.5px;line-height:1.25">{e(t)}</span></div>'
+        for n, t in toc
+    )
+    confirmed = sum(1 for f in findings if str(f.verification_status or "").lower() == "confirmed")
+    hyp = sum(1 for f in findings if str(f.verification_status or "").lower() == "hypothesis")
+    body = (
+        f'<div style="padding:16px 0 12px"><div class="eyebrow">Sumário</div>'
+        f'<div class="h1" style="font-size:28px;margin-top:4px">Conteúdo técnico</div></div>'
+        f'<div class="r2 r2b" style="display:grid;grid-template-columns:1fr 1fr;gap:0 28px">{toc_html}</div>'
+        f'<div class="up" style="padding:14px 0 6px">Base de dados desta análise</div>'
+        f'<div class="kpis" style="grid-template-columns:repeat(4,1fr)">'
+        f'<div style="padding:10px 12px 10px 0"><div class="stat-l">Registros</div>'
+        f'<div style="font-size:28px;font-weight:800;line-height:1.1">{_num(total)}</div>'
+        f'<div class="stat-l" style="text-transform:none">IDs {id_lo}–{id_hi}</div></div>'
+        f'<div style="padding:10px 12px;border-left:2px solid #201e1d"><div class="stat-l">Hosts</div>'
+        f'<div style="font-size:28px;font-weight:800;line-height:1.1">{hosts_n}</div>'
+        f'<div class="stat-l" style="text-transform:none">de {ctx["scope_n"] or n_targets} no escopo</div></div>'
+        f'<div style="padding:10px 12px;border-left:2px solid #201e1d"><div class="stat-l">Críticos + altos</div>'
+        f'<div style="font-size:28px;font-weight:800;line-height:1.1;color:#ae1800">{crit_high}</div>'
+        f'<div class="stat-l" style="text-transform:none">{sev["critical"]} críticos · {sev["high"]} altos</div></div>'
+        f'<div style="padding:10px 12px;border-left:2px solid #201e1d"><div class="stat-l">Confirmados</div>'
+        f'<div style="font-size:28px;font-weight:800;line-height:1.1">{confirmed}</div>'
+        f'<div class="stat-l" style="text-transform:none">{hyp} hipóteses</div></div></div>'
+        f'<div class="lead" style="padding-top:8px">Fonte: findings reais do scan #{scan_id}. Rating consolidado '
+        f'<b>{score:.0f} · {grade}</b> (densidade por alvo). Excluídos falsos-positivos e execuções simuladas (BAS).</div>'
+    )
+    pages.append(("Sumário e base", body))
+
+    # ── P3 · Risco técnico (heatmap família × severidade, com Info) ──────────
+    body = (
+        f'<div style="padding:20px 0 12px"><div class="eyebrow">01 · Risco técnico</div>'
+        f'<div class="h2">Distribuição de severidade e classes de maior risco</div></div>'
+        f'{_v_distribution_bar(sev)}'
+        f'<div class="up" style="padding:12px 0 6px">Heatmap · família × severidade '
+        f'<span class="muted" style="text-transform:none;font-weight:400">(cor = risco ponderado, escala log)</span></div>'
+        f'{_v_heat_table(vuln_class, "label", "Família", keys=("critical","high","medium","low","info"), cap=19, height="26px")}'
+    )
+    pages.append(("Risco técnico", body))
+
+    # ── P4 · Definição de prioridade ─────────────────────────────────────────
+    prio_rows = "".join(
+        f'<div class="tr" style="grid-template-columns:52px 104px minmax(0,1.8fr) 84px 52px;gap:10px;padding:7px 0">'
+        f'<span class="sev" style="background:{_PRIO[s][1] if _PRIO[s][1]!="transparent" else "#eae7e7"};color:{_PRIO[s][2]};'
+        f'{"box-shadow:inset 0 0 0 1px #201e1d" if _PRIO[s][1]=="transparent" else ""}">{_PRIO[s][0]}</span>'
+        f'<span>{_SEV_PT[s]}</span><span class="wrap">{crit}</span>'
+        f'<span class="b6">{_PRIO[s][3]}</span><span class="num b">{sev[s]}</span></div>'
+        for s, crit in (("critical", "CVSS ≥ 9.0, exploração remota sem autenticação"),
+                        ("high", "CVSS 7.0–8.9, ou alto com evidência em ativo de negócio"),
+                        ("medium", "CVSS 4.0–6.9; correções sistêmicas de configuração"),
+                        ("low", "CVSS &lt; 4.0; tratar em janela de manutenção"),
+                        ("info", "Observação de segurança; monitorar recorrência"))
+    )
+    vmax = 0
+    for s in _SEV_KEYS:
+        for v in ("confirmed", "hypothesis", "candidate"):
+            vmax = max(vmax, verif[s][v])
+    vrows = "".join(
+        f'<div class="tr" style="grid-template-columns:minmax(0,1.2fr) repeat(3,minmax(0,1fr)) 56px;gap:3px;padding-bottom:3px;border-bottom:none">'
+        f'<span class="b6" style="align-self:center;font-size:13px">{_SEV_PT[s]}</span>'
+        + "".join(_v_heat(verif[s][v], 1.0, vmax, "34px") for v in ("confirmed", "hypothesis", "candidate"))
+        + f'<span class="num b" style="align-self:center">{sum(verif[s].values())}</span></div>'
+        for s in _SEV_KEYS
+    )
+    body = (
+        f'<div style="padding:20px 0 12px"><div class="eyebrow">02 · Definição de prioridade</div>'
+        f'<div class="h2">Severidade define a fila; verificação define o 1º passo</div></div>'
+        f'<div class="up" style="padding-bottom:5px">Regra de priorização (SLA de referência)</div>'
+        f'<div class="r2 r2b"><div class="th" style="grid-template-columns:52px 104px minmax(0,1.8fr) 84px 52px;gap:10px">'
+        f'<span>Prio</span><span>Severidade</span><span>Critério</span><span>SLA</span><span class="num">Qtd</span></div>{prio_rows}</div>'
+        f'<div class="up" style="padding:16px 0 5px">Matriz severidade × estado de verificação '
+        f'<span class="muted" style="text-transform:none;font-weight:400">(cor = volume, log)</span></div>'
+        f'<div class="r2 r2b"><div class="th" style="grid-template-columns:minmax(0,1.2fr) repeat(3,minmax(0,1fr)) 56px;gap:3px">'
+        f'<span>Severidade</span><span>Confirmado</span><span>Hipótese</span><span>Candidato</span><span class="num">Total</span></div>{vrows}</div>'
+        f'<div class="lead" style="padding-top:8px"><b>Leitura:</b> {crit_high - confirmed} de {crit_high} críticos/altos ainda '
+        f'não confirmados — o 1º passo técnico para P0/P1 é validar e, confirmado, corrigir no SLA.</div>'
+    )
+    pages.append(("Prioridade", body))
+
+    # ── P5 · Attack path ─────────────────────────────────────────────────────
+    plist = paths.get("paths") or []
+    path_cards = ""
+    for p in plist[:6]:
+        steps = p.get("steps") or []
+        crit_here = sum(1 for st in steps if str(st.get("severity")) == "critical")
+        seq = ""
+        for i, st in enumerate(steps[:4]):
+            fam = str(st.get("family") or "")
+            lbl = st.get("family_label") or family_label(fam)
+            hot = fam in ("rce", "sqli", "nosql_injection")
+            seq += (f'<div style="border:2px solid {"#7c1405" if hot else "#201e1d"};'
+                    f'{"background:#7c1405;color:#fff;" if hot else ""}{"border-left:none;" if i else ""}padding:6px 8px;font-size:11px;line-height:1.3">'
+                    f'<div class="b">{e(str(lbl)[:24])}</div><div style="{"color:#605d5d" if not hot else ""}">{e(str(st.get("technique") or ""))}</div></div>')
+        reach = p.get("objective_reachable")
+        path_cards += (
+            f'<div class="r2" style="padding:10px 0 12px;display:flex;flex-direction:column;gap:8px">'
+            f'<div style="display:flex;justify-content:space-between;align-items:baseline">'
+            f'<span style="font-size:15px;font-weight:800">{e(str(p.get("target") or "—"))}</span>'
+            f'<span class="up" style="font-size:10px;color:{"#ae1800" if reach else "#605d5d"}">'
+            f'{"alcançável" if reach else "mapeado"}{f" · {crit_here} crítico(s)" if crit_here else ""}</span></div>'
+            f'<div style="display:grid;grid-template-columns:repeat({max(1,min(4,len(steps)))},1fr)">{seq}</div></div>')
+    if not plist:
+        path_cards = '<div class="r2" style="padding:12px 0"><span class="muted">Nenhum caminho de ataque correlacionado neste ciclo.</span></div>'
+    body = (
+        f'<div style="padding:20px 0 12px"><div class="eyebrow">03 · Caminhos de ataque</div>'
+        f'<div class="h2">Cadeias correlacionadas por ativo</div>'
+        f'<div class="lead" style="padding-top:8px">{paths.get("objectives_reachable", 0)} objetivo(s) alcançável(is) de '
+        f'{len(plist)} caminho(s) mapeado(s). Técnicas MITRE derivadas da classe de cada etapa.</div></div>'
+        f'{path_cards}'
+    )
+    pages.append(("Attack path", body))
+
+    # ── P6 · Vulnerabilidades por ativo ──────────────────────────────────────
+    perfil = ""
+    for r in surface[:11]:
+        fams_here: dict[str, int] = {}
+        for f in findings:
+            if str(f.domain or "").strip() == r["host"]:
+                fams_here[family_label(fam_of[f.id])] = fams_here.get(family_label(fam_of[f.id]), 0) + 1
+        top = sorted(fams_here.items(), key=lambda kv: -kv[1])[:4]
+        perfil += (f'<div class="tr" style="grid-template-columns:120px minmax(0,1fr);gap:10px;padding:5px 0">'
+                   f'<span class="b wrap">{e(_host_short(r["host"]))}</span>'
+                   f'<span class="wrap">{e(" · ".join(f"{lbl} {n}" for lbl, n in top))}</span></div>')
+    body = (
+        f'<div style="padding:20px 0 12px"><div class="eyebrow">04 · Vulnerabilidades por ativo</div>'
+        f'<div class="h2">Concentração por host · severidade e perfil de classe</div></div>'
+        f'{_v_heat_table(surface, "host", "Ativo", keys=("critical","high","medium","low","info"), cap=11, name_short=True, height="28px")}'
+        f'<div class="up" style="padding:14px 0 5px">Perfil técnico por ativo</div>'
+        f'<div class="r2 r2b">{perfil or "<div class=tr>Sem ativos.</div>"}</div>'
+    )
+    pages.append(("Por ativo", body))
+
+    # ── P7 · Recomendações (top agrupadas) ───────────────────────────────────
+    # cada recomendação: severidade máx entre os achados, famílias, hosts
+    rec_meta: dict[str, dict] = {}
+    for f in findings:
+        rec = str(f.recommendation or "").strip()
+        if not rec:
+            continue
+        m = rec_meta.setdefault(rec, {"code": rec_code[rec], "regs": 0, "sev": "info", "fams": {}, "hosts": set()})
+        m["regs"] += 1
+        s = str(f.severity or "info").lower()
+        if _severity_order(s) < _severity_order(m["sev"]):
+            m["sev"] = s
+        m["fams"][family_label(fam_of[f.id])] = True
+        if f.domain:
+            m["hosts"].add(_host_short(str(f.domain)))
+    rec_top = sorted(rec_meta.values(), key=lambda x: (-x["regs"], x["code"]))[:12]
+    rec_rows = "".join(
+        f'<div class="tr" style="grid-template-columns:40px minmax(0,2.2fr) minmax(0,1.3fr) 44px 44px;gap:10px;padding:7px 0">'
+        f'<span class="sev" style="background:{_SEV_CELL[m["sev"]]};color:{_SEV_FG[m["sev"]]}">{_PRIO[m["sev"]][0]}</span>'
+        f'<span class="wrap"><b>{e(m["code"])}</b> {e(_rec_title(_find_rec_text(rec_catalog, m["code"])))}</span>'
+        f'<span class="wrap muted">{e(", ".join(list(m["fams"])[:2]))}</span>'
+        f'<span class="num b">{m["regs"]}</span><span class="num">{len(m["hosts"])}</span></div>'
+        for m in rec_top
+    ) or '<div class="tr">Sem recomendações registradas.</div>'
+    body = (
+        f'<div style="padding:20px 0 12px"><div class="eyebrow">05 · Tabela de recomendações</div>'
+        f'<div class="h2">Ações que cobrem o maior volume de achados</div></div>'
+        f'<div class="r2 r2b"><div class="th" style="grid-template-columns:40px minmax(0,2.2fr) minmax(0,1.3fr) 44px 44px;gap:10px">'
+        f'<span>Prio</span><span>Recomendação</span><span>Famílias</span><span class="num">Regs</span><span class="num">Hosts</span></div>{rec_rows}</div>'
+        f'<div class="lead" style="padding-top:8px">Prio = maior severidade entre os achados da recomendação. '
+        f'Catálogo completo ({len(rec_catalog)} recomendações) no Anexo C.</div>'
+    )
+    pages.append(("Recomendações", body))
+
+    # ── P8 · NIST/CIS/ISO ────────────────────────────────────────────────────
+    fw_cards = "".join(
+        f'<div style="padding:8px 12px{";border-left:2px solid #201e1d" if i else ""};display:flex;justify-content:space-between;align-items:baseline">'
+        f'<span class="up">{_FW_LABEL.get(k, k)}</span>'
+        f'<span><span style="font-size:24px;font-weight:800;color:{_v_grade_color(str(fw.get("grade")))}">{e(str(fw.get("grade") or "—"))}</span> '
+        f'<span class="b6">{float(fw.get("score") or 0):.0f}</span></span></div>'
+        for i, (k, fw) in enumerate((frameworks or {}).items())
+    ) or '<div class="muted" style="padding:8px 0">Indisponível.</div>'
+    fam_map: dict[str, dict] = {}
+    for f in findings:
+        fam = fam_of[f.id]
+        c = csf_for_family(fam)
+        iso, cis = _FAMILY_ISO_CIS.get(fam, ("—", "—"))
+        slot = fam_map.setdefault(fam, {"label": family_label(fam), "csf": (c["subcategory"] if c else "—"),
+                                        "iso": iso, "cis": cis, "regs": 0, "c": 0, "h": 0})
+        slot["regs"] += 1
+        s = str(f.severity or "info").lower()
+        if s == "critical":
+            slot["c"] += 1
+        elif s == "high":
+            slot["h"] += 1
+    fam_rows_l = sorted(fam_map.values(), key=lambda x: (-x["c"], -x["h"], -x["regs"]))[:12]
+    fam_rows = "".join(
+        f'<div class="tr" style="grid-template-columns:minmax(0,1.5fr) minmax(0,0.9fr) minmax(0,1fr) minmax(0,0.9fr) 40px 50px;gap:8px;padding:6px 0'
+        f'{";background:#ffe0d9" if d["c"] else ""}">'
+        f'<span class="b6 wrap">{e(d["label"])}</span><span class="wrap">{e(d["csf"])}</span>'
+        f'<span class="wrap">{e(d["cis"])}</span><span class="wrap">{e(d["iso"])}</span>'
+        f'<span class="num">{d["regs"]}</span>'
+        f'<span class="num b" style="color:{"#7c1405" if d["c"] else "#201e1d"}">{d["c"]}·{d["h"]}</span></div>'
+        for d in fam_rows_l
+    ) or '<div class="tr">Sem mapeamento.</div>'
+    body = (
+        f'<div style="padding:20px 0 12px"><div class="eyebrow">06 · NIST · CIS · ISO</div>'
+        f'<div class="h2">Cada família mapeada ao controle a corrigir</div></div>'
+        f'<div class="kpis" style="grid-template-columns:repeat({max(1,len(frameworks or {}))},1fr)">{fw_cards}</div>'
+        f'<div class="r2 r2b" style="margin-top:12px"><div class="th" style="grid-template-columns:minmax(0,1.5fr) minmax(0,0.9fr) minmax(0,1fr) minmax(0,0.9fr) 40px 50px;gap:8px">'
+        f'<span>Família (classe)</span><span>NIST CSF</span><span>CIS v8</span><span>ISO 27001</span><span class="num">Regs</span><span class="num">C·A</span></div>{fam_rows}</div>'
+        f'<div class="lead" style="padding-top:8px">Notas por framework conforme a plataforma. Mapeamento de controles '
+        f'derivado das classes; status = maior severidade associada.</div>'
+    )
+    pages.append(("NIST · CIS · ISO", body))
+
+    # ── P9 · CVEs + dicionário ───────────────────────────────────────────────
+    cve_rows = "".join(
+        f'<div class="tr" style="grid-template-columns:120px minmax(0,2fr) 90px 64px 44px;gap:10px;padding:5px 0">'
+        f'<span class="b wrap">{e(c["cve"])}</span><span class="wrap">{e(clean_finding_title(c["title"])[:90])}</span>'
+        f'<span class="wrap">{e(_host_short(c["host"]))}</span>{_v_sev(c["severity"])}'
+        f'<span class="num b">{(f"{c["cvss"]:.1f}" if c["cvss"] else "—")}</span></div>'
+        for c in cve_list[:12]
+    ) or '<div class="tr">Nenhum CVE público identificado neste ciclo.</div>'
+    dic = [
+        ("id · scan_id", "Identificador do registro e do ciclo de varredura."),
+        ("host · domínio", "Ativo onde o achado foi observado."),
+        ("vulnerabilidade", "Descrição do achado, incluindo path/parâmetro afetado."),
+        ("família", "Classe canônica de vulnerabilidade."),
+        ("severidade · cvss", "critical/high/medium/low/info · pontuação CVSS v3 quando disponível."),
+        ("cve", "Identificador público, quando o achado corresponde a um CVE."),
+        ("verificação", "<b>confirmed</b> reproduzido · <b>hypothesis</b> inferido por versão/banner · <b>candidate</b> detecção automática pendente de validação."),
+        ("recomendação", "Ação corretiva sugerida (código R## no catálogo do Anexo C)."),
+    ]
+    dic_html = "".join(
+        f'<div class="tr" style="grid-template-columns:120px minmax(0,1fr);gap:10px;padding:4px 0">'
+        f'<span class="b">{e(k)}</span><span class="wrap">{v}</span></div>' for k, v in dic
+    )
+    body = (
+        f'<div style="padding:20px 0 12px"><div class="eyebrow">07 · CVEs identificados</div>'
+        f'<div class="h2">{len(cve_list)} CVE(s) público(s) no ciclo</div></div>'
+        f'<div class="r2 r2b"><div class="th" style="grid-template-columns:120px minmax(0,2fr) 90px 64px 44px;gap:10px">'
+        f'<span>CVE</span><span>Descrição</span><span>Host</span><span>Sev</span><span class="num">CVSS</span></div>{cve_rows}</div>'
+        f'<div class="up" style="color:#1767E5;padding:16px 0 5px">Dicionário do inventário</div>'
+        f'<div class="r2 r2b">{dic_html}</div>'
+    )
+    pages.append(("CVEs e dicionário", body))
+
+    # ── Anexo A · críticos e altos ───────────────────────────────────────────
+    crit_high_f = [f for f in findings if str(f.severity or "").lower() in ("critical", "high")]
+    crit_high_f.sort(key=lambda f: (_severity_order(str(f.severity or "info").lower()),
+                                    -(_finding_cvss_num(f) or 0.0), f.id))
+    _GT_A = "40px 58px minmax(0,1fr) minmax(0,2.6fr) 40px 74px"
+    hdr_a = (f'<div class="th" style="grid-template-columns:{_GT_A};gap:8px">'
+             f'<span>ID</span><span>Sev</span><span>Host</span><span>Vulnerabilidade</span>'
+             f'<span class="num">CVSS</span><span>Verificação</span></div>')
+
+    def _row_a(f):
+        return (f'<div class="tr" style="grid-template-columns:{_GT_A};gap:8px;font-size:10.5px;padding:4px 0">'
+                f'<span class="muted">{f.id}</span>{_v_sev(str(f.severity or "info").lower())}'
+                f'<span class="b6 wrap">{e(_host_short(str(f.domain or "—")))}</span>'
+                f'<span class="wrap">{e(clean_finding_title(f.title)[:96])}</span>'
+                f'<span class="num b6">{_finding_cvss(f)}</span>'
+                f'<span class="muted">{_VERIF_PT.get(str(f.verification_status or "candidate").lower(), "Candidato")}</span></div>')
+    for pi, chunk in enumerate(_chunk(crit_high_f, 20)):
+        rows = "".join(_row_a(f) for f in chunk)
+        body = (
+            f'<div style="padding:16px 0 10px"><div class="eyebrow">Anexo A · críticos e altos</div>'
+            f'<div class="h2sm">{len(crit_high_f)} registros P0/P1 do inventário</div></div>'
+            f'<div class="r2 r2b">{hdr_a}{rows}</div>')
+        pages.append((f"Anexo A · {pi + 1}", body))
+    if not crit_high_f:
+        pages.append(("Anexo A", '<div style="padding:20px 0"><div class="eyebrow">Anexo A · críticos e altos</div>'
+                                 '<div class="h2sm">Nenhum achado crítico ou alto neste ciclo.</div></div>'))
+
+    # ── Anexo B · inventário completo (paginado) ─────────────────────────────
+    _GT_B = "34px 40px 62px minmax(0,1fr) 28px 58px 28px"
+    hdr_b = (f'<div class="th" style="grid-template-columns:{_GT_B};gap:6px;font-size:9px">'
+             f'<span>ID</span><span>Sev</span><span>Host</span><span>Vulnerabilidade · família · CVE · URL</span>'
+             f'<span class="num">CVSS</span><span>Verif.</span><span>Rec.</span></div>')
+
+    def _row_b(f):
+        fam = family_label(fam_of[f.id])
+        url = str(f.url or f.domain or "")
+        cve_bit = f' · {e(str(f.cve).upper())}' if (f.cve and str(f.cve).upper().startswith("CVE-")) else ""
+        rec = str(f.recommendation or "").strip()
+        code = rec_code.get(rec, "—")
+        return (f'<div class="tr" style="grid-template-columns:{_GT_B};gap:6px;font-size:9.5px;line-height:1.25;padding:4px 0">'
+                f'<span class="muted">{f.id}</span>{_v_sev(str(f.severity or "info").lower(), abbr=True)}'
+                f'<span class="b6 wrap">{e(_host_short(str(f.domain or "—")))}</span>'
+                f'<span class="wrap" style="display:flex;flex-direction:column;gap:1px">'
+                f'<span>{e(clean_finding_title(f.title)[:150])}</span>'
+                f'<span style="font-size:8.5px;color:#605d5d">{e(fam)}{cve_bit} · {e(url[:60])}</span></span>'
+                f'<span class="num b6">{_finding_cvss(f)}</span>'
+                f'<span class="muted">{_VERIF_PT.get(str(f.verification_status or "candidate").lower(), "Candidato")}</span>'
+                f'<span class="b" style="color:#1767E5">{e(code)}</span></div>')
+    b_chunks = list(_chunk(findings, 20))
+    for pi, chunk in enumerate(b_chunks):
+        rows = "".join(_row_b(f) for f in chunk)
+        first_id = chunk[0].id if chunk else 0
+        last_id = chunk[-1].id if chunk else 0
+        head_extra = (f'<div style="padding:14px 0 8px"><div class="eyebrow">Anexo B · inventário completo</div>'
+                      f'<div class="h2sm">Todas as {total} vulnerabilidades, sem omissões</div>'
+                      f'<div class="lead" style="padding-top:4px">Texto integral do achado, família, CVE, URL e código da '
+                      f'recomendação (catálogo no Anexo C).</div></div>') if pi == 0 else (
+            f'<div style="padding:14px 0 8px;display:flex;justify-content:space-between;align-items:baseline">'
+            f'<div class="eyebrow">Anexo B · inventário completo</div>'
+            f'<span class="small muted">IDs {first_id}–{last_id}</span></div>')
+        body = f'{head_extra}<div class="r2 r2b">{hdr_b}{rows}</div>'
+        pages.append((f"Anexo B · {pi + 1}/{len(b_chunks)}", body))
+
+    # ── Anexo C · catálogo de recomendações ──────────────────────────────────
+    _GT_C = "40px minmax(0,1fr) 54px"
+    hdr_c = (f'<div class="th" style="grid-template-columns:{_GT_C};gap:10px;font-size:9px">'
+             f'<span>Código</span><span>Recomendação (texto integral)</span><span class="num">Registros</span></div>')
+
+    def _row_c(code, txt, cnt):
+        return (f'<div class="tr" style="grid-template-columns:{_GT_C};gap:10px;font-size:10.5px;line-height:1.3;padding:5px 0">'
+                f'<span class="b" style="color:#1767E5">{e(code)}</span><span class="wrap">{e(txt)}</span>'
+                f'<span class="num b6">{cnt}</span></div>')
+    c_chunks = list(_chunk(rec_catalog, 26))
+    for pi, chunk in enumerate(c_chunks):
+        rows = "".join(_row_c(code, txt, cnt) for code, txt, cnt in chunk)
+        head = (f'<div style="padding:14px 0 8px"><div class="eyebrow">Anexo C · catálogo de recomendações</div>'
+                f'<div class="h2sm">{len(rec_catalog)} recomendações distintas, por volume</div></div>') if pi == 0 else (
+            f'<div style="padding:14px 0 8px"><div class="eyebrow">Anexo C · catálogo de recomendações</div></div>')
+        body = f'{head}<div class="r2 r2b">{hdr_c}{rows}</div>'
+        pages.append((f"Anexo C · {pi + 1}/{max(1,len(c_chunks))}", body))
+    if not rec_catalog:
+        pages.append(("Anexo C", '<div style="padding:20px 0"><div class="eyebrow">Anexo C</div>'
+                                 '<div class="h2sm">Nenhuma recomendação textual registrada.</div></div>'))
+
+    total_pages = 1 + len(pages)
+    cover = _v_cover(company, "Relatório técnico", "Relatório Técnico de Gestão de Vulnerabilidades",
+                     "Caminhos de ataque, priorização, recomendações e inventário por ativo",
+                     escopo_c, _v_ref(scan_id).split(" · ")[0],
+                     f"Scan #{scan_id} · {total} registros · {hosts_n} hosts", total_pages)
+    sheets = cover + "".join(_v_sheet(company, sec, body, ref, i + 2, total_pages) for i, (sec, body) in enumerate(pages))
+    return _v_shell(f"Relatório Técnico — {company}", sheets)
+
+
+def _chunk(seq, size):
+    seq = list(seq)
+    for i in range(0, len(seq), size):
+        yield seq[i:i + size]
+
+
+def _find_rec_text(catalog, code):
+    for c, txt, _cnt in catalog:
+        if c == code:
+            return txt
+    return ""
+
+
+def _rec_title(txt: str) -> str:
+    """Primeira sentença/curto rótulo da recomendação, p/ a tabela resumida."""
+    t = str(txt or "").strip()
+    for sep in (". ", "; ", ": "):
+        if sep in t:
+            head = t.split(sep)[0]
+            if 8 <= len(head) <= 90:
+                return head
+    return t[:110]

@@ -5615,9 +5615,42 @@ def export_findings_csv(
         lc = _build_finding_lifecycle_status_map(rows)
         rows = [f for f in rows if lc.get(f.id, "open") == status_filter.strip().lower()]
 
+    _CVSS_FLOOR = {"critical": 9.0, "high": 7.0, "medium": 4.0, "low": 0.1, "info": 0.0}
+
+    def _cvss_band(score: float) -> str:
+        return ("critical" if score >= 9.0 else "high" if score >= 7.0
+                else "medium" if score >= 4.0 else "low" if score >= 0.1 else "info")
+
+    def _csv_cvss(f: Finding) -> str:
+        """CVSS numérico SEMPRE coerente com a severidade. Usa o valor MEDIDO
+        quando existe e cai na faixa da severidade (coluna cvss, details['cvss']
+        ou details['adjudicated_cvss']['score']); senão traduz a severidade para o
+        piso da faixa CVSS v3 (crít 9.0 · alto 7.0 · médio 4.0 · baixo 0.1 ·
+        info 0.0), de modo que o número reclassifique de volta à MESMA severidade.
+        O piso é derivado da severidade, não uma medição."""
+        sev = str(f.severity or "").strip().lower()
+        measured = None
+        d = f.details if isinstance(f.details, dict) else {}
+        adj = d.get("adjudicated_cvss")
+        for v in (f.cvss, d.get("cvss"), adj.get("score") if isinstance(adj, dict) else None):
+            if v is None or str(v).strip() == "":
+                continue
+            try:
+                measured = float(v)
+                break
+            except (TypeError, ValueError):
+                continue
+        if measured is not None and (sev not in _CVSS_FLOOR or _cvss_band(measured) == sev):
+            return f"{measured:.1f}"
+        if sev in _CVSS_FLOOR:
+            return f"{_CVSS_FLOOR[sev]:.1f}"
+        return f"{measured:.1f}" if measured is not None else ""
+
     _SEV_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
     out = io.StringIO()
-    writer = csv.writer(out)
+    # Delimitador ';' + BOM UTF-8: abre corretamente no Excel pt-BR (colunas
+    # separadas e acentos preservados), continuando CSV válido para parsers.
+    writer = csv.writer(out, delimiter=";")
     writer.writerow(["id", "scan_id", "alvo", "subdominio", "host", "vulnerabilidade",
                      "familia", "severidade", "cvss", "cve", "verificacao", "url", "recomendacao"])
 
@@ -5643,12 +5676,12 @@ def export_findings_csv(
             (f.scan_job.target_query if f.scan_job else "") or "",
             loc.get("subdomain") or "", host,
             (f.title or ""), family_label(fam), (f.severity or ""),
-            (f"{float(f.cvss):.1f}" if f.cvss is not None else ""),
+            _csv_cvss(f),
             (f.cve or ""), (f.verification_status or ""),
             (loc.get("url") or f.url or ""), (f.recommendation or ""),
         ])
 
-    csv_text = out.getvalue()
+    csv_text = "﻿" + out.getvalue()
     scope = f"scan{scan_id}" if scan_id else (re.sub(r"[^a-zA-Z0-9]+", "_", target)[:30] if target else "todos")
     return Response(
         content=csv_text, media_type="text/csv; charset=utf-8",
@@ -11108,7 +11141,31 @@ def get_valid_executive_report(
     return Response(
         content=html,
         media_type="text/html; charset=utf-8",
-        headers={"Content-Disposition": f'inline; filename="relatorio-valid-executivo-scan{scan_id}.html"'},
+        headers={"Content-Disposition": f'inline; filename="relatorio-executivo-scan{scan_id}.html"'},
+    )
+
+
+@router.get("/scans/{scan_id}/valid-technical-report", response_class=Response)
+def get_valid_technical_report(
+    scan_id: int,
+    company: str | None = Query(default=None, description="Nome da empresa dona do relatório (capa/cabeçalho)"),
+    previous_scan_id: int | None = Query(default=None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Relatório Técnico v2 (HTML) no design VALID, com o nome da empresa na capa e
+    100% dado real da plataforma (inventário completo, attack paths, MITRE/NIST/CIS/ISO,
+    CVEs e catálogo de recomendações). `company` sobrepõe o nome do grupo de acesso."""
+    job = _authorized_scan_query(db, current_user).filter(ScanJob.id == scan_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Scan não encontrado")
+    from app.services.report_generator import generate_valid_technical_report
+
+    html = generate_valid_technical_report(db, scan_id, company_name=company, previous_scan_id=previous_scan_id)
+    return Response(
+        content=html,
+        media_type="text/html; charset=utf-8",
+        headers={"Content-Disposition": f'inline; filename="relatorio-tecnico-scan{scan_id}.html"'},
     )
 
 
