@@ -260,13 +260,16 @@ def compute_fair_metrics(severity: str | None, confidence_score: int | None, det
 
 
 def _grade_from_score(score: float) -> str:
-    if score >= 90:
+    # Bandas de postura de segurança (estilo rating externo), calibradas para
+    # densidade por alvo: ~68 = C (postura mediana), não D. Antes 90/80/70/60
+    # empurrava posturas medianas para D/F.
+    if score >= 85:
         return "A"
-    if score >= 80:
-        return "B"
     if score >= 70:
+        return "B"
+    if score >= 55:
         return "C"
-    if score >= 60:
+    if score >= 40:
         return "D"
     return "F"
 
@@ -336,9 +339,17 @@ def compute_continuous_rating(
     persistence_score = max(0.0, 100.0 - persistence_penalty)
 
     # ── Fator 3: Impacto Econômico (FAIR) ─────────────────────────────────────
-    # ALE total em USD via log10: R$1M ≈ -16pts de penalidade base
-    ale_penalty = min(100.0, math.log10(max(1.0, float(fair_ale_total_usd) + 1.0)) * 16.5)
-    economic_score = max(0.0, min(100.0, float(fair_avg_score) - (ale_penalty * 0.35)))
+    # ALE POR ALVO (densidade), não o somatório — senão superfícies grandes somam
+    # dezenas de milhões e saturam a penalidade a 0. Calibração conforme a intenção
+    # documentada (R$1M/alvo ≈ 16pts): log10(ALE/alvo) × 2.67. O multiplicador
+    # anterior (×16.5) + base fair_avg_score zeravam o fator para qualquer ALE real.
+    ale_per_target = float(fair_ale_total_usd) / _n
+    ale_penalty = min(60.0, math.log10(max(1.0, ale_per_target + 1.0)) * 2.67)
+    economic_score = max(0.0, min(100.0, 100.0 - ale_penalty))
+    # FAIR pode não estar populado (fair_avg_score=0 e ALE=0). Nesse caso o fator
+    # NÃO tem dado — não deve valer nota zero (pior caso) e arrastar o rating para
+    # "F"; será excluído da média ponderada abaixo (ausência de dado ≠ pior nota).
+    economic_has_data = bool(float(fair_avg_score) > 0.0 or float(fair_ale_total_usd) > 0.0)
 
     # ── Fator 4: Resiliência Operacional ─────────────────────────────────────
     correction_ratio = total_corrected / max(1, total_open + total_corrected)
@@ -380,6 +391,7 @@ def compute_continuous_rating(
             "weight": w_eco,
             "score": round(economic_score, 2),
             "impact_points": round((100.0 - economic_score) * w_eco, 2),
+            "has_data": economic_has_data,
             "evidence": {
                 "fair_avg_score": round(float(fair_avg_score), 2),
                 "ale_total_usd": round(float(fair_ale_total_usd), 2),
@@ -399,7 +411,11 @@ def compute_continuous_rating(
         },
     ]
 
-    final_score = sum(float(f["score"]) * float(f["weight"]) for f in factors)
+    # Média ponderada APENAS sobre fatores com dado — renormaliza os pesos para
+    # que um fator ausente (ex.: FAIR não populado) não conte como nota zero.
+    _scored = [f for f in factors if f.get("has_data", True)]
+    _weight_sum = sum(float(f["weight"]) for f in _scored) or 1.0
+    final_score = sum(float(f["score"]) * float(f["weight"]) for f in _scored) / _weight_sum
     final_score = max(0.0, min(100.0, round(final_score, 2)))
 
     return {

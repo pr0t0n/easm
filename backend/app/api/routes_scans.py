@@ -609,14 +609,16 @@ def _risk_text(severity: str, confidence_score: int | float | None = None) -> st
 
 
 def _score_to_grade(score: float) -> str:
+    # Bandas alinhadas a _grade_from_score (risk_service) — densidade por alvo:
+    # ~68 = C. Mantém cockpit, relatório e dashboard consistentes.
     val = float(score or 0.0)
-    if val >= 90:
+    if val >= 85:
         return "A"
-    if val >= 80:
-        return "B"
     if val >= 70:
+        return "B"
+    if val >= 55:
         return "C"
-    if val >= 60:
+    if val >= 40:
         return "D"
     return "F"
 

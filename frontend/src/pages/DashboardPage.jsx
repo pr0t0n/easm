@@ -24,18 +24,20 @@ function aggregationLabel(mode) {
 }
 
 function gradeFromScore(score) {
+  // Bandas alinhadas ao backend (_grade_from_score / _score_to_grade): densidade
+  // por alvo, ~68 = C. Antes 90/80/70/60 empurrava posturas medianas para F.
   const s = Number(score || 0);
-  if (s >= 90) return "A";
-  if (s >= 80) return "B";
-  if (s >= 70) return "C";
-  if (s >= 60) return "D";
+  if (s >= 85) return "A";
+  if (s >= 70) return "B";
+  if (s >= 55) return "C";
+  if (s >= 40) return "D";
   return "F";
 }
 
 function ratingTone(score) {
   const s = Number(score || 0);
-  if (s >= 80) return "t-green";
-  if (s >= 60) return "t-amber";
+  if (s >= 70) return "t-green";
+  if (s >= 40) return "t-amber";
   return "t-red";
 }
 
