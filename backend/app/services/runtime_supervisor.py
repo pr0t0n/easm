@@ -10,10 +10,21 @@ from app.services.work_item_contract import build_scan_work_item
 from app.models.models import AgentTraceEvent, EvidenceArtifact, ScanLog, ScanWorkItem, WorkItemAttempt, is_post_scan_revalidation_item
 
 
+def _slim_event_payload(payload: Any) -> dict[str, Any]:
+    # A trace event's payload may itself embed a prior "timeline" (e.g.
+    # runtime_quality_decision events). Including it verbatim here makes each new
+    # timeline recursively nest every earlier one -- the cause of 300MB+ trace
+    # payloads and state_data blobs that OOM-killed the API. Drop the nested
+    # timeline; the flat event fields are all a timeline consumer needs.
+    if not isinstance(payload, dict):
+        return {}
+    return {key: value for key, value in payload.items() if key != "timeline"}
+
+
 def build_execution_timeline(db: Session, job_id: int, item_id: int | None = None) -> list[dict[str, Any]]:
     events = list(db.scalars(select(AgentTraceEvent).where(AgentTraceEvent.scan_id == job_id).order_by(AgentTraceEvent.created_at, AgentTraceEvent.id)))
     logs = list(db.scalars(select(ScanLog).where(ScanLog.scan_job_id == job_id).order_by(ScanLog.created_at, ScanLog.id)))
-    timeline = [{"at": event.created_at.isoformat(), "source": "agent", "type": event.event_type, "status": event.status, "payload": event.payload or {}, "item_id": (event.payload or {}).get("work_item_id")} for event in events]
+    timeline = [{"at": event.created_at.isoformat(), "source": "agent", "type": event.event_type, "status": event.status, "payload": _slim_event_payload(event.payload), "item_id": (event.payload or {}).get("work_item_id")} for event in events]
     timeline.extend({"at": log.created_at.isoformat(), "source": log.source, "type": "log", "status": log.level, "message": log.message} for log in logs)
     if item_id is not None:
         attempts = list(db.scalars(select(WorkItemAttempt).where(WorkItemAttempt.work_item_id == item_id).order_by(WorkItemAttempt.created_at, WorkItemAttempt.id)))
@@ -197,11 +208,18 @@ def evaluate_runtime_outcome(db: Session, job: Any, item: Any) -> dict[str, Any]
         metadata["runtime_recovery"] = previous_recovery
         item.item_metadata = metadata
         decision["recovery"] = previous_recovery
+    # NEVER persist the timeline: it is reconstructable on demand and embeds
+    # every prior trace-event payload, so persisting it into both state_data and
+    # each runtime_quality_decision trace event nests recursively and explodes to
+    # hundreds of MB, OOM-killing the API's /scans listing (which eagerly loads
+    # state_data for every job). The live return value still carries the timeline
+    # for callers that need it in-flight.
+    persist_decision = {key: value for key, value in decision.items() if key != "timeline"}
     state = dict(getattr(job, "state_data", None) or {})
     supervisor = dict(state.get("runtime_supervisor") or {})
     history = [row for row in list(supervisor.get("history") or []) if isinstance(row, dict)]
-    history.append(decision)
-    supervisor.update({"status": action, "last_decision": decision, "history": history[-100:]})
+    history.append(persist_decision)
+    supervisor.update({"status": action, "last_decision": persist_decision, "history": history[-50:]})
     state["runtime_supervisor"] = supervisor
     job.state_data = state
     db.add(AgentTraceEvent(
@@ -214,7 +232,7 @@ def evaluate_runtime_outcome(db: Session, job: Any, item: Any) -> dict[str, Any]
         tool_name=str(getattr(item, "tool_name", "") or "")[:100] or None,
         capability=str(getattr(item, "phase_id", "") or "")[:100] or None,
         status=decision["status"],
-        payload=decision,
+        payload=persist_decision,
         created_at=datetime.now(),
     ))
     return decision

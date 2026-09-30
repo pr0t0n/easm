@@ -371,7 +371,7 @@ services:
       timeout: 8s
       retries: 8
       start_period: 60s
-    mem_limit: "${BACKEND_MEMORY_LIMIT:-2g}"
+    mem_limit: "${BACKEND_MEMORY_LIMIT:-3g}"
     profiles: ["dev"]
     # group_add 0 (root group): permite ao processo non-root (uid 1000) LER o
     # docker.sock (root:root 660) sem virar root — só p/ a visão de saúde.

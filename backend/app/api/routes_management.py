@@ -1737,8 +1737,13 @@ def _active_scan_ids() -> tuple[dict[str, set[int]], bool, dict[int, int]]:
 
     task_counts counts EVERY active run_scan_job_* task per scan_id (not deduped)
     so callers can detect duplicate concurrent chains (count > 1)."""
-    inspector = celery.control.inspect(timeout=1.5)
-    active = inspector.active()
+    try:
+        inspector = celery.control.inspect(timeout=1.5)
+        active = inspector.active()
+    except Exception:
+        # Broker unreachable: signal inspect_ok=False so callers never take a
+        # destructive decision (e.g. killing a scan) on incomplete information.
+        return {"unit": set(), "scheduled": set()}, False, {}
     if active is None:
         return {"unit": set(), "scheduled": set()}, False, {}
 

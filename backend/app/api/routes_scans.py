@@ -229,8 +229,13 @@ def _warm_skill_rag_for_scan() -> dict[str, Any]:
 
 
 def _active_scan_task_ids(scan_id: int, db: Session | None = None) -> list[str]:
-    inspector = celery.control.inspect(timeout=1.5)
-    buckets = [inspector.active() or {}, inspector.reserved() or {}, inspector.scheduled() or {}]
+    try:
+        inspector = celery.control.inspect(timeout=1.5)
+        buckets = [inspector.active() or {}, inspector.reserved() or {}, inspector.scheduled() or {}]
+    except Exception:
+        # Broker unreachable: degrade to "no active tasks found" rather than
+        # raising into the request path.
+        buckets = []
     direct_scan_task_names = {
         "run_scan_job_unit",
         "run_scan_job_scheduled",
@@ -321,8 +326,15 @@ def _clear_scan_worker_heartbeat(db: Session, scan_id: int) -> None:
 
 
 def _reconcile_orphan_running_scans(db: Session) -> int:
-    inspector = celery.control.inspect(timeout=1.5)
-    active = inspector.active()
+    try:
+        inspector = celery.control.inspect(timeout=1.5)
+        active = inspector.active()
+    except Exception:
+        # Broker (Redis) unreachable — e.g. during a restart or hiccup. This is
+        # a best-effort reconciliation pass invoked on every GET /scans; a dead
+        # broker must never 500 the scans listing. Treat exactly like "cannot
+        # determine active scans" and skip this pass.
+        return 0
     if active is None:
         return 0
 
