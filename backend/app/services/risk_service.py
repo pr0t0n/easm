@@ -281,6 +281,7 @@ def compute_continuous_rating(
     lifecycle: dict[str, int] | None = None,
     recurring_findings_count: int = 0,
     segment: str | None = None,
+    n_targets: float = 1.0,
 ) -> dict[str, Any]:
     """Calcula o rating contínuo de postura externa.
 
@@ -293,10 +294,18 @@ def compute_continuous_rating(
     total_new = int(lifecycle.get("new") or 0)
     total_corrected = int(lifecycle.get("corrected") or 0)
 
-    critical = int(severity_count.get("critical") or 0)
-    high = int(severity_count.get("high") or 0)
-    medium = int(severity_count.get("medium") or 0)
-    low = int(severity_count.get("low") or 0)
+    # Densidade por alvo (média) — counts brutos saturavam a nota de exposição em
+    # superfícies com muitos alvos. n_targets=1 preserva o comportamento antigo.
+    # A penalidade usa a densidade; a evidência exibe as contagens reais.
+    _n = max(1.0, float(n_targets or 1.0))
+    critical_n = int(severity_count.get("critical") or 0)
+    high_n = int(severity_count.get("high") or 0)
+    medium_n = int(severity_count.get("medium") or 0)
+    low_n = int(severity_count.get("low") or 0)
+    critical = critical_n / _n
+    high = high_n / _n
+    medium = medium_n / _n
+    low = low_n / _n
 
     # Pesos calibrados por segmento (v1.2)
     weights = SEGMENT_WEIGHTS.get(segment or "", SEGMENT_WEIGHTS["Digital Services"])
@@ -347,10 +356,10 @@ def compute_continuous_rating(
             "score": round(exposure_score, 2),
             "impact_points": round((100.0 - exposure_score) * w_exp, 2),
             "evidence": {
-                "critical": critical,
-                "high": high,
-                "medium": medium,
-                "low": low,
+                "critical": critical_n,
+                "high": high_n,
+                "medium": medium_n,
+                "low": low_n,
             },
         },
         {
@@ -417,16 +426,20 @@ def build_rating_timeline(scan_timeline: list[dict[str, Any]]) -> list[dict[str,
     ordered = sorted(scan_timeline or [], key=lambda item: str(item.get("created_at") or ""))
     for point in ordered:
         sev = point.get("severity") or {}
-        critical = int(sev.get("critical") or 0)
-        high = int(sev.get("high") or 0)
-        medium = int(sev.get("medium") or 0)
-        low = int(sev.get("low") or 0)
-        open_count = int(point.get("open_findings") or 0)
+        # Densidade por alvo (média): counts brutos saturavam a nota em scans com
+        # muitos alvos. n_targets=1 preserva o comportamento antigo.
+        _n = max(1.0, float(point.get("n_targets") or 1))
+        critical = int(sev.get("critical") or 0) / _n
+        high = int(sev.get("high") or 0) / _n
+        medium = int(sev.get("medium") or 0) / _n
+        low = int(sev.get("low") or 0) / _n
+        open_count_raw = int(point.get("open_findings") or 0)
+        open_count = open_count_raw / _n
 
         # Base score com penalidade logarítmica (mesma fórmula do compute_continuous_rating)
         base = max(0.0, 100.0 - _log_exposure_penalty(critical, high, medium, low))
 
-        if open_count > 0:
+        if open_count_raw > 0:
             streak += 1
         else:
             streak = 0
@@ -441,7 +454,7 @@ def build_rating_timeline(scan_timeline: list[dict[str, Any]]) -> list[dict[str,
             {
                 "scan_id": point.get("scan_id"),
                 "created_at": point.get("created_at"),
-                "open_findings": open_count,
+                "open_findings": open_count_raw,
                 "base_score": round(base, 2),
                 "persistence_penalty": round(persistence_penalty, 2),
                 "rating_score": rating,
@@ -1025,6 +1038,7 @@ def compute_framework_scores(
     waf_findings: float = 0.0,
     findings_total: float = 0.0,
     findings_triaged: float = 0.0,
+    n_targets: float = 1.0,
 ) -> dict[str, dict[str, Any]]:
     """Calcula a maturidade por framework a partir das evidências do scan.
 
@@ -1037,15 +1051,20 @@ def compute_framework_scores(
 
     Retorna ``{framework_key: {score, grade, label, domains, evidence}}``.
     """
-    critical = int(severity_count.get("critical") or 0)
-    high = int(severity_count.get("high") or 0)
-    medium = int(severity_count.get("medium") or 0)
-    low = int(severity_count.get("low") or 0)
+    # Densidade por alvo: pressão de framework deve refletir vulnerabilidades por
+    # ativo, não o somatório bruto — senão superfícies grandes zeram todos os
+    # frameworks. n_targets=1 mantém o comportamento antigo (ex.: dados já
+    # pré-agregados por alvo). remediation_ratio é razão e não é normalizado.
+    _n = max(1.0, float(n_targets or 1.0))
+    critical = (int(severity_count.get("critical") or 0)) / _n
+    high = (int(severity_count.get("high") or 0)) / _n
+    medium = (int(severity_count.get("medium") or 0)) / _n
+    low = (int(severity_count.get("low") or 0)) / _n
 
-    headers = max(0.0, float(security_header_findings))
-    exposure = max(0.0, float(exposure_findings))
-    vulns = max(0.0, float(vulnerability_findings))
-    waf = max(0.0, float(waf_findings))
+    headers = max(0.0, float(security_header_findings)) / _n
+    exposure = max(0.0, float(exposure_findings)) / _n
+    vulns = max(0.0, float(vulnerability_findings)) / _n
+    waf = max(0.0, float(waf_findings)) / _n
     total = max(0.0, float(findings_total))
     triaged = max(0.0, float(findings_triaged))
     remediation_ratio = (triaged / total) if total > 0 else 0.0

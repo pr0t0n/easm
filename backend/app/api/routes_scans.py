@@ -6794,7 +6794,11 @@ def scan_report(
     benchmark = _build_wef_benchmark(segment, fair_ale_total_open, severity_count_vuln)
     evolution_target = selected_target_tokens[0] if len(selected_target_tokens) == 1 else job.target_query
     target_evolution = _build_target_evolution(db, current_user, evolution_target, scan_id)
-    rating_timeline = build_rating_timeline(target_evolution.get("timeline") or [])
+    # Densidade por alvo (média) — mesmo princípio do rating do cockpit/dashboard:
+    # counts brutos saturavam a nota em scans com muitos alvos.
+    _n_targets_report = max(1, len(parse_scope_targets(str(job.target_query or ""))))
+    _evo_timeline = [{**_pt, "n_targets": _n_targets_report} for _pt in (target_evolution.get("timeline") or [])]
+    rating_timeline = build_rating_timeline(_evo_timeline)
     continuous_rating = compute_continuous_rating(
         severity_count=severity_count_vuln,
         fair_avg_score=float(fair_total.get("fair_avg_score") or 0.0),
@@ -6804,6 +6808,7 @@ def scan_report(
         lifecycle=lifecycle,
         recurring_findings_count=len([r for r in (target_evolution.get("recurring_findings") or []) if str(r.get("trend") or "") == "persisting"]),
         segment=segment,
+        n_targets=float(_n_targets_report),
     )
     score = float(continuous_rating.get("score") or 0.0)
     grade = str(continuous_rating.get("grade") or "F")
@@ -7851,6 +7856,16 @@ def dashboard_insights(
         "new": int(effective_sev_count_vuln.get("critical", 0) + effective_sev_count_vuln.get("high", 0)),
         "corrected": int(effective_mitigated),
     }
+    # Densidade por alvo: em group_avg os counts já são média (n=1); nos demais
+    # modos são somatório e dividem pelo nº de ALVOS (hosts individuais) no escopo.
+    # Conta hosts dentro de cada target_query — senão um target_query com 28 hosts
+    # ";"-separados contaria como 1 e o rating saturava em "F". Mesmo princípio do
+    # cockpit/frameworks.
+    _scope_hosts: set[str] = set()
+    for _j in jobs:
+        for _h in parse_scope_targets(str(_j.target_query or "")):
+            _scope_hosts.add(_h)
+    _fw_n_targets = 1.0 if agg_mode == "group_avg" else float(max(1, len(_scope_hosts)))
     continuous_rating = compute_continuous_rating(
         severity_count=effective_sev_count_vuln,
         fair_avg_score=effective_avg_fair,
@@ -7860,6 +7875,7 @@ def dashboard_insights(
         lifecycle=lifecycle_global,
         recurring_findings_count=recurring_findings_count,
         segment=None,  # dashboard não tem alvo único — usa peso padrão
+        n_targets=_fw_n_targets,
     )
 
     # Sem execução no escopo, o rating é INDEFINIDO (não "F"). Ausência de dados
@@ -7889,6 +7905,8 @@ def dashboard_insights(
                 "created_at": s.created_at,
                 "open_findings": len(frows),
                 "severity": sev,
+                # nº de alvos do scan → densidade por alvo na curva de rating
+                "n_targets": max(1, len(parse_scope_targets(str(s.target_query or "")))),
             }
         )
     rating_timeline = build_rating_timeline(scan_timeline_seed)
@@ -7898,6 +7916,7 @@ def dashboard_insights(
     # Maturidade por framework derivada das evidências reais do scan (severidade,
     # cabeçalhos, exposição, vulnerabilidades, WAF e remediação) — uma fórmula
     # específica por framework em vez de um score sintético único.
+    # _fw_n_targets já definido acima (mesma densidade por alvo do continuous_rating).
     framework_scores = compute_framework_scores(
         severity_count=effective_sev_count,
         security_header_findings=float(effective_security_header_findings or 0),
@@ -7906,6 +7925,7 @@ def dashboard_insights(
         waf_findings=float(effective_waf_findings or 0),
         findings_total=float(effective_total or 0),
         findings_triaged=float(effective_mitigated or 0),
+        n_targets=_fw_n_targets,
     )
     # Sem execução no escopo, os frameworks ficam INDEFINIDOS — não 100/A. Score
     # 100 sem scan significaria "compliance perfeita" derivada de zero evidência;
@@ -11004,11 +11024,15 @@ def get_report_extras(
         attack_paths = {"paths": [], "objectives_total": 0, "paths_with_findings": 0, "objectives_reachable": 0}
 
     triaged = sum(1 for f in findings if str(f.verification_status or "").lower() in ("confirmed", "refuted"))
+    _scope_n = len(parse_scope_targets(str(job.target_query or "")))
+    _host_n = len({str(f.domain or "").strip().lower() for f in findings if f.domain})
+    n_targets = max(1, _scope_n, _host_n)
     try:
         framework_risk = compute_framework_scores(
             severity_count=sev_count,
             findings_total=float(len(findings)),
             findings_triaged=float(triaged),
+            n_targets=float(n_targets),
         )
     except Exception:
         framework_risk = {}
