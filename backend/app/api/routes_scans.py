@@ -10440,7 +10440,15 @@ def get_cockpit(
         if k in sev:
             sev[k] += 1
 
-    score = max(0.0, round(100.0 - _log_exposure_penalty(sev["critical"], sev["high"], sev["medium"], sev["low"]), 1))
+    # Rating por DENSIDADE de risco por alvo, não pelo somatório bruto: um scan
+    # com muitos alvos saturava a penalidade e caía para "F" mesmo com poucas
+    # vulnerabilidades por ativo. Denominador = nº de alvos no escopo (ou nº de
+    # hosts distintos com achado, o que for maior), mínimo 1.
+    _scope_n = 0 if aggregate else len(parse_scope_targets(str(selected.target_query or "")))
+    _host_n = len({str(f.domain or "").strip().lower() for f in summary_findings if f.domain})
+    n_targets = max(1, _scope_n, _host_n)
+    _density = {k: (sev[k] / n_targets) for k in ("critical", "high", "medium", "low")}
+    score = max(0.0, round(100.0 - _log_exposure_penalty(_density["critical"], _density["high"], _density["medium"], _density["low"]), 1))
     grade = _score_to_grade(score)
 
     state = dict(selected.state_data or {})
@@ -10575,7 +10583,10 @@ def get_cockpit(
                 per_scan[sid][kk] = cnt
         for sid in same_target_ids:
             c = per_scan[sid]
-            sc = max(0.0, round(100.0 - _log_exposure_penalty(c["critical"], c["high"], c["medium"], c["low"]), 1))
+            # Mesma normalização por alvo do score principal (mesmo target_query).
+            sc = max(0.0, round(100.0 - _log_exposure_penalty(
+                c["critical"] / n_targets, c["high"] / n_targets,
+                c["medium"] / n_targets, c["low"] / n_targets), 1))
             trend.append({"scan_id": sid, "rating_score": sc})
     delta = round(trend[-1]["rating_score"] - trend[0]["rating_score"], 1) if len(trend) >= 2 else 0.0
 
