@@ -1568,7 +1568,6 @@ def generate_pentest_report(
                 f'<span style="font-size:10px;color:#777">proposta LLM: {_html.escape(str(_adj.proposed_verdict or "—"))}</span></td>'
                 f'<td>{_html.escape(str(_adj.reason_code))}<br><span style="font-size:10px;color:#777">confiança {_adj.confidence:.2f}</span></td>'
                 f'<td>{_html.escape(_missing)}</td>'
-                f'<td>{_html.escape(_wire_text)}</td>'
                 f'<td>{_html.escape(_answer_text)}</td>'
                 f'<td>{_html.escape(_closure_text)}</td>'
                 '</tr>'
@@ -1577,11 +1576,11 @@ def generate_pentest_report(
             adjudication_html = (
                 '<div class="section" style="border-top:4px solid #2563eb">'
                 '<h2 style="color:#1d4ed8">P21 — Adjudicação, Lacunas e Wires de Revalidação</h2>'
-                '<p style="font-size:12px;color:#666;margin-bottom:12px">Cada wire retorna ao endpoint, parâmetro, '
-                'identidade e evidência que originaram a lacuna. A proposta da LLM é consultiva; o veredito final '
-                'é produzido pelo evidence gate após execução real.</p>'
+                '<p style="font-size:12px;color:#666;margin-bottom:12px">A coluna "O que falta" lista a evidência '
+                'que originou a lacuna. A proposta da LLM é consultiva; o veredito final é produzido pelo '
+                'evidence gate após execução real.</p>'
                 '<table class="findings-table paginate" data-page-size="15"><thead><tr>'
-                '<th>Finding</th><th>Veredito</th><th>Causa</th><th>O que falta</th><th>Teste de retorno</th><th>Resposta/PoC</th><th>CVE, exploit e path</th>'
+                '<th>Finding</th><th>Veredito</th><th>Causa</th><th>O que falta</th><th>Resposta/PoC</th><th>CVE, exploit e path</th>'
                 f'</tr></thead><tbody>{"".join(_adj_rows)}</tbody></table></div>'
             )
     except Exception as _adj_err:
@@ -1620,6 +1619,13 @@ def generate_pentest_report(
                          font-weight: 600; border-bottom: 2px solid #dee2e6; }}
     .findings-table td {{ padding: 8px 10px; border-bottom: 1px solid #f0f0f0;
                          vertical-align: top; }}
+    /* Paginated tables (P21 adjudication) carry long free text: force a fixed
+       layout with wrapping so wide cells (Resposta/PoC, CVE/exploit) stay inside
+       the page instead of overflowing off the right edge. */
+    .findings-table.paginate {{ table-layout: fixed; }}
+    .findings-table.paginate th, .findings-table.paginate td {{
+        word-break: break-word; overflow-wrap: anywhere; white-space: normal; }}
+    .findings-table.paginate td {{ font-size: 12px; }}
     .easm-section-divider {{ background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
                              color: white; padding: 16px 24px; border-radius: 8px;
                              margin: 32px 0 16px 0; font-size: 14px; font-weight: 600; }}
