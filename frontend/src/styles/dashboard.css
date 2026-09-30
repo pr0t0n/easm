@@ -2384,7 +2384,7 @@
 .dash .report-kpis span { font-size: 10.5px; color: var(--ink-muted); display: block; }
 .dash .report-kpis strong { font-size: 20px; font-weight: 700; color: var(--ink); }
 
-.dash .prio-badge { font-family: var(--font-mono); font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 6px; }
+.dash .prio-badge { font-family: var(--font-mono); font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 6px; white-space: nowrap; display: inline-block; }
 .dash .prio-P0 { color: var(--sev-critical-text); background: var(--sev-critical-bg); border: 1px solid var(--sev-critical-border); }
 .dash .prio-P1 { color: var(--sev-high-text); background: var(--sev-high-bg); border: 1px solid var(--sev-high-border); }
 .dash .prio-P2 { color: var(--sev-medium-text); background: var(--sev-medium-bg); border: 1px solid var(--sev-medium-border); }
@@ -2416,6 +2416,17 @@
 @media print {
   .dash .no-print { display: none !important; }
   .dash .report-shell { padding: 0; max-width: none; }
+  /* The plan table is min-width:980px for on-screen horizontal scroll; on paper
+     that forces the columns to overflow/squeeze (the "Prio" header wrapped
+     letter-by-letter and the P0 badge split). Let it reflow to the page width. */
+  .dash .attack-table-wrap { overflow-x: visible; }
+  .dash .attack-table { min-width: 0; width: 100%; }
+  .dash .attack-table th, .dash .attack-table td { padding: 5px 7px; font-size: 10px; overflow-wrap: anywhere; }
+  .dash .attack-table th { font-size: 8.5px; white-space: nowrap; }
+  .dash .attack-table td small { max-width: none; }
+  .dash .attack-table .mono { font-size: 9.5px; }
+  .dash .report-section, .dash .report-two-col > section { break-inside: avoid; }
+  .dash .report-heatgrid { break-inside: avoid; }
 }
 @media (max-width: 900px) {
   .dash .report-summary-grid, .dash .report-two-col, .dash .report-appendix { grid-template-columns: 1fr; }
