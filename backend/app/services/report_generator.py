@@ -1137,12 +1137,15 @@ def generate_pentest_report(
     easm_body = easm_html[_body_start:_body_end] if _body_start > 0 else ""
 
     # ── Executive summary for the full pentest report ─────────────────────────
-    exec_risk_label = ("CRÍTICO" if conf_critical > 0 else
-                       ("ALTO" if conf_high > 0 else
-                        ("MÉDIO" if conf_medium > 0 else "BAIXO")))
-    exec_risk_color = ("#c0392b" if conf_critical > 0 else
-                       ("#e67e22" if conf_high > 0 else
-                        ("#f39c12" if conf_medium > 0 else "#27ae60")))
+    # Risk reflects the full exposure (all severities), not only P21-confirmed
+    # findings — otherwise 14 CVSS-9.x criticals awaiting validation read as
+    # "BAIXO". Confirmed counts are still surfaced separately in the stat cards.
+    exec_risk_label = ("CRÍTICO" if vuln_by_sev.get("critical", 0) > 0 else
+                       ("ALTO" if vuln_by_sev.get("high", 0) > 0 else
+                        ("MÉDIO" if vuln_by_sev.get("medium", 0) > 0 else "BAIXO")))
+    exec_risk_color = ("#c0392b" if vuln_by_sev.get("critical", 0) > 0 else
+                       ("#e67e22" if vuln_by_sev.get("high", 0) > 0 else
+                        ("#f39c12" if vuln_by_sev.get("medium", 0) > 0 else "#27ae60")))
 
     # ── P21 sandbox stats strip HTML ─────────────────────────────────────────
     poc_strip_html = ""
@@ -1638,18 +1641,18 @@ def generate_pentest_report(
       Scan ID: #{scan_id}
       {f'&nbsp;|&nbsp; Scan anterior: #{previous_scan_id}' if previous_scan_id else ''}
     </div>
-    <div class="score-badge">Risco Confirmado: {exec_risk_label}</div>
+    <div class="score-badge">Risco de Exposição: {exec_risk_label}</div>
   </div>
 
   <!-- PENTEST STATS -->
   <div class="pentest-grid">
     <div class="stat-card" style="border-top:3px solid #c0392b">
-      <div class="num" style="color:#c0392b">{conf_critical}</div>
-      <div class="lbl">Critical Confirmados</div>
+      <div class="num" style="color:#c0392b">{vuln_by_sev['critical']}</div>
+      <div class="lbl">Críticos <span style="color:#999">· {conf_critical} confirmados</span></div>
     </div>
     <div class="stat-card" style="border-top:3px solid #e67e22">
-      <div class="num" style="color:#e67e22">{conf_high}</div>
-      <div class="lbl">High Confirmados</div>
+      <div class="num" style="color:#e67e22">{vuln_by_sev['high']}</div>
+      <div class="lbl">Altos <span style="color:#999">· {conf_high} confirmados</span></div>
     </div>
     <div class="stat-card" style="border-top:3px solid #f39c12">
       <div class="num" style="color:#f39c12">{len(chain_findings)}</div>
