@@ -10957,6 +10957,101 @@ def get_attack_paths(
     return build_attack_paths(db, scan_id, job=job)
 
 
+@router.get("/scans/{scan_id}/report-extras")
+def get_report_extras(
+    scan_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Blocos extras do relatório executivo/PDF, escopados a UM scan:
+    attack paths, validação das joias da coroa, tabela de superfície com
+    contagem de vulnerabilidades, heatmap por classe de vulnerabilidade e
+    risco por framework. Endpoint dedicado para não onerar o /cockpit agregado."""
+    from app.services.attack_path import build_attack_paths
+    from app.services.bas_exclusion import exclude_simulated
+    from app.services.vuln_family import classify_family, family_label
+
+    job = _authorized_scan_query(db, current_user).filter(ScanJob.id == scan_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Scan não encontrado")
+
+    findings = (
+        exclude_simulated(db.query(Finding))
+        .filter(Finding.scan_job_id == scan_id, Finding.is_false_positive.isnot(True))
+        .all()
+    )
+    _SEV = ("critical", "high", "medium", "low", "info")
+    sev_count = {s: 0 for s in _SEV}
+    for f in findings:
+        s = str(f.severity or "info").lower()
+        if s in sev_count:
+            sev_count[s] += 1
+
+    try:
+        attack_paths = build_attack_paths(db, scan_id, job=job, max_paths=12)
+    except Exception:
+        attack_paths = {"paths": [], "objectives_total": 0, "paths_with_findings": 0, "objectives_reachable": 0}
+
+    triaged = sum(1 for f in findings if str(f.verification_status or "").lower() in ("confirmed", "refuted"))
+    try:
+        framework_risk = compute_framework_scores(
+            severity_count=sev_count,
+            findings_total=float(len(findings)),
+            findings_triaged=float(triaged),
+        )
+    except Exception:
+        framework_risk = {}
+
+    by_class: dict[str, dict] = {}
+    by_surface: dict[str, dict] = {}
+    for f in findings:
+        s = str(f.severity or "info").lower()
+        details = f.details if isinstance(f.details, dict) else {}
+        fam = classify_family(
+            title=f.title, tool=f.tool, owasp=str(details.get("owasp_category") or ""),
+            cve=f.cve, learning_family=(details.get("learning_source") or {}).get("vuln_family"),
+        )
+        crow = by_class.setdefault(fam, {"family": fam, "label": family_label(fam), "critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0, "total": 0})
+        if s in crow:
+            crow[s] += 1
+        crow["total"] += 1
+        loc = _extract_finding_location(f)
+        host = (loc.get("subdomain") or loc.get("target") or f.domain or "—")
+        srow = by_surface.setdefault(host, {"host": host, "critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0, "total": 0})
+        if s in srow:
+            srow[s] += 1
+        srow["total"] += 1
+
+    def _sevkey(r):
+        return (r["critical"], r["high"], r["medium"], r["low"], r["total"])
+    vuln_by_class = sorted(by_class.values(), key=_sevkey, reverse=True)
+    attack_surface = sorted(by_surface.values(), key=_sevkey, reverse=True)
+
+    state = dict(job.state_data or {})
+    crown = [j for j in (state.get("crown_jewels") or []) if isinstance(j, dict)]
+    jewel_hosts = {str(j.get("target") or "").lower() for j in crown if j.get("target")}
+    jewels_hit = sorted(h for h in by_surface if h.lower() in jewel_hosts)
+    crown_validation = {
+        "total": len(crown),
+        "with_findings": len(jewels_hit),
+        "hosts": [
+            {"host": h, "vulns": by_surface[h]["total"], "critical": by_surface[h]["critical"], "high": by_surface[h]["high"]}
+            for h in jewels_hit
+        ],
+        "defined": [str(j.get("target") or "") for j in crown if j.get("target")],
+    }
+
+    return {
+        "scan_id": scan_id,
+        "attack_paths": attack_paths,
+        "framework_risk": framework_risk,
+        "vuln_by_class": vuln_by_class,
+        "attack_surface": attack_surface,
+        "crown_validation": crown_validation,
+        "severity_count": sev_count,
+    }
+
+
 @router.get("/scans/{scan_id}/methodology-coverage")
 def get_methodology_coverage(
     scan_id: int,

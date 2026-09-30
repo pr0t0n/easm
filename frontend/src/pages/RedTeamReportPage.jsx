@@ -88,6 +88,7 @@ export default function RedTeamReportPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [reportContract, setReportContract] = useState(null);
+  const [extras, setExtras] = useState(null);
 
   useEffect(() => {
     setLoading(true);
@@ -100,7 +101,7 @@ export default function RedTeamReportPage() {
       .then(async ({ data }) => {
         setData(data || null);
         const selectedId = data?.scan?.id;
-        if (!selectedId) return setReportContract(null);
+        if (!selectedId) { setReportContract(null); setExtras(null); return; }
         try {
           const response = await client.get(`/api/pentest/scans/${selectedId}/report-contract`, {
             params: { findings_limit: 200, findings_offset: 0 },
@@ -109,6 +110,12 @@ export default function RedTeamReportPage() {
           setReportContract(response.data || null);
         } catch {
           setReportContract(null);
+        }
+        try {
+          const ex = await client.get(`/api/scans/${selectedId}/report-extras`, { _skipToast: true });
+          setExtras(ex.data || null);
+        } catch {
+          setExtras(null);
         }
       })
       .catch(() => setError("Falha ao carregar o relatório."))
@@ -139,6 +146,14 @@ export default function RedTeamReportPage() {
   const findingsPage = data?.findings_page || {};
   const execution = quality?.execution_metrics || {};
   const readiness = reportContract?.readiness || {};
+  const attackPaths = extras?.attack_paths?.paths || [];
+  const frameworkRisk = extras?.framework_risk || {};
+  const vulnByClass = extras?.vuln_by_class || [];
+  const attackSurface = extras?.attack_surface || [];
+  const crownValidation = extras?.crown_validation || null;
+  const FW_LABEL = { iso27001: "ISO 27001", nist: "NIST CSF", cis_v8: "CIS v8", pci: "PCI DSS" };
+  const SURFACE_SEV = ["critical", "high", "medium", "low"];
+  const classMax = Math.max(1, ...vulnByClass.flatMap((r) => SURFACE_SEV.map((s) => r[s] || 0)));
 
   // Exporta vulnerabilidades em CSV (id, url, recomendação, cve, cvss/risco)
   const exportCsv = async () => {
@@ -403,14 +418,28 @@ export default function RedTeamReportPage() {
           {/* 04 Joias da coroa */}
           <section className="report-section">
             <div className="sk-eyebrow">04 · Joias da coroa</div>
-            {jewels.length === 0 ? (
+            {crownValidation && (
+              <div className="report-sub" style={{ marginBottom: 8 }}>
+                {crownValidation.total === 0
+                  ? "Nenhuma joia da coroa definida para este alvo — defina ativos de alto valor para validar exposição direcionada."
+                  : `${crownValidation.total} joia(s) definida(s) · ${crownValidation.with_findings} com achado correlacionado.`}
+              </div>
+            )}
+            {jewels.length === 0 && !(crownValidation?.hosts?.length) ? (
               <div className="report-empty">Nenhuma joia da coroa identificada neste ciclo.</div>
             ) : (
               <ul className="report-jewels">
-                {jewels.slice(0, 8).map((j, i) => (
+                {(crownValidation?.hosts?.length ? crownValidation.hosts.map((h) => ({
+                  target: h.host, label: `${h.vulns} achado(s)`, findings_total: h.vulns,
+                  flag: h.critical > 0 ? `${h.critical} crítico(s)` : h.high > 0 ? `${h.high} alto(s)` : "",
+                })) : jewels.slice(0, 8)).map((j, i) => (
                   <li key={i}>
                     <b className="sk-mono">{j.target || j.asset || j.host || "joia"}</b>
-                    <span>{j.label || j.type || j.category || "ativo de alto valor"}{j.findings_total ? ` · ${j.findings_total} achado(s)` : ""}</span>
+                    <span>
+                      {j.label || j.type || j.category || "ativo de alto valor"}
+                      {j.findings_total && !j.label?.includes("achado") ? ` · ${j.findings_total} achado(s)` : ""}
+                      {j.flag ? ` · ${j.flag}` : ""}
+                    </span>
                   </li>
                 ))}
               </ul>
@@ -437,6 +466,118 @@ export default function RedTeamReportPage() {
             </div>
           </section>
         )}
+
+        {/* 06 Superfície de ataque × vulnerabilidades */}
+        <section className="report-section">
+          <div className="sk-eyebrow">06 · Superfície de ataque</div>
+          <span className="report-sub">ativos expostos ordenados por criticidade e volume de vulnerabilidades</span>
+          {attackSurface.length === 0 ? (
+            <div className="report-empty">Sem superfície com vulnerabilidades classificáveis.</div>
+          ) : (
+            <div className="attack-table-wrap">
+              <table className="attack-table">
+                <thead>
+                  <tr><th>Ativo / superfície</th><th className="num">Vulns</th><th className="num">Críticas</th><th className="num">Altas</th><th className="num">Médias</th><th className="num">Baixas</th></tr>
+                </thead>
+                <tbody>
+                  {attackSurface.slice(0, 30).map((r) => (
+                    <tr key={r.host}>
+                      <td className="sk-mono">{r.host}</td>
+                      <td className="num sk-mono"><b>{r.total}</b></td>
+                      <td className="num sk-mono" style={{ color: r.critical ? "var(--sev-critical-text)" : "var(--ink-muted)" }}>{r.critical || "—"}</td>
+                      <td className="num sk-mono" style={{ color: r.high ? "var(--sev-high-text)" : "var(--ink-muted)" }}>{r.high || "—"}</td>
+                      <td className="num sk-mono">{r.medium || "—"}</td>
+                      <td className="num sk-mono">{r.low || "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {attackSurface.length > 30 && <p className="report-sub">Exibindo os 30 ativos mais críticos de {attackSurface.length}. Use o CSV para o inventário completo.</p>}
+            </div>
+          )}
+        </section>
+
+        {/* 07 Heatmap vulnerabilidades por classe */}
+        <section className="report-section">
+          <div className="sk-eyebrow">07 · Heatmap · vulnerabilidades por classe</div>
+          <span className="report-sub">famílias de vulnerabilidade × severidade (dado real por finding)</span>
+          {vulnByClass.length === 0 ? (
+            <div className="report-empty">Sem vulnerabilidades classificáveis neste ciclo.</div>
+          ) : (
+            <div className="report-heatgrid">
+              <span />
+              {HEAT_SEV.map((s) => <b key={s}>{SEV_LABEL[s]}</b>)}
+              <b>Tot</b>
+              {vulnByClass.slice(0, 20).map((row) => (
+                <Fragment key={row.family}>
+                  <strong className="report-heat-label">{row.label}</strong>
+                  {HEAT_SEV.map((s) => {
+                    const v = Number(row[s] || 0);
+                    const light = classMax > 0 && v / classMax > 0.45;
+                    return <span key={s} className="report-heat-cell sk-mono" style={{ background: heatColor(v, s, classMax), color: light ? "#fff" : "var(--ink-soft)" }}>{v || ""}</span>;
+                  })}
+                  <em className="report-heat-tot sk-mono">{row.total}</em>
+                </Fragment>
+              ))}
+            </div>
+          )}
+        </section>
+
+        {/* 08 Risco por framework */}
+        <section className="report-section">
+          <div className="sk-eyebrow">08 · Risco por framework</div>
+          <span className="report-sub">maturidade estimada por framework a partir das evidências reais do scan</span>
+          {Object.keys(frameworkRisk).length === 0 ? (
+            <div className="report-empty">Risco por framework indisponível.</div>
+          ) : (
+            <div className="report-kpis" style={{ marginTop: 10 }}>
+              {Object.entries(frameworkRisk).map(([key, fw]) => {
+                const score = Number(fw.score || 0);
+                const tone = score >= 80 ? "var(--sev-low-text)" : score >= 60 ? "var(--sev-medium-text)" : "var(--sev-critical-text)";
+                return (
+                  <div key={key}>
+                    <span>{FW_LABEL[key] || key}</span>
+                    <strong className="sk-mono" style={{ color: tone }}>{score.toFixed(1)} · {fw.grade || "—"}</strong>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </section>
+
+        {/* 09 Caminhos de ataque */}
+        <section className="report-section">
+          <div className="sk-eyebrow">09 · Caminhos de ataque</div>
+          <span className="report-sub">cadeias de exposição rumo aos objetivos, ordenadas por severidade</span>
+          {attackPaths.length === 0 ? (
+            <div className="report-empty">Nenhum caminho de ataque correlacionado neste ciclo.</div>
+          ) : (
+            <ol className="report-attack-paths" style={{ margin: "8px 0 0", paddingLeft: 18, display: "grid", gap: 10 }}>
+              {attackPaths.slice(0, 10).map((p, i) => {
+                const steps = Array.isArray(p.steps) ? p.steps : [];
+                const obj = p.objective?.target || p.objective?.subdomain || p.objective || "objetivo";
+                return (
+                  <li key={i}>
+                    <b className="sk-mono">{String(obj)}</b>
+                    {p.objective_reachable ? <span className="report-jewel-flag"> ↳ alcançável</span> : null}
+                    <div className="sk-mono" style={{ fontSize: 12, color: "var(--ink-muted)", marginTop: 3 }}>
+                      {steps.slice(0, 6).map((s, j) => (
+                        <span key={j}>
+                          {j > 0 ? " → " : ""}
+                          <span style={{ color: s.severity === "critical" ? "var(--sev-critical-text)" : s.severity === "high" ? "var(--sev-high-text)" : "var(--ink-soft)" }}>
+                            {s.family || s.title || s.id || "passo"}
+                          </span>
+                        </span>
+                      ))}
+                      {steps.length > 6 ? ` … (+${steps.length - 6})` : ""}
+                      {steps.length === 0 ? "sem passos correlacionados" : ""}
+                    </div>
+                  </li>
+                );
+              })}
+            </ol>
+          )}
+        </section>
 
         <footer className="report-foot sk-mono">
           ScriptKidd.o · Relatório gerado automaticamente · uso interno confidencial
