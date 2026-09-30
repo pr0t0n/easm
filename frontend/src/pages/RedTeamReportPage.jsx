@@ -136,6 +136,8 @@ export default function RedTeamReportPage() {
     const order = { P0: 0, P1: 1, P2: 2 };
     return withP.sort((a, b) => order[a.p] - order[b.p] || -(a.cvss || 0) - -(b.cvss || 0) || (b.epss || 0) - (a.epss || 0));
   }, [findings]);
+  // Plano de ação mostra apenas P0 e P1 (ações imediatas).
+  const planTop = useMemo(() => plan.filter((f) => f.p === "P0" || f.p === "P1"), [plan]);
 
   const trend = data?.score?.trend || [];
   const sev = data?.severity || {};
@@ -300,44 +302,92 @@ export default function RedTeamReportPage() {
           </div>
         </section>
 
-        {/* 02 Plano de ação priorizado */}
+        {/* 02 Risco por framework */}
         <section className="report-section">
-          <div className="sk-eyebrow">02 · Plano de ação priorizado</div>
-          <span className="report-sub">ordenado por severidade, valor do alvo (joia), CVSS e EPSS — sem priorização teórica isolada</span>
-          <div className="attack-table-wrap">
-            <table className="attack-table report-plan">
-              <thead>
-                <tr><th>Prio</th><th>Achado</th><th>Alvo</th><th>Responsável</th><th>Prazo</th><th>Esforço</th><th>CVSS</th><th>EPSS</th><th>Evidência</th></tr>
-              </thead>
-              <tbody>
-                {plan.length === 0 && <tr><td colSpan={9}>Sem achados acionáveis (crítico/alto/médio) neste ciclo.</td></tr>}
-                {plan.map((f) => (
-                  <tr key={f.id}>
-                    <td><span className={`prio-badge prio-${f.p}`}>{f.p}</span></td>
-                    <td>
-                      <b>{f.title}</b>
-                      {f.isJewel && <small className="report-jewel-flag">↳ atinge joia da coroa</small>}
-                      <small className="report-plan-reco"><b>Recomendação:</b> {f.recommendation || "Sem recomendação registrada."}</small>
-                    </td>
-                    <td className="sk-mono">{f.target}</td>
-                    <td>{f.remediation.owner}</td>
-                    <td className="sk-mono">{f.remediation.due}</td>
-                    <td>{f.remediation.effort}</td>
-                    <td className="num sk-mono">{f.cvss ? Number(f.cvss).toFixed(1) : "—"}</td>
-                    <td className="num sk-mono">{f.epss ? `${Math.round(f.epss * 100)}%` : "—"}</td>
-                    <td><span className="evidence-pill">{STATUS_LABEL[f.status] || f.status}</span></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          {findingsPage.has_more && <p className="report-sub">Exibindo {findingsPage.returned} de {findingsPage.total} achados. Use o CSV ou o relatório técnico para o inventário completo.</p>}
+          <div className="sk-eyebrow">02 · Risco por framework</div>
+          <span className="report-sub">maturidade estimada por framework a partir das evidências reais do scan</span>
+          {Object.keys(frameworkRisk).length === 0 ? (
+            <div className="report-empty">Risco por framework indisponível.</div>
+          ) : (
+            <div className="report-kpis" style={{ marginTop: 10 }}>
+              {Object.entries(frameworkRisk).map(([key, fw]) => {
+                const score = Number(fw.score || 0);
+                const tone = score >= 70 ? "var(--sev-low-text)" : score >= 40 ? "var(--sev-medium-text)" : "var(--sev-critical-text)";
+                return (
+                  <div key={key}>
+                    <span>{FW_LABEL[key] || key}</span>
+                    <strong className="sk-mono" style={{ color: tone }}>{score.toFixed(1)} · {fw.grade || "—"}</strong>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </section>
+
+        {/* 03 Heatmap vulnerabilidades por classe */}
+        <section className="report-section">
+          <div className="sk-eyebrow">03 · Heatmap · vulnerabilidades por classe</div>
+          <span className="report-sub">famílias de vulnerabilidade × severidade (dado real por finding)</span>
+          {vulnByClass.length === 0 ? (
+            <div className="report-empty">Sem vulnerabilidades classificáveis neste ciclo.</div>
+          ) : (
+            <div className="report-heatgrid">
+              <span />
+              {HEAT_SEV.map((s) => <b key={s}>{SEV_LABEL[s]}</b>)}
+              <b>Tot</b>
+              {vulnByClass.slice(0, 20).map((row) => (
+                <Fragment key={row.family}>
+                  <strong className="report-heat-label">{row.label}</strong>
+                  {HEAT_SEV.map((s) => {
+                    const v = Number(row[s] || 0);
+                    const light = classMax > 0 && v / classMax > 0.45;
+                    return <span key={s} className="report-heat-cell sk-mono" style={{ background: heatColor(v, s, classMax), color: light ? "#fff" : "var(--ink-soft)" }}>{v || ""}</span>;
+                  })}
+                  <em className="report-heat-tot sk-mono">{row.total}</em>
+                </Fragment>
+              ))}
+            </div>
+          )}
+        </section>
+
+        {/* 04 Plano de ação priorizado */}
+        <section className="report-section">
+          <div className="sk-eyebrow">04 · Plano de ação priorizado (P0/P1)</div>
+          <span className="report-sub">somente P0 e P1 — ordenado por severidade, valor do alvo (joia), CVSS e EPSS</span>
+          {planTop.length === 0 ? (
+            <div className="report-empty">Não há achados P0 ou P1 neste ciclo.</div>
+          ) : (
+            <div className="attack-table-wrap">
+              <table className="attack-table report-plan">
+                <thead>
+                  <tr><th>Prio</th><th>Achado</th><th>Alvo</th><th>Esforço</th><th>CVSS</th><th>EPSS</th><th>Evidência</th></tr>
+                </thead>
+                <tbody>
+                  {planTop.map((f) => (
+                    <tr key={f.id}>
+                      <td><span className={`prio-badge prio-${f.p}`}>{f.p}</span></td>
+                      <td>
+                        <b>{f.title}</b>
+                        {f.isJewel && <small className="report-jewel-flag">↳ atinge joia da coroa</small>}
+                        <small className="report-plan-reco"><b>Recomendação:</b> {f.recommendation || "Sem recomendação registrada."}</small>
+                      </td>
+                      <td className="sk-mono">{f.target}</td>
+                      <td>{f.remediation.effort}</td>
+                      <td className="num sk-mono">{f.cvss ? Number(f.cvss).toFixed(1) : "—"}</td>
+                      <td className="num sk-mono">{f.epss ? `${Math.round(f.epss * 100)}%` : "—"}</td>
+                      <td><span className="evidence-pill">{STATUS_LABEL[f.status] || f.status}</span></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </section>
 
         <div className="report-two-col">
           {/* 03 Heatmap superfície × severidade */}
           <section className="report-section">
-            <div className="sk-eyebrow">03 · Heatmap superfície × severidade</div>
+            <div className="sk-eyebrow">05 · Heatmap superfície × severidade</div>
             <span className="report-sub">onde os achados se acumulam</span>
             {!heatmap || (heatmap.total_findings || 0) === 0 ? (
               <div className="report-empty">Sem achados classificáveis neste ciclo.</div>
@@ -367,7 +417,7 @@ export default function RedTeamReportPage() {
 
           {/* 04 Joias da coroa */}
           <section className="report-section">
-            <div className="sk-eyebrow">04 · Joias da coroa</div>
+            <div className="sk-eyebrow">06 · Joias da coroa</div>
             {crownValidation && (
               <div className="report-sub" style={{ marginBottom: 8 }}>
                 {crownValidation.total === 0
@@ -400,7 +450,7 @@ export default function RedTeamReportPage() {
         {/* 05 Evolução — só com histórico real (≥2 scans do mesmo alvo) */}
         {trend.length >= 2 && (
           <section className="report-section">
-            <div className="sk-eyebrow">05 · Evolução entre ciclos</div>
+            <div className="sk-eyebrow">07 · Evolução entre ciclos</div>
             <div className="report-evolution">
               {trend.map((t) => {
                 const h = Math.max(4, Math.min(100, Number(t.rating_score || 0)));
@@ -419,7 +469,7 @@ export default function RedTeamReportPage() {
 
         {/* 06 Superfície de ataque × vulnerabilidades */}
         <section className="report-section">
-          <div className="sk-eyebrow">06 · Superfície de ataque</div>
+          <div className="sk-eyebrow">08 · Superfície de ataque</div>
           <span className="report-sub">ativos expostos ordenados por criticidade e volume de vulnerabilidades</span>
           {attackSurface.length === 0 ? (
             <div className="report-empty">Sem superfície com vulnerabilidades classificáveis.</div>
@@ -443,54 +493,6 @@ export default function RedTeamReportPage() {
                 </tbody>
               </table>
               {attackSurface.length > 30 && <p className="report-sub">Exibindo os 30 ativos mais críticos de {attackSurface.length}. Use o CSV para o inventário completo.</p>}
-            </div>
-          )}
-        </section>
-
-        {/* 07 Heatmap vulnerabilidades por classe */}
-        <section className="report-section">
-          <div className="sk-eyebrow">07 · Heatmap · vulnerabilidades por classe</div>
-          <span className="report-sub">famílias de vulnerabilidade × severidade (dado real por finding)</span>
-          {vulnByClass.length === 0 ? (
-            <div className="report-empty">Sem vulnerabilidades classificáveis neste ciclo.</div>
-          ) : (
-            <div className="report-heatgrid">
-              <span />
-              {HEAT_SEV.map((s) => <b key={s}>{SEV_LABEL[s]}</b>)}
-              <b>Tot</b>
-              {vulnByClass.slice(0, 20).map((row) => (
-                <Fragment key={row.family}>
-                  <strong className="report-heat-label">{row.label}</strong>
-                  {HEAT_SEV.map((s) => {
-                    const v = Number(row[s] || 0);
-                    const light = classMax > 0 && v / classMax > 0.45;
-                    return <span key={s} className="report-heat-cell sk-mono" style={{ background: heatColor(v, s, classMax), color: light ? "#fff" : "var(--ink-soft)" }}>{v || ""}</span>;
-                  })}
-                  <em className="report-heat-tot sk-mono">{row.total}</em>
-                </Fragment>
-              ))}
-            </div>
-          )}
-        </section>
-
-        {/* 08 Risco por framework */}
-        <section className="report-section">
-          <div className="sk-eyebrow">08 · Risco por framework</div>
-          <span className="report-sub">maturidade estimada por framework a partir das evidências reais do scan</span>
-          {Object.keys(frameworkRisk).length === 0 ? (
-            <div className="report-empty">Risco por framework indisponível.</div>
-          ) : (
-            <div className="report-kpis" style={{ marginTop: 10 }}>
-              {Object.entries(frameworkRisk).map(([key, fw]) => {
-                const score = Number(fw.score || 0);
-                const tone = score >= 80 ? "var(--sev-low-text)" : score >= 60 ? "var(--sev-medium-text)" : "var(--sev-critical-text)";
-                return (
-                  <div key={key}>
-                    <span>{FW_LABEL[key] || key}</span>
-                    <strong className="sk-mono" style={{ color: tone }}>{score.toFixed(1)} · {fw.grade || "—"}</strong>
-                  </div>
-                );
-              })}
             </div>
           )}
         </section>
