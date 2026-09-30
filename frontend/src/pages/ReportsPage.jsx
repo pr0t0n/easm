@@ -59,6 +59,100 @@ const reportCard = {
   boxShadow: "var(--shadow-card)",
 };
 
+// Report endpoints require the Bearer token, so a plain <a download> gets a 401.
+// Stream the file through the authenticated axios client and hand the browser a blob.
+async function downloadReportFile(path, { params, fallbackName } = {}) {
+  const resp = await client.get(path, { responseType: "blob", params, _skipToast: true });
+  const disposition = resp.headers?.["content-disposition"] || "";
+  const match = /filename="?([^"]+)"?/.exec(disposition);
+  const filename = match?.[1] || fallbackName || "report";
+  const url = window.URL.createObjectURL(new Blob([resp.data]));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.URL.revokeObjectURL(url);
+}
+
+const TARGET_PICKER_PAGE_SIZE = 20;
+
+// Native <select multiple> is unusable with hundreds of targets. This gives a
+// search box + paged checkbox list so a large inventory stays navigable.
+function PaginatedTargetPicker({ options, selected, onChange }) {
+  const [query, setQuery] = useState("");
+  const [page, setPage] = useState(0);
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return q ? options.filter((t) => t.toLowerCase().includes(q)) : options;
+  }, [options, query]);
+
+  const pageCount = Math.max(1, Math.ceil(filtered.length / TARGET_PICKER_PAGE_SIZE));
+  const safePage = Math.min(page, pageCount - 1);
+  const pageItems = filtered.slice(safePage * TARGET_PICKER_PAGE_SIZE, safePage * TARGET_PICKER_PAGE_SIZE + TARGET_PICKER_PAGE_SIZE);
+
+  useEffect(() => { setPage(0); }, [query, options.length]);
+
+  const selectedSet = new Set(selected);
+  const toggle = (target) => {
+    const next = new Set(selectedSet);
+    if (next.has(target)) next.delete(target); else next.add(target);
+    onChange(Array.from(next));
+  };
+
+  if (options.length === 0) {
+    return <div style={{ fontSize: 12, color: "var(--ink-muted)" }}>Nenhum alvo disponível para este scan.</div>;
+  }
+
+  return (
+    <div style={{ border: "1px solid var(--line)", borderRadius: 8, background: "#ffffff", overflow: "hidden" }}>
+      <div style={{ display: "flex", gap: 6, alignItems: "center", padding: 6, borderBottom: "1px solid var(--line)" }}>
+        <input
+          type="text"
+          placeholder={`Buscar entre ${options.length} alvos…`}
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          style={{ ...controlInput, fontSize: 12, flex: 1, minWidth: 0 }}
+        />
+        <button
+          type="button"
+          onClick={() => onChange(Array.from(new Set([...selected, ...filtered])))}
+          style={{ padding: "5px 8px", borderRadius: 6, border: "1px solid var(--line)", background: "transparent", fontSize: 11, cursor: "pointer", color: "var(--ink-soft)", whiteSpace: "nowrap" }}
+          title="Selecionar todos os alvos filtrados"
+        >
+          + filtrados
+        </button>
+        {selected.length > 0 && (
+          <button
+            type="button"
+            onClick={() => onChange([])}
+            style={{ padding: "5px 8px", borderRadius: 6, border: "1px solid var(--line)", background: "transparent", fontSize: 11, cursor: "pointer", color: "var(--ink-soft)", whiteSpace: "nowrap" }}
+            title="Limpar seleção"
+          >
+            limpar ({selected.length})
+          </button>
+        )}
+      </div>
+      <div style={{ maxHeight: 180, overflowY: "auto" }}>
+        {pageItems.map((target) => (
+          <label key={target} style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 8px", fontSize: 12, cursor: "pointer", color: "var(--ink)" }}>
+            <input type="checkbox" checked={selectedSet.has(target)} onChange={() => toggle(target)} />
+            <span style={{ fontFamily: "var(--font-mono)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{target}</span>
+          </label>
+        ))}
+        {pageItems.length === 0 && <div style={{ padding: 8, fontSize: 12, color: "var(--ink-muted)" }}>Nenhum alvo corresponde à busca.</div>}
+      </div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6, padding: 6, borderTop: "1px solid var(--line)", fontSize: 11, color: "var(--ink-muted)" }}>
+        <button type="button" onClick={() => setPage((p) => Math.max(0, p - 1))} disabled={safePage <= 0} style={{ padding: "3px 8px", borderRadius: 6, border: "1px solid var(--line)", background: "transparent", cursor: safePage <= 0 ? "not-allowed" : "pointer", opacity: safePage <= 0 ? 0.4 : 1 }}>‹ anterior</button>
+        <span>{filtered.length} alvo(s) · página {safePage + 1}/{pageCount}</span>
+        <button type="button" onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))} disabled={safePage >= pageCount - 1} style={{ padding: "3px 8px", borderRadius: 6, border: "1px solid var(--line)", background: "transparent", cursor: safePage >= pageCount - 1 ? "not-allowed" : "pointer", opacity: safePage >= pageCount - 1 ? 0.4 : 1 }}>próxima ›</button>
+      </div>
+    </div>
+  );
+}
+
 export default function ReportsPage() {
   const apiUrl = useMemo(() => resolveApiBaseUrl(), []);
   const [compareScanId, setCompareScanId] = useState("");
@@ -189,6 +283,58 @@ export default function ReportsPage() {
     const f = document.getElementById("report-iframe");
     if (f?.contentWindow) { f.contentWindow.focus(); f.contentWindow.print(); }
   };
+  const [downloading, setDownloading] = useState("");
+  const downloadCsv = async () => {
+    if (!scanId) return;
+    setDownloading("csv");
+    try {
+      // findings/export.csv carries the real per-finding rows (populated during
+      // the scan); scans/{id}/report.csv is only filled once the P22 report is
+      // built, so it would be empty mid-scan.
+      await downloadReportFile("/api/findings/export.csv", {
+        params: { scan_id: scanId },
+        fallbackName: `vulnerabilidades_scan${scanId}.csv`,
+      });
+    } catch {
+      alert("Não foi possível baixar o CSV do relatório.");
+    } finally {
+      setDownloading("");
+    }
+  };
+  const downloadPdf = () => {
+    // No server-side PDF renderer is available; the report is client-rendered,
+    // so print-to-PDF of the loaded report is the reliable path. Prefer the
+    // iframe; fall back to opening the report in a new tab and printing there.
+    const f = document.getElementById("report-iframe");
+    if (f?.contentWindow) {
+      f.contentWindow.focus();
+      f.contentWindow.print();
+      return;
+    }
+    if (!reportUrl) return;
+    const win = window.open(reportUrl, "_blank", "noopener,noreferrer");
+    if (win) win.addEventListener("load", () => { try { win.focus(); win.print(); } catch { /* noop */ } });
+  };
+  const pentestReportPath = () => `/api/scans/${scanId}/pentest-report${compareScanId ? `?previous_scan_id=${compareScanId}` : ""}`;
+  const openPentestReport = async () => {
+    if (!scanId) return;
+    try {
+      const resp = await client.get(pentestReportPath(), { responseType: "blob", _skipToast: true });
+      const url = window.URL.createObjectURL(new Blob([resp.data], { type: "text/html" }));
+      window.open(url, "_blank", "noopener,noreferrer");
+      setTimeout(() => window.URL.revokeObjectURL(url), 60000);
+    } catch {
+      alert("Não foi possível abrir o relatório pentest.");
+    }
+  };
+  const downloadPentestHtml = async () => {
+    if (!scanId) return;
+    try {
+      await downloadReportFile(pentestReportPath(), { fallbackName: `pentest-scan${scanId}.html` });
+    } catch {
+      alert("Não foi possível baixar o HTML do relatório pentest.");
+    }
+  };
 
   // Load narrative when scan changes
   useEffect(() => {
@@ -295,21 +441,13 @@ export default function ReportsPage() {
           </>
         )}
 
-        <div style={{ display: "grid", gap: 4, minWidth: 260 }}>
+        <div style={{ display: "grid", gap: 4, minWidth: 300 }}>
           <label style={{ fontSize: 11, color: "var(--ink-muted)" }}>Alvos incluídos no relatório (customizável)</label>
-          <select
-            multiple
-            value={selectedIncludeTargets}
-            onChange={(e) => {
-              const values = Array.from(e.target.selectedOptions || []).map((opt) => normalizeTargetToken(opt.value)).filter(Boolean);
-              setSelectedIncludeTargets(values);
-            }}
-            style={{ ...controlInput, fontSize: 12, minHeight: 72 }}
-          >
-            {availableTargetOptions.map((target) => (
-              <option key={target} value={target}>{target}</option>
-            ))}
-          </select>
+          <PaginatedTargetPicker
+            options={availableTargetOptions}
+            selected={selectedIncludeTargets}
+            onChange={setSelectedIncludeTargets}
+          />
           <input
             type="text"
             placeholder="Extras (csv): ex. app.site.com,api.site.com"
@@ -341,7 +479,8 @@ export default function ReportsPage() {
 
         <div style={{ flex: 1 }} />
         <button type="button" onClick={openNewTab} disabled={!reportUrl || !scopeReady} className="app-btn-secondary rounded-lg border px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50">Abrir em nova aba</button>
-        <button type="button" onClick={printReport} disabled={!reportUrl || !scopeReady} className="app-btn-primary rounded-lg border px-3 py-2 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-50">Imprimir / PDF</button>
+        <button type="button" onClick={downloadCsv} disabled={!scanId || downloading === "csv"} className="app-btn-secondary rounded-lg border px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50">{downloading === "csv" ? "Baixando…" : "Baixar CSV"}</button>
+        <button type="button" onClick={downloadPdf} disabled={!reportUrl || !scopeReady} className="app-btn-primary rounded-lg border px-3 py-2 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-50">Baixar PDF</button>
       </div>
 
       <div style={{ position: "sticky", top: 8, zIndex: 4, background: "rgba(255,255,255,0.94)", border: "1px solid var(--line)", borderRadius: 10, padding: "10px 12px", display: "grid", gap: 3, fontSize: 12, color: "var(--ink-muted)", boxShadow: "var(--shadow-card)", backdropFilter: "blur(8px)" }}>
@@ -430,21 +569,35 @@ export default function ReportsPage() {
             </div>
           </div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <a
-              href={`${apiUrl}/api/scans/${scanId}/pentest-report${compareScanId ? `?previous_scan_id=${compareScanId}` : ""}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              style={{ padding: "8px 18px", borderRadius: 8, background: "#c0392b", color: "#fff", fontWeight: 700, fontSize: 13, textDecoration: "none", border: "none", display: "inline-block", cursor: "pointer" }}
+            <button
+              type="button"
+              onClick={openPentestReport}
+              style={{ padding: "8px 18px", borderRadius: 8, background: "#c0392b", color: "#fff", fontWeight: 700, fontSize: 13, border: "none", cursor: "pointer" }}
             >
               Abrir Relatório Pentest
-            </a>
-            <a
-              href={`${apiUrl}/api/scans/${scanId}/pentest-report${compareScanId ? `?previous_scan_id=${compareScanId}` : ""}`}
-              download={`pentest-scan${scanId}.html`}
-              style={{ padding: "8px 18px", borderRadius: 8, background: "transparent", color: "#c8a4e0", fontWeight: 600, fontSize: 13, textDecoration: "none", border: "1px solid #6a3060", display: "inline-block", cursor: "pointer" }}
+            </button>
+            <button
+              type="button"
+              onClick={downloadPdf}
+              style={{ padding: "8px 18px", borderRadius: 8, background: "#7b2d5e", color: "#fff", fontWeight: 700, fontSize: 13, border: "none", cursor: "pointer" }}
+            >
+              Baixar PDF
+            </button>
+            <button
+              type="button"
+              onClick={downloadCsv}
+              disabled={downloading === "csv"}
+              style={{ padding: "8px 18px", borderRadius: 8, background: "transparent", color: "#c8a4e0", fontWeight: 600, fontSize: 13, border: "1px solid #6a3060", cursor: "pointer", opacity: downloading === "csv" ? 0.6 : 1 }}
+            >
+              {downloading === "csv" ? "Baixando…" : "Baixar CSV"}
+            </button>
+            <button
+              type="button"
+              onClick={downloadPentestHtml}
+              style={{ padding: "8px 18px", borderRadius: 8, background: "transparent", color: "#c8a4e0", fontWeight: 600, fontSize: 13, border: "1px solid #6a3060", cursor: "pointer" }}
             >
               Baixar HTML
-            </a>
+            </button>
           </div>
           <div style={{ fontSize: 11, color: "#8a6080", width: "100%", marginTop: -4 }}>
             Scan #{scanId} · Endpoint: /api/scans/{scanId}/pentest-report
