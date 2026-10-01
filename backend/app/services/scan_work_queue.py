@@ -3038,6 +3038,41 @@ for _ph, _gate in PHASE_GATE.items():
     if _gate:
         _GATE_UNLOCKS.setdefault(_gate, []).append(_ph)
 
+# `status == "blocked"` is overloaded across this module: a plain PHASE_GATE
+# block ("waiting_for:<gate>", or no last_error yet) is temporary and SHOULD
+# bounce back to "queued" once its gate drains. These prefixes mark the
+# opposite — a blocked item with its OWN dedicated lifecycle/reconciler that
+# must never be swept up by a generic gate unlock:
+#   - supervisor_broken_glass:*   / supervisor_review_required:*
+#         attempts permanently exhausted (claim_work_items + runtime_supervisor);
+#         needs human review, not a requeue. Sweeping these back to "queued"
+#         bounces blocked->queued->(re-exhausted)->blocked every dispatch
+#         cycle forever — an infinite ping-pong that pins mission_progress
+#         (scan #63, 2026-09-30).
+#   - superseded_by_replan:*
+#         obsolete; only finalize_superseded_work_items may touch it (-> skipped).
+#   - required_evidence_absent:*
+#         waiting on evidence, not a phase gate; only
+#         requeue_evidence_ready_work_items may touch it.
+# Any NEW function that transitions "blocked" -> "queued" in bulk must exclude
+# these the same way, or it can reproduce the same class of bug.
+NON_GATE_BLOCKED_PREFIXES: tuple[str, ...] = (
+    "supervisor_broken_glass:",
+    "supervisor_review_required:",
+    "superseded_by_replan:",
+    "required_evidence_absent:",
+)
+
+
+def _blocked_for_generic_gate_clause():
+    """SQL clause: True for items genuinely waiting on a PHASE_GATE (safe to
+    bulk-requeue when their gate drains) — False for items in one of the
+    dedicated-lifecycle categories in NON_GATE_BLOCKED_PREFIXES."""
+    return or_(
+        ScanWorkItem.last_error.is_(None),
+        and_(*[~ScanWorkItem.last_error.like(f"{p}%") for p in NON_GATE_BLOCKED_PREFIXES]),
+    )
+
 
 def unblock_phase_items(
     db: Session,
@@ -3063,6 +3098,14 @@ def unblock_phase_items(
         return 0
 
     now = datetime.now()
+    # Only sweep items genuinely waiting on THIS gate — see
+    # NON_GATE_BLOCKED_PREFIXES for why the exclusion is required: without it
+    # the gate reconciler (idempotent-by-design, runs every dispatch cycle)
+    # re-queues already-exhausted/superseded/evidence-pending items every
+    # ~30-60s, which for the exhausted-attempts case get immediately
+    # re-blocked by claim_work_items on the very next pass — an infinite
+    # unblock↔reblock ping-pong that never drains the queue and pins
+    # mission_progress forever (scan #63, 2026-09-30).
     # Inclui batch items cujos batch_targets intersectam com os targets dados
     # Para batch: target='__batch__', batch_targets em item_metadata
     rows = (
@@ -3071,6 +3114,7 @@ def unblock_phase_items(
             ScanWorkItem.scan_job_id == scan_id,
             ScanWorkItem.phase_id.in_(phases_to_unlock),
             ScanWorkItem.status == "blocked",
+            _blocked_for_generic_gate_clause(),
             or_(
                 ScanWorkItem.target.in_(targets),
                 ScanWorkItem.target.like("__batch__%"),

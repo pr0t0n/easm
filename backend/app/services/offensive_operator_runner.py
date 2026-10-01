@@ -1586,6 +1586,7 @@ def _append_llm_reasoning_decision(
     tech_stack: dict[str, Any] | None = None,
     env_profile: dict[str, Any] | None = None,
     reason: str = "legacy_runner_phase_decision",
+    deadline: float | None = None,
 ) -> dict[str, Any]:
     key = f"{phase_id}:{target}"
     existing = [
@@ -1594,6 +1595,22 @@ def _append_llm_reasoning_decision(
     ]
     if existing:
         return state
+
+    # Wall-clock budget for the whole phase-loop's LLM-reasoning calls within
+    # ONE run_scan_job_unit cycle. Each call is individually bounded (~60s,
+    # see _call_learning_llm), but when a gate unlock makes many (phase,target)
+    # pairs newly eligible in the same cycle, those bounded calls run
+    # serially and compound — observed: 33 new pairs -> ~33min in one cycle,
+    # blowing past _SCAN_CHAIN_LOCK_TTL (180s, tasks.py) and causing the
+    # watchdog to misdiagnose a live-but-slow chain as "orphaned" (scan #63,
+    # 2026-10-01 02:40-02:56). Skipping here is a safe no-op: `existing` stays
+    # empty so this (phase,target) decision is simply retried next cycle;
+    # nothing is lost, the LLM hint is advisory and the fallback below is the
+    # same deterministic "continue" a budget-skip would otherwise mean.
+    if deadline is not None:
+        import time as _llmrt_time
+        if _llmrt_time.monotonic() > deadline:
+            return state
 
     reasoning: dict[str, Any] | None = None
     tool_evidence: list[dict[str, Any]] = []
@@ -3397,6 +3414,17 @@ def run_offensive_operator_scan(
     # 3600s = 8h) can't monopolize a worker thread. When exceeded mid-phase we
     # stop launching further tools and let the normal checkpoint advance the queue.
     _PHASE_UNIT_DEADLINE = max(120, int(initial_state.get("phase_unit_deadline_seconds") or 1500))
+    # Aggregate wall-clock budget for _append_llm_reasoning_decision calls
+    # across this ENTIRE run_scan_job_unit cycle (not per-target). Each
+    # individual LLM reasoning call is bounded (~60s), but when a gate unlock
+    # makes many (phase,target) pairs newly eligible at once, those calls run
+    # serially within this one cycle and compound past _SCAN_CHAIN_LOCK_TTL
+    # (180s, tasks.py), which makes the watchdog mistake a live-but-slow chain
+    # for an orphan and "restart" a scan that was never actually stuck (scan
+    # #63, 2026-10-01). Kept comfortably under that TTL so the rest of the
+    # cycle's bookkeeping still has margin.
+    _LLM_REASONING_CYCLE_BUDGET_SECONDS = max(30, min(90, int(initial_state.get("llm_reasoning_cycle_budget_seconds") or 90)))
+    _llm_reasoning_cycle_deadline = _time.monotonic() + _LLM_REASONING_CYCLE_BUDGET_SECONDS
     _phase_unit_start = _time.monotonic()
     completed_work: set[str] = set(initial_state.get("completed_work") or [])
     # all_targets starts as the input targets; after P01 it grows with every
@@ -4407,6 +4435,7 @@ def run_offensive_operator_scan(
                         tech_stack,
                         env_profile,
                         reason="phase_post_processing",
+                        deadline=_llm_reasoning_cycle_deadline,
                     )
                 except Exception:  # noqa: BLE001
                     pass

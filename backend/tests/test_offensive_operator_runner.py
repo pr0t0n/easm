@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 from app.models.models import ScanJob
 from app.services.offensive_operator_core import ExecutionPolicyEngine
 from app.services.offensive_operator_core import MCPToolExecutor
@@ -10,6 +12,74 @@ from app.services.offensive_operator_runner import _parse_targets_from_query
 from app.services.offensive_operator_runner import _scope_from_job
 from app.services.offensive_operator_runner import _call_mcp_execution
 from app.services.offensive_operator_runner import _call_operator_tool
+from app.services.offensive_operator_runner import _append_llm_reasoning_decision
+
+
+def test_append_llm_reasoning_decision_skips_call_once_cycle_budget_is_exhausted(monkeypatch) -> None:
+    """A gate unlock can make many (phase,target) pairs newly eligible in the
+    same run_scan_job_unit cycle. Each LLM reasoning call is individually
+    bounded (~60s) but with no aggregate cap they compound past the chain-lock
+    TTL and the watchdog mistakes a live-but-slow chain for an orphan (scan
+    #63, 2026-10-01). Once the cycle deadline has passed, the function must
+    return the state untouched (no LLM call, no entry recorded) so the
+    decision is simply retried next cycle instead of ever being made here.
+    """
+
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("LLM reasoning must not be called once the cycle deadline has passed")
+
+    monkeypatch.setattr(
+        "app.services.offensive_operator_runner._direct_runtime_llm_reasoning", _boom
+    )
+
+    state: dict = {}
+    expired_deadline = time.monotonic() - 1.0
+    result = _append_llm_reasoning_decision(
+        db=None,
+        job=None,
+        state=state,
+        phase_id="P02",
+        target="example.com",
+        reason="phase_post_processing",
+        deadline=expired_deadline,
+    )
+
+    assert result == {}
+    assert "llm_reasoning" not in result
+
+
+def test_append_llm_reasoning_decision_still_calls_llm_within_budget(monkeypatch) -> None:
+    calls = []
+
+    def _fake_reasoning(*args, **_kwargs):
+        calls.append(args)
+        return {"execution_decision": "continue", "injected_tools": {}, "payloads_hint": [], "reasoning": "ok"}
+
+    monkeypatch.setattr(
+        "app.services.offensive_operator_runner._direct_runtime_llm_reasoning", _fake_reasoning
+    )
+
+    class _FakeDb:
+        def add(self, *_args, **_kwargs):
+            pass
+
+    class _FakeJob:
+        id = 1
+
+    state: dict = {}
+    future_deadline = time.monotonic() + 60.0
+    result = _append_llm_reasoning_decision(
+        db=_FakeDb(),
+        job=_FakeJob(),
+        state=state,
+        phase_id="P02",
+        target="example.com",
+        reason="phase_post_processing",
+        deadline=future_deadline,
+    )
+
+    assert len(calls) == 1
+    assert len(result.get("llm_reasoning") or []) == 1
 
 
 def test_parse_targets_from_query_handles_semicolon_and_comma_separated_values() -> None:
