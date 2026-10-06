@@ -699,7 +699,9 @@ export default function LearningPage() {
       if ((data.items || []).length) {
         setReviewItem(data.items[0]);
       }
-      setTaskStatus(`${data.reviewed_count || 0} aprendizados ${action === "accept" ? "aceitos" : "rejeitados"}.`);
+      const skipped = Number(data.skipped_count || 0);
+      const base = `${data.reviewed_count || 0} aprendizados ${action === "accept" ? "aceitos" : "rejeitados"}.`;
+      setTaskStatus(skipped ? `${base} ${skipped} ignorado(s) por falta de conteúdo sintetizado.` : base);
       await load();
     } catch (err) {
       setError(err?.response?.data?.detail || "Falha ao revisar aprendizados em lote.");
