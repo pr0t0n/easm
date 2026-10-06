@@ -21,10 +21,13 @@ RUN printf 'deb http://kali.download/kali kali-rolling main contrib non-free non
 # ── Layer 1: Core build deps & language runtimes ────────────────────────────
 # Runtimes (go, python/pipx, node/npm, ruby) are kept so that click-to-install
 # modules can COMPILE/INSTALL tools at runtime into /opt/tools.
+# python3-dev provides Python.h: on Kali's Python 3.14 (+ arm64) PyPI has no
+# prebuilt ruamel.yaml.clib wheel, so the semgrep module (modules.yaml) falls
+# back to a source build of that C extension, which needs the headers.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl wget git jq unzip \
       dnsutils openssl \
-      python3 python3-pip python3-venv python3-setuptools \
+      python3 python3-pip python3-venv python3-setuptools python3-dev \
       pipx \
       build-essential pkg-config libssl-dev libpcap-dev \
       golang-go \
