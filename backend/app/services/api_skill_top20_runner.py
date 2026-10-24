@@ -682,12 +682,18 @@ def _fuzz_cases(ep: Endpoint, allow_mutations: bool) -> list[tuple[str, str, Any
     query params and request-body fields. Returns (method, url, json_body, label).
     Body fuzzing (mutating) is gated behind allow_mutations."""
     cases: list[tuple[str, str, Any, str]] = []
-    has_query = any(str(p.get("location")) == "query" for p in ep.parameters) or bool(urlparse(ep.url).query)
-    if has_query:
+    # Query param to fuzz: a declared query parameter (spec endpoints keep params
+    # in ep.parameters, NOT in the URL), else an existing URL query key.
+    query_names = [str(p.get("name")) for p in ep.parameters if str(p.get("location")) == "query" and p.get("name")]
+    existing = parse_qsl(urlparse(ep.url).query, keep_blank_values=True)
+    pname = query_names[0] if query_names else (existing[0][0] if existing else "")
+    if pname and ep.method.upper() in {"GET", "HEAD"}:
+        parsed = urlparse(ep.url)
+        base_pairs = dict(existing)
         for payload in _FUZZ_QUERY_PAYLOADS:
-            mutated = _replace_first_query_value(ep.url, payload)
-            if mutated:
-                cases.append(("GET", mutated, None, f"query:{payload[:14]}"))
+            base_pairs[pname] = payload
+            furl = urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, urlencode(base_pairs), parsed.fragment))
+            cases.append(("GET", furl, None, f"query:{pname}={payload[:12]}"))
     json_fields = [str(p.get("name")) for p in ep.parameters if str(p.get("location")) == "json" and p.get("name")]
     if json_fields and ep.method.upper() in {"POST", "PUT", "PATCH"} and allow_mutations:
         cases.append((ep.method.upper(), ep.url, {f: "A" * 2000 for f in json_fields}, "body:oversized"))
