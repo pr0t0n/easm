@@ -154,6 +154,15 @@ def build_api_endpoint_report(db: Session, job: ScanJob) -> dict[str, Any]:
         tool = str(getattr(f, "tool", "") or "").lower()
         sid = str(det.get("api_skill_id") or "")
         if tool in API_FINDING_TOOLS or sid.startswith("skill.api."):
+            _vs = str(det.get("verification_status") or "candidate")
+            _http = det.get("http_status") or (det.get("response_fingerprint") or {}).get("status_code")
+            _advisory = bool(det.get("advisory")) or _vs == "advisory"
+            # Regra dura: achado de BAC/BOLA só é "positivo" com acesso real
+            # (resposta 2xx/3xx) ou confirmado. 401/403/404 => advisory (design),
+            # nunca positivo — exatamente o ponto levantado.
+            if (sid in BAC_SKILL_IDS) and _vs != "confirmed":
+                if not (isinstance(_http, int) and 200 <= _http < 400):
+                    _advisory = True
             api_findings.append({
                 "url": str(getattr(f, "url", "") or det.get("url") or det.get("matched_at") or ""),
                 "path": _path_of(getattr(f, "url", "") or det.get("url") or det.get("matched_at") or ""),
@@ -162,6 +171,11 @@ def build_api_endpoint_report(db: Session, job: ScanJob) -> dict[str, Any]:
                 "skill_id": sid,
                 "owasp": catalog.get(sid, {}).get("owasp", ""),
                 "is_bac": sid in BAC_SKILL_IDS,
+                # advisory = risco de design (não confirma acesso indevido);
+                # separado dos achados para não inflar "positivos".
+                "verification": _vs,
+                "advisory": _advisory,
+                "http_status": _http,
             })
 
     # 4) Per-endpoint aggregation.
@@ -211,11 +225,21 @@ def build_api_endpoint_report(db: Session, job: ScanJob) -> dict[str, Any]:
                 "response_truncated": bool(o.get("response_truncated")),
             })
 
+    # Separate confirmed/candidate findings (real signals) from advisories
+    # (design-risk notes that do NOT confirm a vuln) so advisories never inflate
+    # the positive counts.
+    real_findings = [f for f in api_findings if not f["advisory"]]
+    advisory_findings = [f for f in api_findings if f["advisory"]]
     find_by_ep: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
-    for f in api_findings:
+    adv_by_ep: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for f in real_findings:
         d = match_path(f["path"])
         if d:
             find_by_ep[(d["method"], d["path"])].append(f)
+    for f in advisory_findings:
+        d = match_path(f["path"])
+        if d:
+            adv_by_ep[(d["method"], d["path"])].append(f)
 
     endpoint_rows: list[dict[str, Any]] = []
     for d in docs:
@@ -241,8 +265,9 @@ def build_api_endpoint_report(db: Session, job: ScanJob) -> dict[str, Any]:
             "identities": sorted(agg["identities"]) if agg else [],
             "http_status_counts": dict(agg["statuses"]) if agg else {},
             "observation_count": int(agg["count"]) if agg else 0,
-            "findings": [{"severity": f["severity"], "title": f["title"], "owasp": f["owasp"], "skill_id": f["skill_id"], "is_bac": f["is_bac"]} for f in fs],
+            "findings": [{"severity": f["severity"], "title": f["title"], "owasp": f["owasp"], "skill_id": f["skill_id"], "is_bac": f["is_bac"], "verification": f["verification"], "http_status": f.get("http_status")} for f in fs],
             "findings_by_severity": dict(sev_counts),
+            "advisories": [{"title": f["title"], "owasp": f["owasp"], "skill_id": f["skill_id"], "is_bac": f["is_bac"]} for f in adv_by_ep.get(key, [])],
             "evidence": list(agg["evidence"]) if agg else [],
             "quality": _quality(tested, skills, real, bac_tested, len(fs)),
         })
@@ -257,7 +282,7 @@ def build_api_endpoint_report(db: Session, job: ScanJob) -> dict[str, Any]:
     for r in endpoint_rows:
         for sid in r["skills_tested"]:
             skill_ep_cov[sid] += 1
-    for f in api_findings:
+    for f in real_findings:
         if f["skill_id"]:
             skill_find[f["skill_id"]] += 1
     catalog_rows = []
@@ -269,15 +294,16 @@ def build_api_endpoint_report(db: Session, job: ScanJob) -> dict[str, Any]:
             "findings": skill_find.get(sid, 0),
         })
 
-    # 6) Summary (forest overview).
+    # 6) Summary (forest overview). Advisories NÃO contam como achados/positivos.
     sev_total: dict[str, int] = defaultdict(int)
-    for f in api_findings:
+    for f in real_findings:
         sev_total[f["severity"]] += 1
     tested_count = sum(1 for r in endpoint_rows if r["tested"])
     bac_tested_count = sum(1 for r in endpoint_rows if r["bac_tested"])
-    bac_findings = sum(1 for f in api_findings if f["is_bac"])
+    bac_findings = sum(1 for f in real_findings if f["is_bac"])
+    bac_confirmed = sum(1 for f in real_findings if f["is_bac"] and f["verification"] == "confirmed")
     owasp_counts: dict[str, int] = defaultdict(int)
-    for f in api_findings:
+    for f in real_findings:
         if f["owasp"]:
             owasp_counts[f["owasp"]] += 1
 
@@ -295,10 +321,13 @@ def build_api_endpoint_report(db: Session, job: ScanJob) -> dict[str, Any]:
             "coverage_pct": round(tested_count / len(docs) * 100) if docs else 0,
             "bac_endpoints_tested": bac_tested_count,
             "shadow_paths_observed": len(shadow_paths),
-            "findings_total": len(api_findings),
+            "findings_total": len(real_findings),
             "findings_by_severity": dict(sev_total),
             "findings_by_owasp": dict(sorted(owasp_counts.items())),
+            "advisories_total": len(advisory_findings),
             "bac_findings": bac_findings,
+            "bac_confirmed": bac_confirmed,
+            "bac_advisories": sum(1 for f in advisory_findings if f["is_bac"]),
             "skills_catalog_total": len(catalog),
             "skills_executed": len(executed_skills & set(catalog)),
         },

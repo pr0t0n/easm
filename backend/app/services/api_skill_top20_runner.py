@@ -837,8 +837,17 @@ def _run_endpoint_skill(skill: dict[str, Any], endpoints: list[Endpoint], identi
                                "lê/submete dados do processo que não lhe pertence.")
                         )
                         extra = _response_evidence(result, method)
-                        extra.update({"object_id_params": id_params, "guessable_identifier": guessable, "access_control_model": "identifier_only"})
-                        findings.append(_finding(skill, ep.url, note, identity.key, severity=("high" if guessable else "medium"), verification_status="candidate", evidence_extra=extra))
+                        extra.update({
+                            "object_id_params": id_params,
+                            "guessable_identifier": guessable,
+                            "access_control_model": "identifier_only",
+                            "advisory": True,
+                            "confirmation": "NÃO confirma acesso indevido — é um risco de design (modelo de acesso por ID). Para confirmar BOLA é preciso um ID válido de outro dono retornar 200 com dados.",
+                        })
+                        # Advisory de design, NÃO um achado positivo: severidade
+                        # informativa e verification_status=advisory (o relatório
+                        # separa de achados confirmados; não conta como "achado BAC").
+                        findings.append(_finding(skill, ep.url, "Modelo de acesso por identificador (revisar BOLA): " + note, identity.key, severity="info", verification_status="advisory", evidence_extra=extra))
                     elif resp is not None and sc not in (0, 401, 403, 404):
                         # Concrete enumerated identifier returned data without an
                         # owner check -> active BOLA confirmation.

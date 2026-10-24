@@ -121,7 +121,8 @@ function ApiReportDetail({ id }) {
         <Stat label="Da spec" value={s.endpoints_from_spec} />
         <Stat label="Descobertos (crawler)" value={s.endpoints_discovered} color="var(--brand, #2563eb)" />
         <Stat label="Endpoints BAC testados" value={s.bac_endpoints_tested} />
-        <Stat label="Achados BAC" value={s.bac_findings} color={s.bac_findings ? "#dc2626" : "var(--ink)"} />
+        <Stat label="Achados BAC (confirmados)" value={`${s.bac_confirmed ?? 0}/${s.bac_findings ?? 0}`} color={s.bac_confirmed ? "#dc2626" : "var(--ink)"} />
+        <Stat label="Advisórios (revisar)" value={s.advisories_total ?? 0} color={(s.advisories_total ?? 0) ? "#d97706" : "var(--ink)"} />
         <Stat label="Achados" value={s.findings_total} color={sev.critical ? "#dc2626" : "var(--ink)"} />
         <Stat label="Skills executadas" value={`${s.skills_executed}/${s.skills_catalog_total}`} />
       </div>
@@ -215,7 +216,18 @@ function ApiReportDetail({ id }) {
                                 </div>
                               ))}
                             </div>
-                          ) : <div style={{ fontSize: 11, color: "var(--ink-muted)", marginBottom: 8 }}>Sem achados neste endpoint.</div>}
+                          ) : <div style={{ fontSize: 11, color: "var(--ink-muted)", marginBottom: 8 }}>Sem achados confirmados neste endpoint.</div>}
+                          {e.advisories?.length > 0 && (
+                            <div style={{ marginBottom: 8 }}>
+                              <div style={{ fontSize: 11, fontWeight: 800, color: "var(--sev-medium-text, #d97706)" }}>Advisórios de design (revisar — não confirmados)</div>
+                              {e.advisories.map((a, j) => (
+                                <div key={j} style={{ fontSize: 11.5, padding: "2px 0", color: "var(--ink)" }}>
+                                  {a.is_bac && <span style={{ color: "var(--sev-medium-text, #d97706)", fontWeight: 800, marginRight: 5 }}>BAC?</span>}
+                                  {a.title}{a.owasp && <span style={{ color: "var(--ink-muted)", marginLeft: 5 }}>({a.owasp})</span>}
+                                </div>
+                              ))}
+                            </div>
+                          )}
                           {e.evidence?.length > 0 && (
                             <div>
                               <div style={{ fontSize: 11, fontWeight: 800, color: "var(--ink)", margin: "4px 0" }}>Evidência — requisições executadas ({e.evidence.length})</div>
