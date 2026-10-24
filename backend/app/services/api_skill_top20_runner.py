@@ -702,6 +702,23 @@ def _fuzz_cases(ep: Endpoint, allow_mutations: bool) -> list[tuple[str, str, Any
     return cases[:10]
 
 
+def _object_id_params(ep: Endpoint) -> list[str]:
+    """Path variables that identify an object/transaction (id, requestId,
+    externalId, uuid, *_id). These are the BOLA access-control surface."""
+    out: list[str] = []
+    for name in _PATH_PLACEHOLDER_RE.findall(urlparse(ep.url).path):
+        nl = name.lower()
+        if any(tok in nl for tok in ("id", "uuid", "request", "external", "order")):
+            out.append(name)
+    return out
+
+
+def _guessable_identifier(id_params: list[str]) -> bool:
+    # Client-assigned / sequential identifiers (externalId "order-12345") are
+    # enumerable — the worst case for object-id-only access control.
+    return any(g in p.lower() for p in id_params for g in ("external", "order"))
+
+
 def _run_endpoint_skill(skill: dict[str, Any], endpoints: list[Endpoint], identities: list[Identity], limits: dict[str, Any], allow_mutations: bool) -> dict[str, Any]:
     max_endpoints = 0
     timeout = int(limits.get("timeout_seconds") or DEFAULT_TIMEOUT_SECONDS)
@@ -795,6 +812,39 @@ def _run_endpoint_skill(skill: dict[str, Any], endpoints: list[Endpoint], identi
                             extra = _response_evidence(result, fmethod)
                             extra.update({"fuzz_case": label})
                             findings.append(_finding(skill, ep.url, f"Fuzz ({label}) disparou erro/stack trace na resposta.", identity.key, severity="high", verification_status="confirmed", evidence_extra=extra))
+                    continue
+                if skill_id == "skill.api.bola_idor" and ep.documented and _object_id_params(ep):
+                    id_params = _object_id_params(ep)
+                    guessable = _guessable_identifier(id_params)
+                    is_template = "{" in ep.url
+                    method = _probe_method(skill, ep)
+                    attempts += 1
+                    result = _request(session, method, ep.url, identity, timeout=timeout)
+                    observations.append(_response_observation(skill, ep, identity, method, result))
+                    resp = result.get("response")
+                    sc = int(resp.status_code) if resp is not None else 0
+                    if is_template:
+                        # Advisory on the access-control model (one per logical
+                        # endpoint): object reached only by its identifier, no
+                        # owner check — the pattern the DevOps team flagged.
+                        note = (
+                            f"Acesso ao objeto depende apenas do identificador de path ({', '.join(id_params)}) — "
+                            "sem verificação de dono (BOLA / OWASP API1). "
+                            + ("O identificador é atribuído pelo cliente e tende a ser sequencial/adivinhável "
+                               "(ex.: 'order-12345'), permitindo enumeração por um atacante."
+                               if guessable else
+                               "Se o identificador da transação vazar ou for previsível, outro chamador "
+                               "lê/submete dados do processo que não lhe pertence.")
+                        )
+                        extra = _response_evidence(result, method)
+                        extra.update({"object_id_params": id_params, "guessable_identifier": guessable, "access_control_model": "identifier_only"})
+                        findings.append(_finding(skill, ep.url, note, identity.key, severity=("high" if guessable else "medium"), verification_status="candidate", evidence_extra=extra))
+                    elif resp is not None and sc not in (0, 401, 403, 404):
+                        # Concrete enumerated identifier returned data without an
+                        # owner check -> active BOLA confirmation.
+                        extra = _response_evidence(result, method)
+                        extra.update({"enumerated_value": ep.metadata.get("enumeration_candidate"), "http_status": sc})
+                        findings.append(_finding(skill, ep.url, f"Objeto acessível por identificador enumerado (HTTP {sc}) sem autorização de dono — BOLA confirmado por enumeração.", identity.key, severity=("high" if guessable else "medium"), verification_status=("confirmed" if sc == 200 else "candidate"), evidence_extra=extra))
                     continue
                 method = _probe_method(skill, ep)
                 attempts += 1
