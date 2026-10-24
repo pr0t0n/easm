@@ -172,6 +172,25 @@ _SAMPLE_UUID = "05be75cc-8f8a-414a-891f-434aa9b4e7a5"
 _NUMERIC_ENUM = ["1", "2", "3", "10", "100", "9001"]
 _PATH_PLACEHOLDER_RE = re.compile(r"\{([^/{}]+)\}")
 _MAX_ENUM_VARIANTS = 5
+_UUID_SEG_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
+
+
+def _path_template_key(path: str) -> str:
+    """Normalize a URL path to a template key so that a concrete/observed path and
+    its documented spec template collapse to the same key:
+    /api/v1/admin/dead-letters/{id}/replay and /api/v1/admin/dead-letters/42/replay
+    both -> /api/v1/admin/dead-letters/{}/replay. Segments that are placeholders,
+    pure digits or UUIDs become {}. Used to avoid flagging as 'shadow' a path that
+    matches a template already in the submitted spec."""
+    segs: list[str] = []
+    for s in str(path or "").strip("/").split("/"):
+        if not s:
+            continue
+        if ("{" in s and "}" in s) or s.isdigit() or _UUID_SEG_RE.match(s):
+            segs.append("{}")
+        else:
+            segs.append(s.lower())
+    return "/" + "/".join(segs)
 
 
 def _looks_numeric(type_hint: str, name: str) -> bool:
@@ -1029,11 +1048,27 @@ def _run_endpoint_skill(skill: dict[str, Any], endpoints: list[Endpoint], identi
 
 def _shadow_api_findings(skill: dict[str, Any], endpoints: list[Endpoint]) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
+    # Templates que JÁ estão no contrato (spec/collection). Um path só é "shadow"
+    # se NÃO casar com nenhum template documentado — ex.: /dead-letters/{id}/replay
+    # é documentado, então /dead-letters/42/replay (concreto) não é shadow.
+    documented_templates = {
+        _path_template_key(urlparse(ep.url).path)
+        for ep in endpoints
+        if ep.documented
+    }
+    seen_templates: set[str] = set()
     for ep in endpoints:
-        path = urlparse(ep.url).path.lower()
         if ep.documented:
             continue
-        if any(token in path for token in ("/v0", "/v1", "/old", "/legacy", "/beta", "/internal", "/private", "/debug", "/admin")):
+        path = urlparse(ep.url).path
+        tkey = _path_template_key(path)
+        if tkey in documented_templates:
+            continue  # casa com um template do próprio spec → não é shadow
+        if tkey in seen_templates:
+            continue  # evita duplicar o mesmo template concretizado em várias variantes
+        plow = path.lower()
+        if any(token in plow for token in ("/v0", "/v1", "/old", "/legacy", "/beta", "/internal", "/private", "/debug", "/admin")):
+            seen_templates.add(tkey)
             findings.append(_finding(skill, ep.url, f"Endpoint de API observado fora do contrato documentado: {path}.", "anonymous", severity=str((skill.get("finding") or {}).get("severity") or "medium")))
     return findings
 
