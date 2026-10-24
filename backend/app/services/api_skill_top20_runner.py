@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 import requests
 import yaml
@@ -675,6 +675,11 @@ def _finding(skill: dict[str, Any], endpoint: str, evidence: str, identity_key: 
 
 
 _FUZZ_QUERY_PAYLOADS = ["A" * 5000, "-1", "2147483648", "null", "' OR '1'='1", "../../../../etc/passwd", "{{7*7}}"]
+# Flags que costumam pular validação/etapas (o incidente foi optIn:true aceitando
+# submissão sem imagem). Enviar como true + corpo mínimo para testar bypass.
+_BYPASS_FLAGS = ["optIn", "optin", "skip", "skipValidation", "skipLiveness", "skipFraud",
+                 "bypass", "force", "override", "docless", "mock", "test", "debug",
+                 "verified", "approved", "isValid", "validated"]
 
 
 def _fuzz_cases(ep: Endpoint, allow_mutations: bool) -> list[tuple[str, str, Any, str]]:
@@ -699,7 +704,71 @@ def _fuzz_cases(ep: Endpoint, allow_mutations: bool) -> list[tuple[str, str, Any
         cases.append((ep.method.upper(), ep.url, {f: "A" * 2000 for f in json_fields}, "body:oversized"))
         cases.append((ep.method.upper(), ep.url, {f: [] for f in json_fields}, "body:type-confusion"))
         cases.append((ep.method.upper(), ep.url, {**{f: "x" for f in json_fields}, "isAdmin": True, "role": "admin"}, "body:mass-assignment"))
-    return cases[:10]
+        # Validation-bypass by flag (incidente optIn: fraude aceitou submissão SEM
+        # imagem com optIn:true). Injeta flags de bypass e envia corpo MÍNIMO —
+        # se a API aceitar (2xx) em vez de rejeitar, é bypass de regra de negócio.
+        cases.append((ep.method.upper(), ep.url, {**{f: "x" for f in json_fields}, **{k: True for k in _BYPASS_FLAGS}}, "body:bypass-flags"))
+        cases.append((ep.method.upper(), ep.url, {k: True for k in _BYPASS_FLAGS}, "body:only-flags-no-required"))
+    return cases[:12]
+
+
+# Curated API route segments for active shadow-route discovery (kiterunner idea):
+# find UNDOCUMENTED endpoints that are not in the submitted spec/crawl.
+_API_ROUTE_WORDLIST = [
+    "users", "user", "accounts", "account", "admin", "internal", "private", "debug",
+    "status", "health", "config", "settings", "transactions", "transaction", "orders",
+    "order", "documents", "document", "files", "file", "upload", "download", "results",
+    "result", "callback", "callbacks", "webhook", "webhooks", "values", "value", "submit",
+    "data", "process", "processes", "steps", "step", "sign", "signer", "signature",
+    "export", "import", "reports", "report", "metrics", "audit", "logs", "notifications",
+    "search", "me", "profile", "session", "token", "refresh", "verify", "validate",
+    "approve", "reject", "replay", "discard", "reprocess", "retry", "cancel", "v1", "v2", "v3",
+]
+
+
+def _discover_shadow_routes(session: requests.Session, endpoints: list[Endpoint], identities: list[Identity], scope: list[str], *, limit: int = 180, timeout: int = 8) -> list[Endpoint]:
+    """Active route discovery: probe candidate API routes derived from the spec's
+    own path prefixes/resource names + a curated wordlist, to surface endpoints
+    NOT present in the submitted spec/crawl. A non-404/<500 response means the
+    route exists (even if auth-gated)."""
+    bases: set[str] = set()
+    resource_names: set[str] = set()
+    for ep in endpoints:
+        if not ep.documented:
+            continue
+        p = urlparse(ep.url)
+        segs = [s for s in p.path.split("/") if s and "{" not in s]
+        for i in range(1, len(segs) + 1):
+            bases.add(f"{p.scheme}://{p.netloc}/" + "/".join(segs[:i]) + "/")
+        for s in segs:
+            if not s.isdigit():
+                resource_names.add(s.lower())
+    words = list(dict.fromkeys(list(resource_names) + _API_ROUTE_WORDLIST))
+    identity = identities[0] if identities else Identity("anonymous", "", {}, {})
+    known = {normalize_url(ep.url) for ep in endpoints}
+    discovered: list[Endpoint] = []
+    seen: set[str] = set()
+    probes = 0
+    for base in sorted(bases, key=len):
+        for w in words:
+            if probes >= limit:
+                return discovered
+            url = urljoin(base, w)
+            if not url.startswith(("http://", "https://")) or not _host_allowed(url, scope):
+                continue
+            key = normalize_url(url)
+            if key in seen or key in known:
+                continue
+            seen.add(key)
+            probes += 1
+            r = _request(session, "GET", url, identity, timeout=timeout)
+            resp = r.get("response")
+            if resp is None:
+                continue
+            sc = int(resp.status_code)
+            if sc != 404 and sc != 400 and sc < 500:
+                discovered.append(Endpoint("GET", url, key, [], ["shadow"], "route-brute", False, {"discovered_via": "route_brute", "probe_status": sc}))
+    return discovered
 
 
 def _object_id_params(ep: Endpoint) -> list[str]:
@@ -804,6 +873,12 @@ def _run_endpoint_skill(skill: dict[str, Any], endpoints: list[Endpoint], identi
                             continue
                         sc = int(resp.status_code)
                         rbody = (resp.text or "")[:8000]
+                        if label.startswith("body:bypass") or label.startswith("body:only-flags"):
+                            if 200 <= sc < 300:
+                                extra = _response_evidence(result, fmethod)
+                                extra.update({"fuzz_case": label, "http_status": sc})
+                                findings.append(_finding(skill, ep.url, f"Entrada incompleta com flag de bypass ({label}) foi ACEITA (HTTP {sc}) — possível bypass de validação/regra de negócio (ex.: optIn:true sem imagem; OWASP API6/API3).", identity.key, severity="high", verification_status="confirmed", evidence_extra=extra))
+                            continue
                         if sc >= 500:
                             extra = _response_evidence(result, fmethod)
                             extra.update({"fuzz_case": label, "http_status": sc})
@@ -992,8 +1067,37 @@ def run_api_top20_for_scan(scan_id: int, target: str, *, api_skill_id: str | Non
             }
         for skill in skills:
             if str(skill.get("id")) == "skill.api.inventory_shadow_api":
-                findings = _shadow_api_findings(skill, endpoints)
-                result = {"status": "completed", "selected": len(endpoints), "attempts": 0, "findings": findings}
+                # Descoberta ATIVA de rotas (kiterunner): acha endpoints fora da
+                # spec/collection enviada. O BOLA do DevOps é um shadow endpoint.
+                discovered: list[Endpoint] = []
+                try:
+                    with requests.Session() as _ds:
+                        requests.packages.urllib3.disable_warnings()  # type: ignore[attr-defined]
+                        discovered = _discover_shadow_routes(_ds, endpoints, identities, scope)
+                except Exception:
+                    discovered = []
+                if discovered:
+                    try:
+                        from app.services.offensive_inventory_service import OffensiveInventoryService
+                        inv = OffensiveInventoryService(db, job)
+                        for sep in discovered:
+                            try:
+                                inv.upsert_endpoint(sep.url, method="GET", source_tool="route-brute", tags=["api", "shadow"], metadata=dict(sep.metadata))
+                            except Exception:
+                                continue
+                        db.flush()
+                    except Exception:
+                        pass
+                findings = _shadow_api_findings(skill, endpoints + discovered)
+                for sep in discovered:
+                    findings.append(_finding(
+                        skill, sep.url,
+                        f"Rota de API NÃO documentada descoberta por brute de rotas (HTTP {sep.metadata.get('probe_status')}): {urlparse(sep.url).path}. "
+                        "Está fora da spec/collection enviada — superfície shadow; revisar autorização/BOLA.",
+                        "anonymous", severity="medium", verification_status="confirmed",
+                        evidence_extra={"discovered_via": "route_brute", "probe_status": sep.metadata.get("probe_status"), "shadow_api": True},
+                    ))
+                result = {"status": "completed", "selected": len(endpoints) + len(discovered), "attempts": len(discovered), "findings": findings}
             else:
                 result = _run_endpoint_skill(skill, endpoints, identities, limits, allow_mutations)
             all_findings.extend(result.get("findings") or [])
