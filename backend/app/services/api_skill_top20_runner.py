@@ -28,6 +28,10 @@ API_RE = re.compile(r"(/api/|/rest/|/v\d+/|/graphql|/gql|swagger|openapi)", re.I
 SQL_ERROR_RE = re.compile(r"(sql syntax|mysql|postgres|ora-\d+|sqlite|odbc|jdbc|unterminated quoted|string literal)", re.I)
 NOSQL_ERROR_RE = re.compile(r"(MongoError|BSONError|CastError|MongooseError|\$where|E11000|querySelector)", re.I)
 SHELL_ERROR_RE = re.compile(r"(sh:|bash:|cmd\.exe|PowerShell|syntax error near unexpected token|command not found)", re.I)
+# Generic server-side error / stack-trace signatures for the schema-fuzzing
+# oracle (property-based testing idea from Schemathesis: malformed input that
+# yields a 5xx or a stack trace signals missing input validation).
+STACKTRACE_RE = re.compile(r"(traceback \(most recent call last\)|\bat [\w.$]+\([\w.]+\.(?:java|kt):|werkzeug|django\.|org\.springframework|NullPointerException|undefined (?:index|variable)|Fatal error:|Warning: |Notice: |panic:|goroutine \d+|System\.\w+Exception|unhandled exception)", re.I)
 SENSITIVE_RE = re.compile(
     r"(password|passwd|pwd|hash|secret|token|api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|"
     r"private[_-]?key|ssn|cpf|cnpj|credit[_-]?card|card[_-]?number|cvv|stacktrace|exception|traceback)",
@@ -670,6 +674,28 @@ def _finding(skill: dict[str, Any], endpoint: str, evidence: str, identity_key: 
     }
 
 
+_FUZZ_QUERY_PAYLOADS = ["A" * 5000, "-1", "2147483648", "null", "' OR '1'='1", "../../../../etc/passwd", "{{7*7}}"]
+
+
+def _fuzz_cases(ep: Endpoint, allow_mutations: bool) -> list[tuple[str, str, Any, str]]:
+    """Property/schema fuzzing probes (Schemathesis-style): malformed values for
+    query params and request-body fields. Returns (method, url, json_body, label).
+    Body fuzzing (mutating) is gated behind allow_mutations."""
+    cases: list[tuple[str, str, Any, str]] = []
+    has_query = any(str(p.get("location")) == "query" for p in ep.parameters) or bool(urlparse(ep.url).query)
+    if has_query:
+        for payload in _FUZZ_QUERY_PAYLOADS:
+            mutated = _replace_first_query_value(ep.url, payload)
+            if mutated:
+                cases.append(("GET", mutated, None, f"query:{payload[:14]}"))
+    json_fields = [str(p.get("name")) for p in ep.parameters if str(p.get("location")) == "json" and p.get("name")]
+    if json_fields and ep.method.upper() in {"POST", "PUT", "PATCH"} and allow_mutations:
+        cases.append((ep.method.upper(), ep.url, {f: "A" * 2000 for f in json_fields}, "body:oversized"))
+        cases.append((ep.method.upper(), ep.url, {f: [] for f in json_fields}, "body:type-confusion"))
+        cases.append((ep.method.upper(), ep.url, {**{f: "x" for f in json_fields}, "isAdmin": True, "role": "admin"}, "body:mass-assignment"))
+    return cases[:10]
+
+
 def _run_endpoint_skill(skill: dict[str, Any], endpoints: list[Endpoint], identities: list[Identity], limits: dict[str, Any], allow_mutations: bool) -> dict[str, Any]:
     max_endpoints = 0
     timeout = int(limits.get("timeout_seconds") or DEFAULT_TIMEOUT_SECONDS)
@@ -742,6 +768,27 @@ def _run_endpoint_skill(skill: dict[str, Any], endpoints: list[Endpoint], identi
                             header_names.update(k.lower() for k in response.headers)
                     if len(codes) >= 3 and all(code < 400 for code in codes) and not header_names.intersection(RATE_LIMIT_HEADERS):
                         findings.append(_finding(skill, ep.url, f"{len(codes)} requisições repetidas sem headers de rate limit; códigos={codes}.", identity.key, severity="medium"))
+                    continue
+                if skill_id == "skill.api.schema_fuzzing":
+                    for (fmethod, furl, fbody, label) in _fuzz_cases(ep, allow_mutations):
+                        attempts += 1
+                        result = _request(session, fmethod, furl, identity, json_body=fbody, timeout=timeout)
+                        obs = _response_observation(skill, ep, identity, fmethod, result)
+                        obs["fuzz_case"] = label
+                        observations.append(obs)
+                        resp = result.get("response")
+                        if resp is None:
+                            continue
+                        sc = int(resp.status_code)
+                        rbody = (resp.text or "")[:8000]
+                        if sc >= 500:
+                            extra = _response_evidence(result, fmethod)
+                            extra.update({"fuzz_case": label, "http_status": sc})
+                            findings.append(_finding(skill, ep.url, f"Entrada malformada ({label}) resultou em HTTP {sc} — validação de input ausente/fraca.", identity.key, severity="medium", verification_status="confirmed", evidence_extra=extra))
+                        elif SQL_ERROR_RE.search(rbody) or NOSQL_ERROR_RE.search(rbody) or SHELL_ERROR_RE.search(rbody) or STACKTRACE_RE.search(rbody):
+                            extra = _response_evidence(result, fmethod)
+                            extra.update({"fuzz_case": label})
+                            findings.append(_finding(skill, ep.url, f"Fuzz ({label}) disparou erro/stack trace na resposta.", identity.key, severity="high", verification_status="confirmed", evidence_extra=extra))
                     continue
                 method = _probe_method(skill, ep)
                 attempts += 1

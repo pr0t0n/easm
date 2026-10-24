@@ -358,3 +358,19 @@ skills:
       vuln_family: file_upload
       finding_class: upload_surface_requires_fixture
       severity: high
+  - id: skill.api.schema_fuzzing
+    priority: 21
+    name: Schema / Property Fuzzing
+    objective: Fuzzing orientado a schema (estilo Schemathesis) em query e body — valores malformados (type-confusion, oversized, enum/formato inválido, mass-assignment) para expor 5xx, stack traces e validação de input ausente.
+    typical_criticality: medium
+    owasp: API8:2023
+    categories: [input_validation, fuzzing, mass_assignment]
+    requires_authorization: false
+    mutating_confirmation_requires_fixture: true
+    safe_methods: [GET, HEAD, POST, PUT, PATCH]
+    selectors: {}
+    evidence_required: [malformed_input_request, server_response_behavior]
+    finding:
+      vuln_family: input_validation
+      finding_class: schema_property_fuzzing
+      severity: medium
