@@ -38,6 +38,35 @@ def build_execution_timeline(db: Session, job_id: int, item_id: int | None = Non
     return sorted(timeline, key=lambda row: row["at"])[-500:]
 
 
+# Tools for which a successful run (exit 0) with NO output is a legitimate
+# "nothing found" result, not a failure to recover from. Passive/OSINT URL and
+# subdomain discovery, crawlers, dir/param brute-forcers, and vulnerability
+# scanners routinely and correctly return empty. Treating their empty output as
+# inconclusive_result drove them through alternate-capability replans until the
+# generation budget was exhausted, dead-ending the whole scan in supervisor
+# broken glass at ~98%. Port scanners (masscan/naabu/nmap) are deliberately
+# EXCLUDED: for them an empty result is meaningful and must still trigger the
+# P02 connect-scan fallback.
+_EMPTY_OUTPUT_BENIGN_TOOLS = {
+    "gau", "waybackurls", "katana", "katana-js", "hakrawler", "gospider",
+    "dirsearch", "feroxbuster", "ffuf", "ffuf-files", "ffuf-params", "gobuster",
+    "wfuzz", "arjun", "paramspider", "subfinder", "amass", "dnsx", "alterx",
+    "theharvester", "h8mail", "shodan-cli", "subjack", "nikto", "wapiti",
+    "sqlmap", "dalfox", "gitleaks", "trufflehog", "interactsh-client",
+    "prompt-injection-probe",
+}
+
+
+def _empty_output_is_benign(tool_name: Any) -> bool:
+    name = str(tool_name or "").strip().lower()
+    if not name:
+        return False
+    # Variant families (dirsearch-api, dirsearch-api-post, nuclei-cves, ...).
+    if name in _EMPTY_OUTPUT_BENIGN_TOOLS:
+        return True
+    return name.startswith("nuclei") or name.startswith("dirsearch")
+
+
 def diagnose_execution(db: Session, item: Any) -> dict[str, Any]:
     result = dict(getattr(item, "result", None) or {})
     metadata = dict(getattr(item, "item_metadata", None) or {})
@@ -58,7 +87,7 @@ def diagnose_execution(db: Session, item: Any) -> dict[str, Any]:
     elif str(getattr(item, "status", "")).lower() in {"failed", "timeout"}:
         category = "contract_degraded" if result.get("mcp_error") or "mcp" in error else "inconclusive_result"
     elif str(getattr(item, "status", "")).lower() == "completed" and not any(result.get(key) for key in ("stdout_full", "stdout_preview", "parsed_result", "evidence_path")):
-        category = "inconclusive_result"
+        category = "ok" if _empty_output_is_benign(getattr(item, "tool_name", "")) else "inconclusive_result"
     else:
         category = "ok"
     from app.services.work_item_attempts import attempt_summary
@@ -171,7 +200,7 @@ def evaluate_runtime_outcome(db: Session, job: Any, item: Any) -> dict[str, Any]
         reasons.append(str(resolution.get("reason") or "context_quality_below_threshold"))
     if status in {"failed", "timeout"}:
         reasons.append(str(getattr(item, "last_error", None) or "execution_failed")[:300])
-    if status == "completed" and not any(result.get(key) for key in ("stdout_full", "stdout_preview", "parsed_result", "evidence_path")):
+    if status == "completed" and not any(result.get(key) for key in ("stdout_full", "stdout_preview", "parsed_result", "evidence_path")) and not _empty_output_is_benign(getattr(item, "tool_name", "")):
         reasons.append("completed_without_observable_evidence")
     quality = 1.0 if not reasons else max(0.0, 1.0 - min(0.9, 0.25 * len(reasons)))
     recovery_types = {

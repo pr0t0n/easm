@@ -737,6 +737,7 @@ def _seed_api_scan_work_item(
         "api_scan_config": api_config,
         "openapi_url": spec_url,
         "swagger_url": spec_url,
+        "openapi_file": str(api_config.get("inline_spec_file") or ""),
         "api_observability": observability,
         "queue_ready_at": datetime.now().isoformat(),
         "skill_ids": skill_ids,

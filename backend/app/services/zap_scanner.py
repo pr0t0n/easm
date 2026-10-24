@@ -593,6 +593,7 @@ def run_zap_api_scan(
     auth_headers: dict[str, str] | None = None,
     *,
     scan_id: int | None = None,
+    openapi_file: str | None = None,
 ) -> dict[str, Any]:
     """
     ZAP API Scan: scan orientado a OpenAPI/Swagger.
@@ -629,8 +630,25 @@ def run_zap_api_scan(
         except Exception as exc:
             logger.debug("ZAP API alert snapshot error: %s", exc)
 
-    # Auto-discover OpenAPI URL if not provided
-    if not openapi_url:
+    # Operator-provided spec with no public URL (inline spec materialized to the
+    # ZAP shared volume at ingestion): import it directly so the API DAST covers
+    # the supplied endpoints instead of relying on the target self-exposing a
+    # /openapi.json. Takes precedence over auto-discovery.
+    if openapi_file and not openapi_url:
+        try:
+            import_source = "inline_file"
+            import_result = _zap("/JSON/openapi/action/importFile/", {
+                "file": openapi_file,
+                "target": target_url,
+                "maxMessages": "0",
+            }, timeout=int(os.getenv("ZAP_OPENAPI_IMPORT_TIMEOUT", "300")))
+            import_errors = [str(item) for item in import_result.get("importFile") or [] if str(item)]
+        except Exception as exc:
+            active_error = str(exc)
+            logger.warning("ZAP OpenAPI inline importFile error: %s", exc)
+
+    # Auto-discover OpenAPI URL if not provided (and no inline file was given)
+    if not openapi_url and not openapi_file:
         from urllib.parse import urljoin
         for path in ("/swagger.json", "/openapi.json", "/api-docs", "/api/swagger.json", "/v2/api-docs"):
             candidate = urljoin(target_url + "/", path.lstrip("/"))

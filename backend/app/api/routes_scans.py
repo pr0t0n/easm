@@ -2871,6 +2871,10 @@ def create_scan(
                 state = dict(job.state_data or {})
                 api_state = dict(state.get("api_scan_config") or api_scan_config)
                 api_state["ingestion"] = ingest_result
+                # Path (on the shared ZAP volume) of a materialized inline spec,
+                # so the P16 zap-api work item can importFile the endpoints.
+                if ingest_result.get("inline_spec_file"):
+                    api_state["inline_spec_file"] = ingest_result.get("inline_spec_file")
                 state["api_scan_config"] = api_state
                 job.state_data = state
         except Exception as exc:

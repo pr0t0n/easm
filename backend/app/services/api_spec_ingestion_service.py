@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import json
+import os
+import uuid
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import requests
 from sqlalchemy.orm import Session
@@ -29,6 +31,11 @@ def ingest_api_spec(
     execution_context = normalize_execution_context(execution_context)
     auth_context = inventory_auth_context(execution_context)
     inv = OffensiveInventoryService(db, scan)
+    # Base for resolving relative OpenAPI paths when the spec is inline / has no
+    # usable `servers` URL: the scan's own authorized target host.
+    _tq = str(scan.target_query or "").strip()
+    _parsed_tq = urlparse(_tq if "://" in _tq else f"https://{_tq}")
+    fallback_base = f"{_parsed_tq.scheme}://{_parsed_tq.netloc}/" if _parsed_tq.netloc else ""
     payload = spec_payload or _fetch_json(spec_url, headers=auth_headers, cookies=auth_cookies)
     if not isinstance(payload, dict):
         inv.upsert_api_spec(spec_url or "inline", spec_type=spec_type, parsed_status="failed", metadata={"error": "invalid_json"})
@@ -42,7 +49,7 @@ def ingest_api_spec(
     elif spec_type == "graphql":
         count = _ingest_graphql(inv, payload, spec_url, auth_context=auth_context)
     else:
-        count = _ingest_openapi(inv, payload, spec_url, auth_context=auth_context)
+        count = _ingest_openapi(inv, payload, spec_url, auth_context=auth_context, fallback_base=fallback_base)
 
     try:
         from app.models.models import OffensiveEndpoint
@@ -71,7 +78,37 @@ def ingest_api_spec(
     )
     generate_hypotheses_for_scan(db, scan)
     db.flush()
-    return {"ok": True, "spec_type": spec_type, "endpoints": count}
+    # Inline OpenAPI (no public spec URL): materialize it to the ZAP shared
+    # volume so the active API DAST can importFile the operator's endpoints.
+    inline_spec_file = ""
+    if spec_payload and not spec_url and spec_type == "openapi" and count > 0 and fallback_base:
+        inline_spec_file = _materialize_inline_openapi(payload, fallback_base, int(scan.id))
+    return {"ok": True, "spec_type": spec_type, "endpoints": count, "inline_spec_file": inline_spec_file}
+
+
+def _materialize_inline_openapi(spec: dict[str, Any], base_url: str, scan_id: int) -> str:
+    """Write an inline OpenAPI spec to the ZAP shared volume so the API DAST can
+    importFile it. Without this, an inline spec (no public /openapi.json URL)
+    reaches the inventory but never the ZAP OpenAPI scan, which can only import
+    from a URL/file — the operator-supplied endpoints would go untested by the
+    active API scan. Servers are rewritten to the in-scope target host."""
+    try:
+        base_dir = os.getenv("ZAP_OPENAPI_SHARED_DIR", "/evidence/zap-openapi")
+        os.makedirs(base_dir, exist_ok=True)
+        doc = dict(spec)
+        parsed = urlparse(base_url)
+        if str(doc.get("openapi") or "").startswith("3"):
+            doc["servers"] = [{"url": base_url.rstrip("/")}]
+        elif doc.get("swagger"):
+            doc["schemes"] = [parsed.scheme or "https"]
+            doc["host"] = parsed.netloc
+            doc["basePath"] = str(doc.get("basePath") or "/")
+        path = os.path.join(base_dir, f"scan-{scan_id}-inline-{uuid.uuid4().hex[:12]}.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(doc, handle, ensure_ascii=False)
+        return path
+    except Exception:
+        return ""
 
 
 def _fetch_json(url: str, *, headers: dict[str, str] | None = None, cookies: dict[str, str] | None = None) -> dict[str, Any] | None:
@@ -82,33 +119,58 @@ def _fetch_json(url: str, *, headers: dict[str, str] | None = None, cookies: dic
         return None
 
 
-def _base_url(spec: dict[str, Any], source_url: str) -> str:
-    """Real-world OpenAPI specs commonly declare `servers[0].url` with
-    unresolved template variables for multi-environment deploys (e.g.
-    "https://{env}-platform.example.com"), and the variable's declared
-    `default` frequently points at a different environment than the one we
-    actually fetched the spec from (confirmed live: a spec fetched from a
-    "hml-api-*" host had servers[0].url templated with `default: "dev-api"`).
-    Trusting servers[0] literally, or resolving it to its declared default,
-    both produce a host that is out of scope for the scan that found this
-    spec. The one thing we know for certain is in-scope is source_url itself
-    (the scan already fetched it successfully) — prefer deriving the base
-    from that whenever the declared server URL still has an unresolved
-    `{...}` placeholder.
+def _base_url(spec: dict[str, Any], source_url: str, fallback_base: str = "") -> str:
+    """Pick the base URL to resolve relative OpenAPI paths against, scope-aware.
+
+    Real specs are messy about `servers`:
+      - `servers[0]` is often a RELATIVE proxy path ("/onboarding") or a
+        TEMPLATED multi-env URL ("https://{env}-api.example.com") — neither has
+        a usable host, so blindly trusting servers[0] yields hostless endpoints
+        that fail the inventory scope gate and abort the whole ingestion.
+      - the array usually also lists several absolute environment URLs (prod,
+        hml, dev, sandbox, localhost); only the one matching the authorized
+        scan target is in scope — the others must NOT be scanned.
+
+    Preference order: an absolute server whose host == the authorized target
+    host → the scan's own target (fallback_base) → source_url → first absolute
+    server → "". Relative and templated server URLs are ignored.
     """
     servers = spec.get("servers") or []
-    server_url = ""
-    if servers and isinstance(servers[0], dict) and servers[0].get("url"):
-        server_url = str(servers[0]["url"])
-    if server_url and "{" not in server_url:
-        return server_url
+    absolute: list[str] = []
+    for entry in servers:
+        if not (isinstance(entry, dict) and entry.get("url")):
+            continue
+        url = str(entry["url"])
+        if "{" in url:
+            continue
+        parsed = urlparse(url)
+        if parsed.scheme and parsed.netloc:
+            absolute.append(url)
+
+    fallback_host = urlparse(fallback_base).netloc.lower() if fallback_base else ""
+    if fallback_host:
+        for url in absolute:
+            if urlparse(url).netloc.lower() == fallback_host:
+                return _ensure_base_slash(url)
+    # Prefer the authorized target over any out-of-scope absolute server
+    # (hml/dev/sandbox/localhost environments declared in the same spec).
+    if fallback_base:
+        return _ensure_base_slash(fallback_base)
     if source_url.startswith("http"):
         return source_url.rsplit("/", 1)[0] + "/"
-    return server_url
+    if absolute:
+        return _ensure_base_slash(absolute[0])
+    return ""
 
 
-def _ingest_openapi(inv: OffensiveInventoryService, spec: dict[str, Any], source_url: str, *, auth_context: str = "anonymous") -> int:
-    base = _base_url(spec, source_url)
+def _ensure_base_slash(url: str) -> str:
+    # urljoin needs the base to end in "/" so a relative path appends instead
+    # of replacing the last path segment.
+    return url if url.endswith("/") else url + "/"
+
+
+def _ingest_openapi(inv: OffensiveInventoryService, spec: dict[str, Any], source_url: str, *, auth_context: str = "anonymous", fallback_base: str = "") -> int:
+    base = _base_url(spec, source_url, fallback_base)
     count = 0
     for path, methods in dict(spec.get("paths") or {}).items():
         if not isinstance(methods, dict):
@@ -117,7 +179,12 @@ def _ingest_openapi(inv: OffensiveInventoryService, spec: dict[str, Any], source
             if method.lower() not in {"get", "post", "put", "patch", "delete", "options", "head"}:
                 continue
             url = urljoin(base, path.lstrip("/")) if base else path
-            ep = inv.upsert_endpoint(url, method=method.upper(), source_tool="api-spec", auth_context=auth_context, tags=["api"], metadata={"operation_id": (operation or {}).get("operationId") if isinstance(operation, dict) else ""})
+            # One out-of-scope (or hostless) path must not abort ingestion of
+            # the rest of the spec: skip it and keep the in-scope endpoints.
+            try:
+                ep = inv.upsert_endpoint(url, method=method.upper(), source_tool="api-spec", auth_context=auth_context, tags=["api"], metadata={"operation_id": (operation or {}).get("operationId") if isinstance(operation, dict) else ""})
+            except ValueError:
+                continue
             for param in (operation or {}).get("parameters", []) if isinstance(operation, dict) else []:
                 if isinstance(param, dict) and param.get("name"):
                     inv.upsert_parameter(ep, str(param["name"]), location=str(param.get("in") or "query"), type_hint=str((param.get("schema") or {}).get("type") or ""), source_tool="api-spec")

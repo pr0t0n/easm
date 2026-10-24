@@ -166,7 +166,11 @@ naabu_top1000:
   category: recon
   phase: RECONNAISSANCE
   description: "Fast TCP port scan top-1000 (article §1 subfinder | naabu pipeline equivalent)."
-  cmd: ["naabu", "-host", "{host_ip}", "-top-ports", "1000", "-silent", "-rate", "1000"]
+  # -s c (CONNECT scan): SYN raw-socket probes are silently dropped behind
+  # userspace-NAT networks (Docker Desktop on macOS), so a naabu SYN run can
+  # return zero ports for a host that is actually open. Connect scan uses the
+  # kernel TCP stack and is reliable under NAT and concurrency.
+  cmd: ["naabu", "-host", "{host_ip}", "-top-ports", "1000", "-silent", "-rate", "1000", "-s", "c"]
   timeout: 600
   parser: lines
 
@@ -178,7 +182,9 @@ naabu_top1000_batch:
   phase: RECONNAISSANCE
   target_type: targets_file
   description: "Conservative batch TCP scan across authorized discovered hosts."
-  cmd: ["naabu", "-list", "{target_file}", "-top-ports", "1000", "-silent", "-rate", "200", "-c", "10"]
+  # -s c (CONNECT scan): see naabu_top1000 — SYN raw probes are unreliable
+  # behind userspace NAT; connect scan uses the kernel stack.
+  cmd: ["naabu", "-list", "{target_file}", "-top-ports", "1000", "-silent", "-rate", "200", "-c", "10", "-s", "c"]
   timeout: 1200
   parser: lines
 
