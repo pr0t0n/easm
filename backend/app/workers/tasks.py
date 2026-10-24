@@ -5004,14 +5004,39 @@ def dispatch_scan_work_items(
             ~ScanWorkItem.last_error.like("superseded_by_replan:%"),
         ).scalar() or 0
         if int(executable_left) == 0 and int(supervisor_blocked) > 0:
+            # These blocked items are TERMINAL and unactionable: the runtime
+            # supervisor already spent its recovery budget (supervisor_broken_glass:*
+            # — attempts exhausted, no alternate capability, impossible_state).
+            # Dead-ending the whole scan in status="blocked" with nothing
+            # scheduled to ever look at it again stranded scans at ~98% needing a
+            # manual POST /scans/{id}/finalize (confirmed live: scans #2/#4/#6).
+            # Record them as gaps and auto-complete with gaps instead — the same
+            # outcome the operator finalize gives, every collected finding kept.
+            # (Matches the quality-gate hard-block's own auto-finalize policy.)
             state = dict(job.state_data or {})
-            state["broken_glass"] = {"status": "required", "blocked_work_items": int(supervisor_blocked), "at": datetime.now().isoformat()}
+            state["broken_glass"] = {"status": "auto_finalized", "blocked_work_items": int(supervisor_blocked), "at": datetime.now().isoformat()}
+            state["completion_source"] = "broken_glass_autofinalized"
+            state["quality_gate_active"] = False
+            state["quality_gate_blocked"] = False
             job.state_data = state
-            job.status = "blocked"
-            job.current_step = f"Supervisor · broken glass ({int(supervisor_blocked)} item(ns))"
+            job.status = "completed_with_gaps"
+            job.mission_progress = 100
+            job.current_step = f"Concluído com gaps · {int(supervisor_blocked)} item(ns) sem ação automática (broken glass)"
+            job.last_error = None
+            job.next_retry_at = None
             job.updated_at = datetime.now()
+            db.add(ScanLog(
+                scan_job_id=scan_id,
+                source="supervisor",
+                level="WARNING",
+                message=(
+                    f"Broken glass auto-finalizado: {int(supervisor_blocked)} item(ns) terminais sem "
+                    "ação automática registrados como gaps; scan concluído como completed_with_gaps, "
+                    "achados preservados."
+                )[:2000],
+            ))
             db.commit()
-            return {"claimed": len(item_ids), "status": "blocked", "blocked_work_items": int(supervisor_blocked)}
+            return {"claimed": len(item_ids), "status": "completed_with_gaps", "broken_glass_gaps": int(supervisor_blocked)}
 
         counts = work_queue_counts(db, scan_id)
         state = dict(job.state_data or {})
