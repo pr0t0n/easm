@@ -214,9 +214,12 @@ def _path_param_candidates(param: dict[str, Any]) -> list[str]:
     return res[:6]
 
 
-def _expand_templated_endpoints(endpoints: list[Endpoint]) -> list[Endpoint]:
+def _expand_templated_endpoints(endpoints: list[Endpoint], test_variables: dict[str, Any] | None = None) -> list[Endpoint]:
     """Expand each endpoint with {path-vars} into the template PLUS concrete
-    variants (enumerated/sample values) so skills probe real object URLs."""
+    variants (enumerated/sample values) so skills probe real object URLs. A
+    value supplied in test_variables (ex.: um requestId válido) é usado primeiro,
+    permitindo testes como optIn contra uma transação real."""
+    test_variables = test_variables or {}
     expanded: list[Endpoint] = []
     seen_urls: set[str] = set()
     for ep in endpoints:
@@ -226,10 +229,13 @@ def _expand_templated_endpoints(endpoints: list[Endpoint]) -> list[Endpoint]:
         if not placeholders:
             continue
         params_by_name = {str(p.get("name")): p for p in ep.parameters if str(p.get("location")) == "path"}
-        candidates = {
-            ph: _path_param_candidates(params_by_name.get(ph, {"name": ph}))
-            for ph in placeholders
-        }
+        candidates = {}
+        for ph in placeholders:
+            cands = _path_param_candidates(params_by_name.get(ph, {"name": ph}))
+            if ph in test_variables and str(test_variables[ph]):
+                v = str(test_variables[ph])
+                cands = [v] + [c for c in cands if c != v]
+            candidates[ph] = cands
         # Enumerate the first placeholder (the object id); fix the rest to their
         # first candidate, to keep the request count bounded.
         primary = placeholders[0]
@@ -682,7 +688,7 @@ _BYPASS_FLAGS = ["optIn", "optin", "skip", "skipValidation", "skipLiveness", "sk
                  "verified", "approved", "isValid", "validated"]
 
 
-def _fuzz_cases(ep: Endpoint, allow_mutations: bool) -> list[tuple[str, str, Any, str]]:
+def _fuzz_cases(ep: Endpoint, allow_mutations: bool, test_variables: dict[str, Any] | None = None) -> list[tuple[str, str, Any, str]]:
     """Property/schema fuzzing probes (Schemathesis-style): malformed values for
     query params and request-body fields. Returns (method, url, json_body, label).
     Body fuzzing (mutating) is gated behind allow_mutations."""
@@ -709,7 +715,15 @@ def _fuzz_cases(ep: Endpoint, allow_mutations: bool) -> list[tuple[str, str, Any
         # se a API aceitar (2xx) em vez de rejeitar, é bypass de regra de negócio.
         cases.append((ep.method.upper(), ep.url, {**{f: "x" for f in json_fields}, **{k: True for k in _BYPASS_FLAGS}}, "body:bypass-flags"))
         cases.append((ep.method.upper(), ep.url, {k: True for k in _BYPASS_FLAGS}, "body:only-flags-no-required"))
-    return cases[:12]
+        # Caso optIn com variáveis REAIS (requestId/cpf/...) — reproduz o incidente:
+        # corpo válido pelos campos fornecidos + optIn:true, SEM imagem/documento.
+        tv = test_variables or {}
+        if tv:
+            body = {f: tv.get(f, "x") for f in json_fields}
+            body.update({k: tv[k] for k in tv if k not in ("requestId", "x-api-key", "x-organization-id", "x-project-id")})
+            body["optIn"] = True
+            cases.append((ep.method.upper(), ep.url, body, "body:optin-with-vars"))
+    return cases[:14]
 
 
 # Curated API route segments for active shadow-route discovery (kiterunner idea):
@@ -788,7 +802,7 @@ def _guessable_identifier(id_params: list[str]) -> bool:
     return any(g in p.lower() for p in id_params for g in ("external", "order"))
 
 
-def _run_endpoint_skill(skill: dict[str, Any], endpoints: list[Endpoint], identities: list[Identity], limits: dict[str, Any], allow_mutations: bool) -> dict[str, Any]:
+def _run_endpoint_skill(skill: dict[str, Any], endpoints: list[Endpoint], identities: list[Identity], limits: dict[str, Any], allow_mutations: bool, test_variables: dict[str, Any] | None = None) -> dict[str, Any]:
     max_endpoints = 0
     timeout = int(limits.get("timeout_seconds") or DEFAULT_TIMEOUT_SECONDS)
     all_matching = _select_endpoints(skill, endpoints, 0)
@@ -862,7 +876,7 @@ def _run_endpoint_skill(skill: dict[str, Any], endpoints: list[Endpoint], identi
                         findings.append(_finding(skill, ep.url, f"{len(codes)} requisições repetidas sem headers de rate limit; códigos={codes}.", identity.key, severity="medium"))
                     continue
                 if skill_id == "skill.api.schema_fuzzing":
-                    for (fmethod, furl, fbody, label) in _fuzz_cases(ep, allow_mutations):
+                    for (fmethod, furl, fbody, label) in _fuzz_cases(ep, allow_mutations, test_variables):
                         attempts += 1
                         result = _request(session, fmethod, furl, identity, json_body=fbody, timeout=timeout)
                         obs = _response_observation(skill, ep, identity, fmethod, result)
@@ -873,7 +887,7 @@ def _run_endpoint_skill(skill: dict[str, Any], endpoints: list[Endpoint], identi
                             continue
                         sc = int(resp.status_code)
                         rbody = (resp.text or "")[:8000]
-                        if label.startswith("body:bypass") or label.startswith("body:only-flags"):
+                        if label.startswith("body:bypass") or label.startswith("body:only-flags") or label.startswith("body:optin"):
                             if 200 <= sc < 300:
                                 extra = _response_evidence(result, fmethod)
                                 extra.update({"fuzz_case": label, "http_status": sc})
@@ -1040,8 +1054,15 @@ def run_api_top20_for_scan(scan_id: int, target: str, *, api_skill_id: str | Non
         if api_skill_id:
             skills = [skill for skill in skills if str(skill.get("id") or "") == str(api_skill_id)]
         scope = authorized_scope_for_scan(db, job.id)
-        endpoints = _expand_templated_endpoints(_collect_endpoints(db, job, scope))
+        test_headers = {str(k): str(v) for k, v in (api_config.get("test_headers") or {}).items()}
+        test_variables = {str(k): v for k, v in (api_config.get("test_variables") or {}).items()}
+        endpoints = _expand_templated_endpoints(_collect_endpoints(db, job, scope), test_variables)
         identities = _collect_identities(db, job)
+        # Header variables (x-api-key, x-organization-id, x-project-id, ...) are
+        # applied to EVERY request of EVERY identity — passam o gate de auth.
+        if test_headers:
+            for _idn in identities:
+                _idn.headers = {**(_idn.headers or {}), **test_headers}
         reused_inventory_scan_ids = sorted({
             int(ep.metadata.get("reused_from_scan_id"))
             for ep in endpoints
@@ -1099,7 +1120,7 @@ def run_api_top20_for_scan(scan_id: int, target: str, *, api_skill_id: str | Non
                     ))
                 result = {"status": "completed", "selected": len(endpoints) + len(discovered), "attempts": len(discovered), "findings": findings}
             else:
-                result = _run_endpoint_skill(skill, endpoints, identities, limits, allow_mutations)
+                result = _run_endpoint_skill(skill, endpoints, identities, limits, allow_mutations, test_variables)
             all_findings.extend(result.get("findings") or [])
             all_observations.extend(result.get("observations") or [])
             skill_results.append({

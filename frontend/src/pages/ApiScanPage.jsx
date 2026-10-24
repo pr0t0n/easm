@@ -54,6 +54,12 @@ export default function ApiScanPage() {
   const [catalog, setCatalog] = useState([]);
   const [showCatalog, setShowCatalog] = useState(false);
 
+  // Variáveis de header (x-api-key, x-organization-id, x-project-id...) e de
+  // corpo/path (requestId — necessário p/ optIn, cpf, etc.).
+  const [headerVars, setHeaderVars] = useState([{ k: "", v: "" }]);
+  const [bodyVars, setBodyVars] = useState([{ k: "", v: "" }]);
+  const kvToObj = (rows) => Object.fromEntries(rows.filter((r) => r.k.trim()).map((r) => [r.k.trim(), r.v]));
+
   const [tests, setTests] = useState([]);
   const [loading, setLoading] = useState(true);
   const pollRef = useRef(null);
@@ -118,6 +124,10 @@ export default function ApiScanPage() {
       else payload.spec_payload = JSON.parse(specJson);
       const auth = buildAuth();
       if (auth) payload.auth_config = auth;
+      const hdrs = kvToObj(headerVars);
+      if (Object.keys(hdrs).length) payload.headers = hdrs;
+      const vars = kvToObj(bodyVars);
+      if (Object.keys(vars).length) payload.variables = vars;
     } catch (err) {
       toastError("Spec JSON inválido.");
       return;
@@ -259,6 +269,27 @@ export default function ApiScanPage() {
             </div>
           )}
         </div>
+
+        {[
+          { title: "Variáveis de header (aplicadas a toda requisição)", rows: headerVars, set: setHeaderVars, phK: "x-api-key", phV: "valor" },
+          { title: "Variáveis de corpo/path (ex.: requestId p/ optIn, cpf)", rows: bodyVars, set: setBodyVars, phK: "requestId", phV: "valor" },
+        ].map((grp) => (
+          <div key={grp.title} style={{ marginTop: 14, borderTop: "1px solid var(--border)", paddingTop: 12 }}>
+            <label style={{ ...label, marginBottom: 6 }}>{grp.title}</label>
+            {grp.rows.map((row, i) => (
+              <div key={i} style={{ display: "flex", gap: 8, marginBottom: 6 }}>
+                <input style={{ ...input, flex: 1 }} placeholder={grp.phK} value={row.k}
+                  onChange={(e) => grp.set(grp.rows.map((r, j) => j === i ? { ...r, k: e.target.value } : r))} />
+                <input style={{ ...input, flex: 2 }} placeholder={grp.phV} value={row.v}
+                  onChange={(e) => grp.set(grp.rows.map((r, j) => j === i ? { ...r, v: e.target.value } : r))} />
+                <button type="button" onClick={() => grp.set(grp.rows.length > 1 ? grp.rows.filter((_, j) => j !== i) : [{ k: "", v: "" }])}
+                  style={{ padding: "0 10px", borderRadius: 7, border: "1px solid var(--border)", background: "transparent", color: "var(--ink-muted)", cursor: "pointer" }}>✕</button>
+              </div>
+            ))}
+            <button type="button" onClick={() => grp.set([...grp.rows, { k: "", v: "" }])}
+              style={{ background: "none", border: "none", color: "var(--brand, #2563eb)", cursor: "pointer", fontSize: 11.5, fontWeight: 700, padding: 0 }}>+ adicionar</button>
+          </div>
+        ))}
 
         <div style={{ display: "flex", alignItems: "center", gap: 18, marginTop: 14, flexWrap: "wrap" }}>
           <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12.5, color: "var(--ink)", cursor: "pointer" }}>
