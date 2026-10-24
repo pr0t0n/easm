@@ -205,7 +205,7 @@ function ApiReportDetail({ id }) {
                           <div style={{ fontSize: 11, marginBottom: 6 }}>Skills aplicadas: {e.skills_tested?.length ? e.skills_tested.map((x) => x.replace("skill.api.", "")).join(", ") : "nenhuma"}</div>
                           {e.identities?.length > 0 && <div style={{ fontSize: 11, marginBottom: 6 }}>Identidades: {e.identities.join(", ")}</div>}
                           {e.findings?.length > 0 ? (
-                            <div>
+                            <div style={{ marginBottom: 8 }}>
                               {e.findings.map((f, j) => (
                                 <div key={j} style={{ fontSize: 11.5, padding: "3px 0" }}>
                                   <span style={{ color: SEV_COLOR[f.severity], fontWeight: 800 }}>{f.severity}</span>
@@ -215,7 +215,35 @@ function ApiReportDetail({ id }) {
                                 </div>
                               ))}
                             </div>
-                          ) : <div style={{ fontSize: 11, color: "var(--ink-muted)" }}>Sem achados neste endpoint.</div>}
+                          ) : <div style={{ fontSize: 11, color: "var(--ink-muted)", marginBottom: 8 }}>Sem achados neste endpoint.</div>}
+                          {e.evidence?.length > 0 && (
+                            <div>
+                              <div style={{ fontSize: 11, fontWeight: 800, color: "var(--ink)", margin: "4px 0" }}>Evidência — requisições executadas ({e.evidence.length})</div>
+                              {e.evidence.map((ev, k) => (
+                                <details key={k} style={{ marginBottom: 6, border: "1px solid var(--border)", borderRadius: 6, padding: "4px 8px" }}>
+                                  <summary style={{ cursor: "pointer", fontSize: 11.5 }}>
+                                    <span style={{ fontWeight: 800 }}>{ev.method}</span>
+                                    <span style={{ marginLeft: 6, color: "var(--ink-muted)" }}>{ev.url}</span>
+                                    {ev.response_status != null && <span style={{ marginLeft: 6, fontWeight: 800, color: Number(ev.response_status) < 400 ? "#16a34a" : Number(ev.response_status) < 500 ? "#d97706" : "#dc2626" }}>HTTP {ev.response_status}</span>}
+                                    {ev.skill_id && <span style={{ marginLeft: 6, color: "var(--ink-muted)" }}>[{ev.skill_id.replace("skill.api.", "")}]</span>}
+                                    {ev.identity_key && <span style={{ marginLeft: 6, color: "var(--brand,#2563eb)" }}>{ev.identity_key}</span>}
+                                  </summary>
+                                  <div style={{ marginTop: 6 }}>
+                                    <div style={{ fontSize: 10, fontWeight: 800, color: "var(--ink-muted)" }}>cURL</div>
+                                    <pre style={{ margin: "2px 0 8px", whiteSpace: "pre-wrap", wordBreak: "break-all", fontSize: 10.5, background: "var(--surface, #fff)", border: "1px solid var(--border)", borderRadius: 5, padding: 7 }}>{ev.curl}</pre>
+                                    {ev.request_body && (
+                                      <>
+                                        <div style={{ fontSize: 10, fontWeight: 800, color: "var(--ink-muted)" }}>Request body</div>
+                                        <pre style={{ margin: "2px 0 8px", whiteSpace: "pre-wrap", wordBreak: "break-all", fontSize: 10.5, background: "var(--surface, #fff)", border: "1px solid var(--border)", borderRadius: 5, padding: 7 }}>{ev.request_body}</pre>
+                                      </>
+                                    )}
+                                    <div style={{ fontSize: 10, fontWeight: 800, color: "var(--ink-muted)" }}>Response{ev.response_truncated ? " (truncada)" : ""}</div>
+                                    <pre style={{ margin: "2px 0 0", whiteSpace: "pre-wrap", wordBreak: "break-all", fontSize: 10.5, background: "var(--surface, #fff)", border: "1px solid var(--border)", borderRadius: 5, padding: 7, maxHeight: 220, overflow: "auto" }}>{ev.response_body || "(sem corpo)"}</pre>
+                                  </div>
+                                </details>
+                              ))}
+                            </div>
+                          )}
                         </td>
                       </tr>
                     )}
