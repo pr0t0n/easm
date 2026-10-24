@@ -105,6 +105,16 @@ function ApiReportDetail({ id }) {
     } catch (e) { /* ignore */ }
   }
 
+  async function openHtmlReport(kind) {
+    // Relatório da PRÓPRIA API (não o do SCAN): busca autenticado e abre em nova aba.
+    try {
+      const resp = await client.get(`/api/apitest/${id}/${kind}.html`, { responseType: "blob" });
+      const url = URL.createObjectURL(new Blob([resp.data], { type: "text/html" }));
+      window.open(url, "_blank");
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    } catch (e) { /* ignore */ }
+  }
+
   if (loading) return <div style={{ padding: 26, color: "var(--ink-muted)" }}>Carregando relatório…</div>;
   if (err) return <div style={{ padding: 26, color: "var(--sev-high-text, #dc2626)" }}>{err}</div>;
   if (!data) return null;
@@ -120,9 +130,11 @@ function ApiReportDetail({ id }) {
           style={{ background: "none", border: "none", color: "var(--brand, #2563eb)", cursor: "pointer", fontSize: 12, padding: 0 }}>← Voltar para API</button>
         <span style={{ flex: 1 }} />
         <button type="button" onClick={downloadCsv}
-          style={{ padding: "6px 12px", borderRadius: 7, border: "1px solid var(--border)", background: "transparent", color: "var(--ink)", cursor: "pointer", fontSize: 12, fontWeight: 700 }}>⬇ Baixar CSV</button>
-        <button type="button" onClick={() => navigate(`/relatorios/tecnico/${id}`)}
-          style={{ padding: "6px 12px", borderRadius: 7, border: "1px solid var(--border)", background: "transparent", color: "var(--brand, #2563eb)", cursor: "pointer", fontSize: 12, fontWeight: 700 }}>Relatório técnico</button>
+          style={{ padding: "6px 12px", borderRadius: 7, border: "1px solid var(--border)", background: "transparent", color: "var(--ink)", cursor: "pointer", fontSize: 12, fontWeight: 700 }}>⬇ CSV</button>
+        <button type="button" onClick={() => openHtmlReport("executive")}
+          style={{ padding: "6px 12px", borderRadius: 7, border: "1px solid var(--border)", background: "transparent", color: "var(--brand, #2563eb)", cursor: "pointer", fontSize: 12, fontWeight: 700 }}>Relatório Executivo</button>
+        <button type="button" onClick={() => openHtmlReport("technical")}
+          style={{ padding: "6px 12px", borderRadius: 7, border: "1px solid var(--border)", background: "transparent", color: "var(--brand, #2563eb)", cursor: "pointer", fontSize: 12, fontWeight: 700 }}>Relatório Técnico</button>
       </div>
       <div style={{ marginBottom: 14 }}>
         <div className="sk-eyebrow">Relatório de API · teste #{data.scan_id}</div>

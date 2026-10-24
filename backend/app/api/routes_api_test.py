@@ -217,6 +217,94 @@ def finalize_api_test(
     return finalize_scan(test_id, db=db, current_user=current_user)
 
 
+def _esc(v: Any) -> str:
+    import html
+    return html.escape(str(v if v is not None else ""))
+
+
+def _api_report_html(rep: dict[str, Any], kind: str) -> str:
+    s = rep.get("summary", {})
+    sev = s.get("findings_by_severity", {}) or {}
+    sevline = " · ".join(f"{sev[k]} {k}" for k in ("critical", "high", "medium", "low", "info") if sev.get(k)) or "nenhum"
+    title = "Relatório Executivo de API" if kind == "executive" else "Relatório Técnico de API"
+    cards = [
+        ("Endpoints", s.get("endpoints_total")), ("Testados", f"{s.get('endpoints_tested')}/{s.get('endpoints_total')}"),
+        ("Cobertura", f"{s.get('coverage_pct')}%"), ("Da spec", s.get("endpoints_from_spec")),
+        ("Descobertos", s.get("endpoints_discovered")), ("Endpoints BAC", s.get("bac_endpoints_tested")),
+        ("Achados BAC (conf.)", f"{s.get('bac_confirmed', 0)}/{s.get('bac_findings', 0)}"),
+        ("Advisórios", s.get("advisories_total")), ("Achados", s.get("findings_total")),
+        ("Skills", f"{s.get('skills_executed')}/{s.get('skills_catalog_total')}"),
+    ]
+    card_html = "".join(f'<div class="card"><div class="cl">{_esc(l)}</div><div class="cv">{_esc(v)}</div></div>' for l, v in cards)
+    cat_rows = "".join(
+        f'<tr class="{"bac" if sk.get("is_bac") else ""}"><td>{"●" if sk.get("executed") else "○"}</td><td>{_esc(sk.get("name"))}</td>'
+        f'<td>{_esc(sk.get("owasp"))}</td><td>{"BAC" if sk.get("is_bac") else ""}</td><td>{_esc(sk.get("endpoints_covered"))}</td><td>{_esc(sk.get("findings"))}</td></tr>'
+        for sk in rep.get("skills_catalog", [])
+    )
+    body = f"""
+    <h1>{_esc(title)}</h1>
+    <div class="meta">Alvo: <b>{_esc(rep.get('target'))}</b> · Teste #{_esc(rep.get('scan_id'))} · Status: {_esc(rep.get('status'))}</div>
+    <div class="cards">{card_html}</div>
+    <p class="sev">Severidade dos achados: {_esc(sevline)}</p>
+    <h2>Conformidade OWASP API Top 20</h2>
+    <table><thead><tr><th></th><th>Teste</th><th>OWASP</th><th></th><th>Endpoints</th><th>Achados</th></tr></thead><tbody>{cat_rows}</tbody></table>
+    """
+    if kind == "technical":
+        ep_rows = ""
+        for e in rep.get("endpoints", []):
+            q = e.get("quality", {})
+            finds = "".join(f'<li class="s-{_esc(f.get("severity"))}">{_esc(f.get("severity"))}: {_esc(f.get("title"))} ({_esc(f.get("owasp"))})</li>' for f in e.get("findings", []))
+            advs = "".join(f'<li class="adv">advisory: {_esc(a.get("title"))}</li>' for a in e.get("advisories", []))
+            evs = ""
+            for ev in (e.get("evidence") or [])[:4]:
+                evs += (f'<div class="ev"><div class="evh">{_esc(ev.get("method"))} {_esc(ev.get("url"))} → HTTP {_esc(ev.get("response_status"))} '
+                        f'[{_esc((ev.get("skill_id") or "").replace("skill.api.",""))}]</div>'
+                        f'<pre>{_esc(ev.get("curl"))}</pre>'
+                        + (f'<pre>req: {_esc(ev.get("request_body"))}</pre>' if ev.get("request_body") else "")
+                        + f'<pre>resp: {_esc((ev.get("response_body") or "")[:600])}</pre></div>')
+            if not (finds or advs or evs):
+                continue
+            ep_rows += (f'<div class="epc"><div class="eph"><b>{_esc(e.get("method"))}</b> {_esc(e.get("path"))} '
+                        f'<span class="q q-{_esc(q.get("level"))}">{_esc(q.get("label"))}</span> '
+                        f'<span class="src">{_esc(e.get("source"))}</span></div>'
+                        f'<ul>{finds}{advs}</ul>{evs}</div>')
+        body += f"<h2>Detalhe por endpoint (achados, advisórios e evidência)</h2>{ep_rows or '<p>Sem achados/evidências por endpoint.</p>'}"
+    css = """
+    body{font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#1e293b;margin:0;padding:28px;max-width:1000px;margin:auto}
+    h1{font-size:22px;margin:0 0 4px} h2{font-size:15px;margin:22px 0 8px;border-bottom:2px solid #e2e8f0;padding-bottom:4px}
+    .meta{color:#64748b;font-size:13px;margin-bottom:14px}
+    .cards{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0}
+    .card{border:1px solid #e2e8f0;border-radius:8px;padding:8px 12px;min-width:92px}
+    .cl{font-size:10px;color:#64748b;font-weight:700} .cv{font-size:18px;font-weight:800}
+    .sev{font-size:12px;color:#334155} table{width:100%;border-collapse:collapse;font-size:12px}
+    th,td{border-bottom:1px solid #e2e8f0;padding:5px 7px;text-align:left} tr.bac{background:rgba(220,38,38,.06)}
+    .epc{border:1px solid #e2e8f0;border-radius:8px;padding:10px;margin-bottom:10px} .eph{font-size:13px;margin-bottom:5px}
+    .q{font-weight:800;font-size:11px;padding:1px 6px;border-radius:4px} .q-good{color:#16a34a} .q-partial{color:#d97706} .q-weak,.q-none{color:#dc2626}
+    .src{color:#2563eb;font-size:11px} ul{margin:4px 0;padding-left:18px;font-size:12px}
+    .s-critical,.s-high{color:#dc2626} .s-medium{color:#d97706} .adv{color:#d97706}
+    .ev{margin:6px 0;border-left:3px solid #e2e8f0;padding-left:8px} .evh{font-size:11px;font-weight:700;color:#334155}
+    pre{background:#f8fafc;border:1px solid #e2e8f0;border-radius:5px;padding:6px;font-size:10.5px;white-space:pre-wrap;word-break:break-all;margin:3px 0}
+    @media print{body{padding:0} .epc{break-inside:avoid}}
+    """
+    return f"<!doctype html><html lang='pt-br'><head><meta charset='utf-8'><title>{_esc(title)}</title><style>{css}</style></head><body>{body}</body></html>"
+
+
+@router.get("/{test_id}/technical.html")
+def api_test_technical_html(test_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    from fastapi import Response
+    from app.services.api_endpoint_report import build_api_endpoint_report
+    job = _get_api_job(db, current_user, test_id)
+    return Response(content=_api_report_html(build_api_endpoint_report(db, job), "technical"), media_type="text/html")
+
+
+@router.get("/{test_id}/executive.html")
+def api_test_executive_html(test_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    from fastapi import Response
+    from app.services.api_endpoint_report import build_api_endpoint_report
+    job = _get_api_job(db, current_user, test_id)
+    return Response(content=_api_report_html(build_api_endpoint_report(db, job), "executive"), media_type="text/html")
+
+
 @router.get("/{test_id}/report")
 def api_test_report(
     test_id: int,

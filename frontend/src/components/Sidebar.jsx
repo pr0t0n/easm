@@ -69,7 +69,7 @@ const NAV_GROUPS = [
   {
     grupo: "Entrega",
     itens: [
-      { to: "/relatorios", label: "Relatórios", icon: "relatorios" },
+      { to: "/relatorios", label: "Relatório SCAN", icon: "relatorios" },
       { to: "/relatorios/bas", label: "Relatório BAS", icon: "bas" },
       { to: "/relatorios/api", label: "Relatório API", icon: "api" },
     ],
