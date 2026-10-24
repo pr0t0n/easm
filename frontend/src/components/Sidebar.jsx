@@ -63,7 +63,6 @@ const NAV_GROUPS = [
         to: "/api",
         label: "API",
         icon: "api",
-        adminOnly: true,
       },
     ],
   },
