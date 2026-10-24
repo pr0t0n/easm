@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import uuid
 from typing import Any
 from urllib.parse import urljoin, urlparse
@@ -45,7 +46,7 @@ def ingest_api_spec(
     if spec_type == "har" or "log" in payload:
         count = _ingest_har(inv, payload, auth_context=auth_context)
     elif spec_type == "postman" or "item" in payload and "info" in payload:
-        count = _ingest_postman(inv, payload, auth_context=auth_context)
+        count = _ingest_postman(inv, payload, auth_context=auth_context, fallback_base=fallback_base)
     elif spec_type == "graphql":
         count = _ingest_graphql(inv, payload, spec_url, auth_context=auth_context)
     else:
@@ -236,7 +237,27 @@ def _ingest_graphql(inv: OffensiveInventoryService, spec: dict[str, Any], source
     return count
 
 
-def _ingest_postman(inv: OffensiveInventoryService, payload: dict[str, Any], *, auth_context: str = "anonymous") -> int:
+def _postman_url(raw: Any, fallback_base: str) -> str:
+    """Resolve a Postman request URL to an in-scope absolute URL. Postman raw
+    URLs usually carry variables ({{baseUrl}}) or an environment host that is out
+    of scope; strip the variables and resolve the PATH against the scan's
+    authorized target so the endpoints are testable and pass the scope gate."""
+    s = str(raw or "").strip()
+    # Drop a leading host variable ({{baseUrl}}, {{url}}, {{host}}...).
+    s = re.sub(r"^\s*\{\{[^}]*\}\}", "", s)
+    # Drop scheme://host if the raw URL is absolute.
+    m = re.match(r"^[a-zA-Z][a-zA-Z0-9+.\-]*://[^/]*(/.*)?$", s)
+    path = (m.group(1) if m and m.group(1) else (s if not m else "/"))
+    # Remaining in-path variables {{id}} -> {id} so path-var enumeration fills them.
+    path = re.sub(r"\{\{\s*([^}]*?)\s*\}\}", r"{\1}", path)
+    if not path.startswith("/"):
+        path = "/" + path
+    if fallback_base:
+        return urljoin(fallback_base, path.lstrip("/"))
+    return path
+
+
+def _ingest_postman(inv: OffensiveInventoryService, payload: dict[str, Any], *, auth_context: str = "anonymous", fallback_base: str = "") -> int:
     count = 0
     for item in _walk_postman_items(payload.get("item") or []):
         request = item.get("request") or {}
@@ -245,7 +266,12 @@ def _ingest_postman(inv: OffensiveInventoryService, payload: dict[str, Any], *, 
         raw = url.get("raw") if isinstance(url, dict) else url
         if not raw:
             continue
-        ep = inv.upsert_endpoint(str(raw), method=method, source_tool="postman", auth_context=auth_context, tags=["api"])
+        target = _postman_url(raw, fallback_base)
+        # One out-of-scope request must not abort the whole import.
+        try:
+            ep = inv.upsert_endpoint(str(target), method=method, source_tool="postman", auth_context=auth_context, tags=["api"])
+        except ValueError:
+            continue
         if isinstance(url, dict):
             for q in url.get("query") or []:
                 if isinstance(q, dict) and q.get("key"):
