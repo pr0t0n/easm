@@ -106,6 +106,13 @@ def quality_gate_hard_block_is_futile(state: dict[str, Any], quality_gate: dict[
     return list(previous) == list(quality_gate_blocker_fingerprint(quality_gate))
 
 QUALITY_TOOL_FALLBACKS: dict[str, list[str]] = {
+    # P02 port scan. masscan uses a userspace raw-socket stack that never
+    # receives replies behind userspace NAT (Docker Desktop/macOS) → always
+    # found=0; naabu SYN probes can also drop under concurrency. Reroute an
+    # empty/inconclusive port scan to a connect-scan capability instead of
+    # letting it dead-end in supervisor broken glass.
+    "masscan": ["naabu", "nmap"],
+    "naabu": ["nmap", "masscan"],
     "httpx": ["curl-headers", "whatweb"],
     "whatweb": ["httpx", "curl-headers"],
     "curl-headers": ["httpx", "whatweb"],
@@ -150,6 +157,7 @@ QUALITY_TOOL_FALLBACKS: dict[str, list[str]] = {
 }
 
 QUALITY_PHASE_FALLBACKS: dict[str, list[str]] = {
+    "P02": ["naabu", "nmap"],
     "P03": ["katana", "hakrawler", "gospider", "gau", "waybackurls"],
     "P04": ["arjun", "ffuf-params", "paramspider", "wfuzz"],
     "P05": ["whatweb", "httpx", "curl-headers"],

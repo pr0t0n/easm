@@ -4467,6 +4467,7 @@ def run_scan_postprocessor(
                         openapi_url=str(item_meta.get("openapi_url") or item_meta.get("swagger_url") or ""),
                         auth_headers=auth_headers or None,
                         scan_id=job.id,
+                        openapi_file=str(item_meta.get("openapi_file") or ""),
                     )
                     patch = {}
                 elif high_value and active_count < 8:
