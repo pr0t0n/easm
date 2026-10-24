@@ -27,6 +27,7 @@ const CapabilityBlueprintPage = lazy(() => import("./pages/CapabilityBlueprintPa
 const SchedulingPage = lazy(() => import("./pages/SchedulingPage"));
 const SettingsPage = lazy(() => import("./pages/SettingsPage"));
 const BasControlCenterPage = lazy(() => import("./pages/BasControlCenterPage"));
+const ApiScanPage = lazy(() => import("./pages/ApiScanPage"));
 const BasOperationsCenterPage = lazy(() => import("./pages/BasOperationsCenterPage"));
 const BasReportPage = lazy(() => import("./pages/BasReportPage"));
 
@@ -109,6 +110,7 @@ export default function App() {
                     <Route path="/usuarios" element={<AdminOnly><UserManagementPage /></AdminOnly>} />
                     <Route path="/logs" element={<AdminOnly><AdminLogsPage /></AdminOnly>} />
                     <Route path="/scan" element={<AdminOnly><ScanOperationsPage /></AdminOnly>} />
+                    <Route path="/api" element={<AdminOnly><ApiScanPage /></AdminOnly>} />
                     <Route path="/operacional" element={<AdminOnly><OperationsCenterPage /></AdminOnly>} />
                     <Route path="/phase-monitor" element={<Navigate to="/operacional?module=phases_agents" replace />} />
                     <Route path="/workers" element={<Navigate to="/operacional?module=infra" replace />} />

@@ -18,6 +18,12 @@ from typing import Any
 
 ASM_PHASES = {"P01", "P02", "P03", "P04", "P05", "P06", "P07", "P08", "P18", "P21", "P22"}
 
+# API module: only the API Security phase (P16) runs. Endpoints come from the
+# submitted OpenAPI/Swagger/Postman spec (ingested into OffensiveEndpoint at
+# scan creation), so no recon/port-scan phase is needed — the OWASP API Top 10
+# skills (BOLA/BFLA/broken-auth/etc.) run directly against the spec surface.
+API_PHASES = {"P16"}
+
 SCAN_PROFILES: dict[str, dict[str, Any]] = {
     "asm": {
         "id": "asm",
@@ -55,6 +61,18 @@ SCAN_PROFILES: dict[str, dict[str, Any]] = {
         "post_exploitation": True,
         "description": "P01-P22 com mais budget, mais ferramentas por skill e validacao profunda controlada.",
     },
+    "api": {
+        "id": "api",
+        "label": "API Security",
+        "coverage": "api_owasp_top10",
+        "depth": "medium",
+        "phase_ids": sorted(API_PHASES),
+        "complete_phase_tool_coverage": True,
+        "max_risk_allowed": "medium",
+        "noise_profile": "balanced",
+        "post_exploitation": False,
+        "description": "Teste de seguranca de API (OWASP API Top 10 + BOLA/BFLA) a partir de spec OpenAPI/Swagger/Postman/HAR.",
+    },
 }
 
 
@@ -66,6 +84,9 @@ def normalize_scan_level(scan_level: str | None) -> str:
         "padrao": "full",
         "padrão": "full",
         "agressivo": "aggressive",
+        "api_security": "api",
+        "owasp_api": "api",
+        "api_only": "api",
     }
     return aliases.get(level, level) if aliases.get(level, level) in SCAN_PROFILES else "full"
 
