@@ -28,6 +28,7 @@ const SchedulingPage = lazy(() => import("./pages/SchedulingPage"));
 const SettingsPage = lazy(() => import("./pages/SettingsPage"));
 const BasControlCenterPage = lazy(() => import("./pages/BasControlCenterPage"));
 const ApiScanPage = lazy(() => import("./pages/ApiScanPage"));
+const ApiReportPage = lazy(() => import("./pages/ApiReportPage"));
 const BasOperationsCenterPage = lazy(() => import("./pages/BasOperationsCenterPage"));
 const BasReportPage = lazy(() => import("./pages/BasReportPage"));
 
@@ -98,6 +99,8 @@ export default function App() {
                     <Route path="/relatorios/tecnico/:scanId" element={<TechReportViewer />} />
                     <Route path="/relatorios-legacy" element={<Navigate to="/relatorios" replace />} />
                     <Route path="/relatorios/bas" element={<BasReportPage />} />
+                    <Route path="/relatorios/api" element={<AdminOnly><ApiReportPage /></AdminOnly>} />
+                    <Route path="/relatorios/api/:id" element={<AdminOnly><ApiReportPage /></AdminOnly>} />
                     <Route path="/evolucao" element={<AttackEvolutionPage />} />
                     <Route path="/targets" element={<Navigate to="/scan" replace />} />
                     <Route path="/achados" element={<VulnerabilitiesPage />} />
