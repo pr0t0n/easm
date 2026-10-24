@@ -150,6 +150,26 @@ def list_api_tests(
     return [_scan_to_response(db, s) for s in rows]
 
 
+@router.get("/catalog")
+def api_test_catalog(current_user: User = Depends(get_current_user)):
+    """The OWASP API Top 20 test catalog (which tests exist), with the Broken
+    Access Control family (BOLA/BFLA/BOPLA/mass-assignment) flagged."""
+    from app.services.api_endpoint_report import BAC_SKILL_IDS
+    from app.services.api_skill_top20_runner import load_api_top20_skills
+
+    skills = []
+    for s in load_api_top20_skills().get("skills", []):
+        sid = str(s.get("id") or "")
+        skills.append({
+            "id": sid,
+            "name": s.get("name") or sid,
+            "owasp": s.get("owasp") or s.get("category") or "",
+            "priority": int(s.get("priority") or 999),
+            "is_bac": sid in BAC_SKILL_IDS,
+        })
+    return {"skills": skills, "total": len(skills), "bac_total": sum(1 for s in skills if s["is_bac"])}
+
+
 def _get_api_job(db: Session, current_user: User, test_id: int) -> ScanJob:
     job = _authorized_scan_query(db, current_user).filter(ScanJob.id == test_id).first()
     if not job or str(job.mode or "") != "api":
@@ -205,3 +225,17 @@ def api_test_report(
         db=db,
         current_user=current_user,
     )
+
+
+@router.get("/{test_id}/coverage")
+def api_test_coverage(
+    test_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Per-endpoint API report (the 'forest'): quality of testing PER ENDPOINT
+    (spec + crawled), OWASP API Top 20 catalog coverage, and BAC focus."""
+    job = _get_api_job(db, current_user, test_id)
+    from app.services.api_endpoint_report import build_api_endpoint_report
+
+    return build_api_endpoint_report(db, job)

@@ -8,6 +8,7 @@ import { useNavigate } from "react-router-dom";
 import client from "../api/client";
 import CompanyScopeSelect from "../components/CompanyScopeSelect";
 import { toastError, toastSuccess } from "../utils/toast";
+import { buildScannerAuthConfig } from "../lib/scannerAuth";
 
 const SPEC_TYPES = [
   { value: "openapi", label: "OpenAPI / Swagger (JSON)" },
@@ -41,6 +42,18 @@ export default function ApiScanPage() {
   const [accessGroupId, setAccessGroupId] = useState(null);
   const [submitting, setSubmitting] = useState(false);
 
+  // Autenticação / variáveis — necessário para os testes de BAC fazerem sentido.
+  const [authType, setAuthType] = useState("none"); // none | bearer | header
+  const [multiIdentity, setMultiIdentity] = useState(false); // A/B para BOLA/BFLA
+  const [token, setToken] = useState("");
+  const [tokenB, setTokenB] = useState("");
+  const [headerName, setHeaderName] = useState("");
+  const [headerValue, setHeaderValue] = useState("");
+  const [headerValueB, setHeaderValueB] = useState("");
+
+  const [catalog, setCatalog] = useState([]);
+  const [showCatalog, setShowCatalog] = useState(false);
+
   const [tests, setTests] = useState([]);
   const [loading, setLoading] = useState(true);
   const pollRef = useRef(null);
@@ -61,6 +74,23 @@ export default function ApiScanPage() {
     pollRef.current = setInterval(load, 5000);
     return () => pollRef.current && clearInterval(pollRef.current);
   }, [load]);
+
+  useEffect(() => {
+    client.get("/api/apitest/catalog")
+      .then(({ data }) => setCatalog(Array.isArray(data?.skills) ? data.skills : []))
+      .catch(() => {});
+  }, []);
+
+  function buildAuth() {
+    if (authType === "none") return null;
+    return buildScannerAuthConfig(true, {
+      type: authType,
+      multiIdentity,
+      token, tokenB,
+      headerName, headerValue, headerValueB,
+      roleA: "user", roleB: "admin",
+    });
+  }
 
   const specValid = useMemo(() => {
     if (specMode === "url") return specUrl.trim().length > 0;
@@ -86,6 +116,8 @@ export default function ApiScanPage() {
       };
       if (specMode === "url") payload.spec_url = specUrl.trim();
       else payload.spec_payload = JSON.parse(specJson);
+      const auth = buildAuth();
+      if (auth) payload.auth_config = auth;
     } catch (err) {
       toastError("Spec JSON inválido.");
       return;
@@ -174,6 +206,60 @@ export default function ApiScanPage() {
           )}
         </div>
 
+        <div style={{ marginTop: 14, borderTop: "1px solid var(--border)", paddingTop: 14 }}>
+          <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 8, flexWrap: "wrap" }}>
+            <label style={{ ...label, marginBottom: 0 }}>Autenticação / variáveis</label>
+            <select style={{ ...input, width: "auto" }} value={authType} onChange={(e) => setAuthType(e.target.value)}>
+              <option value="none">Sem autenticação (anônimo)</option>
+              <option value="bearer">Bearer token (JWT)</option>
+              <option value="header">Header / API key</option>
+            </select>
+            {authType !== "none" && (
+              <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12, color: "var(--ink)", cursor: "pointer" }}>
+                <input type="checkbox" checked={multiIdentity} onChange={(e) => setMultiIdentity(e.target.checked)} />
+                2 identidades A/B (essencial p/ BAC: BOLA/BFLA)
+              </label>
+            )}
+          </div>
+          {authType === "bearer" && (
+            <div style={{ display: "grid", gridTemplateColumns: multiIdentity ? "1fr 1fr" : "1fr", gap: 10 }}>
+              <input style={input} placeholder="Bearer token — identidade A" value={token} onChange={(e) => setToken(e.target.value)} />
+              {multiIdentity && <input style={input} placeholder="Bearer token — identidade B" value={tokenB} onChange={(e) => setTokenB(e.target.value)} />}
+            </div>
+          )}
+          {authType === "header" && (
+            <div style={{ display: "grid", gridTemplateColumns: multiIdentity ? "1fr 1fr 1fr" : "1fr 1fr", gap: 10 }}>
+              <input style={input} placeholder="Nome do header (ex.: x-api-key)" value={headerName} onChange={(e) => setHeaderName(e.target.value)} />
+              <input style={input} placeholder="Valor — identidade A" value={headerValue} onChange={(e) => setHeaderValue(e.target.value)} />
+              {multiIdentity && <input style={input} placeholder="Valor — identidade B" value={headerValueB} onChange={(e) => setHeaderValueB(e.target.value)} />}
+            </div>
+          )}
+          {authType !== "none" && (
+            <div style={{ fontSize: 11, color: "var(--ink-muted)", marginTop: 6 }}>
+              As credenciais viram identidades de teste. Com 2 identidades, os testes BAC comparam acesso entre A e B por endpoint.
+            </div>
+          )}
+        </div>
+
+        <div style={{ marginTop: 12 }}>
+          <button type="button" onClick={() => setShowCatalog((v) => !v)}
+            style={{ background: "none", border: "none", color: "var(--brand, #2563eb)", cursor: "pointer", fontSize: 12, fontWeight: 700, padding: 0 }}>
+            {showCatalog ? "▾" : "▸"} Testes incluídos — OWASP API Top 20 ({catalog.length})
+          </button>
+          {showCatalog && (
+            <div style={{ marginTop: 8, display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 6 }}>
+              {catalog.map((s) => (
+                <div key={s.id} className="sk-mono" style={{ fontSize: 11, padding: "5px 8px", borderRadius: 6, border: "1px solid var(--border)",
+                  background: s.is_bac ? "var(--sev-high-bg, rgba(220,38,38,.08))" : "transparent" }}>
+                  <span style={{ fontWeight: 800, color: "var(--ink)" }}>{s.name}</span>
+                  <span style={{ color: "var(--ink-muted)", marginLeft: 6 }}>{s.owasp}</span>
+                  {s.is_bac && <span style={{ color: "var(--sev-high-text, #dc2626)", fontWeight: 800, marginLeft: 6 }}>BAC</span>}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
         <div style={{ display: "flex", alignItems: "center", gap: 18, marginTop: 14, flexWrap: "wrap" }}>
           <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12.5, color: "var(--ink)", cursor: "pointer" }}>
             <input type="checkbox" checked={allowMutations} onChange={(e) => setAllowMutations(e.target.checked)} />
@@ -237,7 +323,7 @@ export default function ApiScanPage() {
                       <td style={{ padding: "7px 8px", color: t.open_critical ? "var(--sev-high-text, #dc2626)" : "var(--ink)" }}>{sev}</td>
                       <td style={{ padding: "7px 8px", display: "flex", gap: 6 }}>
                         {TERMINAL.has(s) && (
-                          <button type="button" onClick={() => navigate(`/relatorios/tecnico/${t.id}`)}
+                          <button type="button" onClick={() => navigate(`/relatorios/api/${t.id}`)}
                             style={{ padding: "4px 10px", borderRadius: 6, border: "1px solid var(--border)", background: "transparent", color: "var(--brand, #2563eb)", cursor: "pointer", fontWeight: 700 }}>Relatório</button>
                         )}
                         {STOPPABLE.has(s) && (

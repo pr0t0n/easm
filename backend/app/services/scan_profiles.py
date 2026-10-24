@@ -18,11 +18,13 @@ from typing import Any
 
 ASM_PHASES = {"P01", "P02", "P03", "P04", "P05", "P06", "P07", "P08", "P18", "P21", "P22"}
 
-# API module: only the API Security phase (P16) runs. Endpoints come from the
-# submitted OpenAPI/Swagger/Postman spec (ingested into OffensiveEndpoint at
-# scan creation), so no recon/port-scan phase is needed — the OWASP API Top 10
-# skills (BOLA/BFLA/broken-auth/etc.) run directly against the spec surface.
-API_PHASES = {"P16"}
+# API module. Endpoints come from BOTH the submitted spec (ingested at creation)
+# AND active discovery against the URL — do not trust only the Swagger. So the
+# profile runs crawling/endpoint-discovery phases plus the API security phase:
+#   P03 Web crawling & JS extraction, P04 parameter discovery,
+#   P08 JavaScript endpoint extraction, P16 API security (OWASP API Top 10).
+# No port-scan / vuln-template / exploitation phases — stays API-focused.
+API_PHASES = {"P03", "P04", "P08", "P16"}
 
 SCAN_PROFILES: dict[str, dict[str, Any]] = {
     "asm": {
