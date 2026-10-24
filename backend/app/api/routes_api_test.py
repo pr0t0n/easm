@@ -55,6 +55,13 @@ class ApiTestCreate(BaseModel):
     active_level: str = "safe"
     # Optional authenticated testing (bearer/headers/cookies/userlist).
     auth_config: dict[str, Any] | None = None
+    # Header variables applied to EVERY request (ex.: x-api-key, x-organization-id,
+    # x-project-id, Authorization). Essencial para passar o gate de auth.
+    headers: dict[str, str] | None = None
+    # Body/path variables used to fill fields and path vars by name (ex.:
+    # {"requestId": "<uuid válido>", "cpf": "12345678900"}). Necessário p/ testes
+    # como optIn, que exigem um REQUEST_ID válido de transação.
+    variables: dict[str, Any] | None = None
     access_group_id: int | None = None
     access_group_name: str | None = None
     authorization_code: str | None = None
@@ -74,6 +81,10 @@ def _api_scan_payload(payload: ApiTestCreate) -> ScanCreate:
         "spec_type": payload.spec_type,
         "allow_mutations": bool(payload.allow_mutations),
         "active_level": payload.active_level,
+        # Variáveis do teste: headers aplicados a toda request e variáveis de
+        # path/body preenchidas por nome (requestId, cpf, ...).
+        "test_headers": {str(k): str(v) for k, v in (payload.headers or {}).items()},
+        "test_variables": dict(payload.variables or {}),
     }
     return ScanCreate(
         target_query=payload.target_url,
@@ -239,3 +250,58 @@ def api_test_coverage(
     from app.services.api_endpoint_report import build_api_endpoint_report
 
     return build_api_endpoint_report(db, job)
+
+
+@router.get("/{test_id}/report.csv")
+def api_test_report_csv(
+    test_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """CSV extraível com 3 seções: resumo, conformidade OWASP API Top 20
+    (por skill: executou/cobertura/achados) e qualidade POR ENDPOINT."""
+    import csv
+    import io
+
+    from fastapi import Response
+
+    from app.services.api_endpoint_report import build_api_endpoint_report
+
+    job = _get_api_job(db, current_user, test_id)
+    rep = build_api_endpoint_report(db, job)
+    s = rep.get("summary", {})
+    buf = io.StringIO()
+    w = csv.writer(buf)
+
+    w.writerow(["# RESUMO"])
+    w.writerow(["scan_id", "alvo", "status", "endpoints_total", "da_spec", "descobertos",
+                "testados", "cobertura_%", "endpoints_bac_testados", "achados", "achados_bac_confirmados",
+                "advisorios", "skills_executadas", "skills_catalogo"])
+    w.writerow([rep.get("scan_id"), rep.get("target"), rep.get("status"), s.get("endpoints_total"),
+                s.get("endpoints_from_spec"), s.get("endpoints_discovered"), s.get("endpoints_tested"),
+                s.get("coverage_pct"), s.get("bac_endpoints_tested"), s.get("findings_total"),
+                s.get("bac_confirmed"), s.get("advisories_total"), s.get("skills_executed"), s.get("skills_catalog_total")])
+    w.writerow([])
+
+    w.writerow(["# CONFORMIDADE OWASP API TOP 20"])
+    w.writerow(["skill_id", "nome", "owasp", "BAC", "executou", "endpoints_cobertos", "achados"])
+    for sk in rep.get("skills_catalog", []):
+        w.writerow([sk.get("id"), sk.get("name"), sk.get("owasp"), "sim" if sk.get("is_bac") else "",
+                    "sim" if sk.get("executed") else "nao", sk.get("endpoints_covered"), sk.get("findings")])
+    w.writerow([])
+
+    w.writerow(["# QUALIDADE POR ENDPOINT"])
+    w.writerow(["metodo", "path", "origem", "testado", "qualidade", "score", "skills_testadas",
+                "bac_testado", "status_http", "achados", "severidades", "advisorios"])
+    for e in rep.get("endpoints", []):
+        q = e.get("quality", {})
+        sev = ";".join(f"{k}:{v}" for k, v in (e.get("findings_by_severity") or {}).items())
+        http = ";".join(f"{k}x{v}" for k, v in (e.get("http_status_counts") or {}).items())
+        w.writerow([e.get("method"), e.get("path"), e.get("source"), "sim" if e.get("tested") else "nao",
+                    q.get("label"), q.get("score"), e.get("skills_tested_count"),
+                    "sim" if e.get("bac_tested") else "nao", http, len(e.get("findings") or []),
+                    sev, len(e.get("advisories") or [])])
+
+    filename = f"api-report-scan-{test_id}.csv"
+    return Response(content=buf.getvalue(), media_type="text/csv",
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"'})

@@ -95,6 +95,16 @@ function ApiReportDetail({ id }) {
 
   useEffect(() => { load(); }, [load]);
 
+  async function downloadCsv() {
+    try {
+      const resp = await client.get(`/api/apitest/${id}/report.csv`, { responseType: "blob" });
+      const url = URL.createObjectURL(new Blob([resp.data], { type: "text/csv" }));
+      const a = document.createElement("a");
+      a.href = url; a.download = `api-report-scan-${id}.csv`;
+      document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+    } catch (e) { /* ignore */ }
+  }
+
   if (loading) return <div style={{ padding: 26, color: "var(--ink-muted)" }}>Carregando relatório…</div>;
   if (err) return <div style={{ padding: 26, color: "var(--sev-high-text, #dc2626)" }}>{err}</div>;
   if (!data) return null;
@@ -105,8 +115,15 @@ function ApiReportDetail({ id }) {
 
   return (
     <div style={{ padding: "22px 26px", maxWidth: 1240, margin: "0 auto" }}>
-      <button type="button" onClick={() => navigate("/api")}
-        style={{ background: "none", border: "none", color: "var(--brand, #2563eb)", cursor: "pointer", fontSize: 12, padding: 0, marginBottom: 8 }}>← Voltar para API</button>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8, flexWrap: "wrap" }}>
+        <button type="button" onClick={() => navigate("/api")}
+          style={{ background: "none", border: "none", color: "var(--brand, #2563eb)", cursor: "pointer", fontSize: 12, padding: 0 }}>← Voltar para API</button>
+        <span style={{ flex: 1 }} />
+        <button type="button" onClick={downloadCsv}
+          style={{ padding: "6px 12px", borderRadius: 7, border: "1px solid var(--border)", background: "transparent", color: "var(--ink)", cursor: "pointer", fontSize: 12, fontWeight: 700 }}>⬇ Baixar CSV</button>
+        <button type="button" onClick={() => navigate(`/relatorios/tecnico/${id}`)}
+          style={{ padding: "6px 12px", borderRadius: 7, border: "1px solid var(--border)", background: "transparent", color: "var(--brand, #2563eb)", cursor: "pointer", fontSize: 12, fontWeight: 700 }}>Relatório técnico</button>
+      </div>
       <div style={{ marginBottom: 14 }}>
         <div className="sk-eyebrow">Relatório de API · teste #{data.scan_id}</div>
         <h1 style={{ margin: "2px 0 2px", fontSize: 21, fontWeight: 800, color: "var(--ink)" }}>{data.target}</h1>
