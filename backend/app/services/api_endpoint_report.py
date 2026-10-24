@@ -165,19 +165,24 @@ def build_api_endpoint_report(db: Session, job: ScanJob) -> dict[str, Any]:
             })
 
     # 4) Per-endpoint aggregation.
-    def match_path(path: str) -> dict[str, Any] | None:
+    def match_path(path: str, method: str | None = None) -> dict[str, Any] | None:
+        m = str(method or "").upper()
+        fallback = None
         for d in docs:
             if d["regex"].match(path):
-                return d
-        return None
+                if m and d["method"] == m:
+                    return d
+                fallback = fallback or d
+        return fallback
 
+    _EVIDENCE_PER_EP = 10
     obs_by_ep: dict[tuple[str, str], dict[str, Any]] = defaultdict(
-        lambda: {"skills": set(), "identities": set(), "statuses": defaultdict(int), "real": 0, "count": 0}
+        lambda: {"skills": set(), "identities": set(), "statuses": defaultdict(int), "real": 0, "count": 0, "evidence": []}
     )
     shadow_paths: set[str] = set()
     for o in observations:
         opath = _path_of(o.get("endpoint") or o.get("url"))
-        d = match_path(opath)
+        d = match_path(opath, o.get("method"))
         if not d:
             shadow_paths.add(opath)
             continue
@@ -192,6 +197,19 @@ def build_api_endpoint_report(db: Session, job: ScanJob) -> dict[str, Any]:
             if isinstance(st, int) and st > 0:
                 agg["real"] += 1
         agg["count"] += 1
+        # cURL + request body + response as evidence for the drill-down.
+        if o.get("curl") and len(agg["evidence"]) < _EVIDENCE_PER_EP:
+            agg["evidence"].append({
+                "skill_id": str(o.get("skill_id") or ""),
+                "method": str(o.get("method") or ""),
+                "url": str(o.get("endpoint") or o.get("url") or ""),
+                "identity_key": str(o.get("identity_key") or ""),
+                "curl": str(o.get("curl") or ""),
+                "request_body": str(o.get("request_body") or ""),
+                "response_status": o.get("response_status") if o.get("response_status") is not None else o.get("http_status"),
+                "response_body": str(o.get("response_body") or ""),
+                "response_truncated": bool(o.get("response_truncated")),
+            })
 
     find_by_ep: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     for f in api_findings:
@@ -225,6 +243,7 @@ def build_api_endpoint_report(db: Session, job: ScanJob) -> dict[str, Any]:
             "observation_count": int(agg["count"]) if agg else 0,
             "findings": [{"severity": f["severity"], "title": f["title"], "owasp": f["owasp"], "skill_id": f["skill_id"], "is_bac": f["is_bac"]} for f in fs],
             "findings_by_severity": dict(sev_counts),
+            "evidence": list(agg["evidence"]) if agg else [],
             "quality": _quality(tested, skills, real, bac_tested, len(fs)),
         })
 

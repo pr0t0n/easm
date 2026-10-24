@@ -169,6 +169,20 @@ def _ensure_base_slash(url: str) -> str:
     return url if url.endswith("/") else url + "/"
 
 
+def _param_sample_value(param: dict[str, Any], schema: dict[str, Any]) -> str:
+    """Derive a concrete sample value for a spec parameter from its documented
+    example / enum / format, so templated path vars get a realistic probe value."""
+    for candidate in (param.get("example"), schema.get("example"), schema.get("default")):
+        if candidate not in (None, "", [], {}):
+            return str(candidate)
+    enum = schema.get("enum")
+    if isinstance(enum, list) and enum:
+        return str(enum[0])
+    if str(schema.get("format") or "").lower() == "uuid":
+        return "05be75cc-8f8a-414a-891f-434aa9b4e7a5"
+    return ""
+
+
 def _ingest_openapi(inv: OffensiveInventoryService, spec: dict[str, Any], source_url: str, *, auth_context: str = "anonymous", fallback_base: str = "") -> int:
     base = _base_url(spec, source_url, fallback_base)
     count = 0
@@ -187,7 +201,19 @@ def _ingest_openapi(inv: OffensiveInventoryService, spec: dict[str, Any], source
                 continue
             for param in (operation or {}).get("parameters", []) if isinstance(operation, dict) else []:
                 if isinstance(param, dict) and param.get("name"):
-                    inv.upsert_parameter(ep, str(param["name"]), location=str(param.get("in") or "query"), type_hint=str((param.get("schema") or {}).get("type") or ""), source_tool="api-spec")
+                    schema = param.get("schema") if isinstance(param.get("schema"), dict) else {}
+                    inv.upsert_parameter(
+                        ep, str(param["name"]),
+                        location=str(param.get("in") or "query"),
+                        type_hint=str(schema.get("type") or ""),
+                        # Capture a concrete value from the Swagger so templated
+                        # path vars ({id}, {requestId}, ...) can be probed with
+                        # the documented shape (example/enum/format) instead of
+                        # the literal placeholder.
+                        sample_value=_param_sample_value(param, schema),
+                        metadata={"format": schema.get("format"), "enum": schema.get("enum")} if (schema.get("format") or schema.get("enum")) else None,
+                        source_tool="api-spec",
+                    )
             request_body = (operation or {}).get("requestBody") if isinstance(operation, dict) else {}
             for name in _schema_property_names(request_body):
                 inv.upsert_parameter(ep, name, location="json", source_tool="api-spec")

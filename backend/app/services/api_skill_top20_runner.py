@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -155,6 +156,99 @@ def _params_by_endpoint(db: Any, endpoint_ids: list[int]) -> dict[int, list[dict
             "risk_hint": str(param.risk_hint or ""),
         })
     return by_endpoint
+
+
+# ─── Path-variable value generation ──────────────────────────────────────────
+# Templated URIs like /api/v1/admin/dead-letters/{id}/replay must be probed with
+# CONCRETE values, not the literal "{id}", or no object is ever reached. Values
+# come from (1) the Swagger schema (example/enum/format, persisted as
+# sample_value at ingestion) and (2) numeric enumeration — so BOLA/IDOR and the
+# other skills can actually enumerate objects and surface codes/data.
+_SAMPLE_UUID = "05be75cc-8f8a-414a-891f-434aa9b4e7a5"
+_NUMERIC_ENUM = ["1", "2", "3", "10", "100", "9001"]
+_PATH_PLACEHOLDER_RE = re.compile(r"\{([^/{}]+)\}")
+_MAX_ENUM_VARIANTS = 5
+
+
+def _looks_numeric(type_hint: str, name: str) -> bool:
+    if str(type_hint or "").lower() in {"integer", "number", "int", "long"}:
+        return True
+    n = str(name or "").lower()
+    if "uuid" in n:
+        return False
+    return any(tok in n for tok in ("id", "num", "count", "page", "limit", "order", "index", "seq"))
+
+
+def _looks_uuid(name: str, sample: str, type_hint: str) -> bool:
+    n = str(name or "").lower()
+    if "uuid" in n or "requestid" in n or "projectid" in n:
+        return True
+    s = str(sample or "")
+    return s.count("-") >= 4 and len(s) >= 32
+
+
+def _path_param_candidates(param: dict[str, Any]) -> list[str]:
+    name = str(param.get("name") or "")
+    type_hint = str(param.get("type_hint") or "")
+    sample = str(param.get("sample_value") or "").strip()
+    out: list[str] = []
+    if sample and "{" not in sample:
+        out.append(sample)            # Swagger example/enum/format value
+    if _looks_uuid(name, sample, type_hint):
+        out.append(_SAMPLE_UUID)
+    if _looks_numeric(type_hint, name):
+        out.extend(_NUMERIC_ENUM)     # numeric enumeration (BOLA/IDOR)
+    if not out:
+        out.extend(["1", "test"])     # unknown shape: minimal probes
+    seen: set[str] = set()
+    res: list[str] = []
+    for v in out:
+        v = str(v)
+        if v and v not in seen:
+            seen.add(v)
+            res.append(v)
+    return res[:6]
+
+
+def _expand_templated_endpoints(endpoints: list[Endpoint]) -> list[Endpoint]:
+    """Expand each endpoint with {path-vars} into the template PLUS concrete
+    variants (enumerated/sample values) so skills probe real object URLs."""
+    expanded: list[Endpoint] = []
+    seen_urls: set[str] = set()
+    for ep in endpoints:
+        expanded.append(ep)
+        seen_urls.add(ep.url)
+        placeholders = _PATH_PLACEHOLDER_RE.findall(urlparse(ep.url).path)
+        if not placeholders:
+            continue
+        params_by_name = {str(p.get("name")): p for p in ep.parameters if str(p.get("location")) == "path"}
+        candidates = {
+            ph: _path_param_candidates(params_by_name.get(ph, {"name": ph}))
+            for ph in placeholders
+        }
+        # Enumerate the first placeholder (the object id); fix the rest to their
+        # first candidate, to keep the request count bounded.
+        primary = placeholders[0]
+        base_fill = {ph: (candidates[ph][0] if candidates[ph] else "1") for ph in placeholders}
+        for val in candidates[primary][:_MAX_ENUM_VARIANTS]:
+            fill = {**base_fill, primary: val}
+            url = ep.url
+            for ph, v in fill.items():
+                url = url.replace("{" + ph + "}", str(v))
+            if url in seen_urls:
+                continue
+            seen_urls.add(url)
+            expanded.append(Endpoint(
+                method=ep.method,
+                url=url,
+                normalized_url=normalize_url(url),
+                parameters=ep.parameters,
+                tags=ep.tags,
+                source_tool=ep.source_tool,
+                documented=ep.documented,
+                metadata={**ep.metadata, "concretized_from": ep.url, "path_values": fill, "enumeration_candidate": str(val)},
+            ))
+    return expanded
 
 
 def _add_offensive_endpoint(rows: dict[tuple[str, str], Endpoint], ep: OffensiveEndpoint, scope: list[str], by_endpoint: dict[int, list[dict[str, str]]], metadata_extra: dict[str, Any] | None = None, target_base: str = "") -> None:
@@ -312,15 +406,48 @@ def _fingerprint(response: requests.Response) -> dict[str, Any]:
     }
 
 
+_EVIDENCE_BODY_MAX = 2000
+_REDACT_HEADER_KEYS = {"authorization", "cookie", "x-api-key", "proxy-authorization", "x-auth-token"}
+
+
+def _build_curl(method: str, url: str, headers: dict[str, str], cookies: dict[str, str], json_body: Any, identity_key: str = "") -> str:
+    """Reproducible cURL for the executed request. Credential header/cookie
+    VALUES are masked (the identity is named instead) so evidence is
+    reproducible without leaking secrets into the report."""
+    parts = [f"curl -i -s -X {method.upper()} {shlex.quote(url)}"]
+    for k, v in (headers or {}).items():
+        val = f"<identity:{identity_key or 'auth'}>" if str(k).lower() in _REDACT_HEADER_KEYS else str(v)
+        parts.append("-H " + shlex.quote(f"{k}: {val}"))
+    if cookies:
+        parts.append("-H " + shlex.quote("Cookie: " + "; ".join(f"{k}=<identity:{identity_key or 'auth'}>" for k in cookies)))
+    if json_body is not None:
+        parts.append("-H " + shlex.quote("Content-Type: application/json"))
+        parts.append("-d " + shlex.quote(json.dumps(json_body, ensure_ascii=False)))
+    return " ".join(parts)
+
+
 def _request(session: requests.Session, method: str, url: str, identity: Identity, *, headers: dict[str, str] | None = None, json_body: Any = None, timeout: int = DEFAULT_TIMEOUT_SECONDS) -> dict[str, Any]:
     req_headers = {"User-Agent": "ValidCyber-API-SkillTop20/1.0", "Accept": "application/json, text/plain, */*"}
     req_headers.update(identity.headers or {})
     req_headers.update(headers or {})
+    curl = _build_curl(method, url, req_headers, identity.cookies or {}, json_body, identity.key)
+    request_body = json.dumps(json_body, ensure_ascii=False) if json_body is not None else ""
     try:
         response = session.request(method.upper(), url, headers=req_headers, cookies=identity.cookies or {}, json=json_body, timeout=timeout, allow_redirects=False, verify=False)
-        return {"ok": True, "response": response, "fingerprint": _fingerprint(response)}
+        body = response.text or ""
+        return {
+            "ok": True,
+            "response": response,
+            "fingerprint": _fingerprint(response),
+            "curl": curl,
+            "request_body": request_body[:_EVIDENCE_BODY_MAX],
+            "response_status": int(response.status_code),
+            "response_headers": {k: v for k, v in list(response.headers.items())[:25]},
+            "response_body": body[:_EVIDENCE_BODY_MAX],
+            "response_truncated": len(body) > _EVIDENCE_BODY_MAX,
+        }
     except Exception as exc:
-        return {"ok": False, "error": type(exc).__name__, "detail": str(exc)[:300]}
+        return {"ok": False, "error": type(exc).__name__, "detail": str(exc)[:300], "curl": curl, "request_body": request_body[:_EVIDENCE_BODY_MAX]}
 
 
 def _probe_method(skill: dict[str, Any], endpoint: Endpoint) -> str:
@@ -388,6 +515,15 @@ def _response_observation(skill: dict[str, Any], endpoint: Endpoint, identity: I
         })
     if not result.get("ok"):
         observation.update({"error": result.get("error"), "detail": result.get("detail")})
+    # Evidence for the per-endpoint drill-down: executed cURL, request body and
+    # the response body/status, so clicking an endpoint shows exactly what ran.
+    observation.update({
+        "curl": result.get("curl"),
+        "request_body": result.get("request_body") or "",
+        "response_status": result.get("response_status"),
+        "response_body": result.get("response_body") or "",
+        "response_truncated": bool(result.get("response_truncated")),
+    })
     return observation
 
 
@@ -717,7 +853,7 @@ def run_api_top20_for_scan(scan_id: int, target: str, *, api_skill_id: str | Non
         if api_skill_id:
             skills = [skill for skill in skills if str(skill.get("id") or "") == str(api_skill_id)]
         scope = authorized_scope_for_scan(db, job.id)
-        endpoints = _collect_endpoints(db, job, scope)
+        endpoints = _expand_templated_endpoints(_collect_endpoints(db, job, scope))
         identities = _collect_identities(db, job)
         reused_inventory_scan_ids = sorted({
             int(ep.metadata.get("reused_from_scan_id"))
