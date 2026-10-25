@@ -23,7 +23,8 @@ import re
 from typing import Any, Iterable
 from urllib.parse import urlparse
 
-_PLACEHOLDER_RE = re.compile(r"\{([^/{}]+)\}")
+# Path params in both OpenAPI ({id}) and Express/crawler (:id) styles.
+_PLACEHOLDER_RE = re.compile(r"\{([^/{}]+)\}|:([^/{}]+)")
 _UUID_SEG_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
 
 # Tokens that mark a variable/param as an object identifier (the BOLA surface).
@@ -65,7 +66,7 @@ def _template_key(path: str) -> str:
     for s in str(path or "").strip("/").split("/"):
         if not s:
             continue
-        if ("{" in s and "}" in s) or s.isdigit() or _UUID_SEG_RE.match(s):
+        if ("{" in s and "}" in s) or s.startswith(":") or s.isdigit() or _UUID_SEG_RE.match(s):
             segs.append("{}")
         else:
             segs.append(s.lower())
@@ -78,7 +79,8 @@ def _is_id_name(name: str) -> bool:
 
 
 def _placeholders(path: str) -> list[str]:
-    return _PLACEHOLDER_RE.findall(path or "")
+    # findall yields (brace, colon) tuples; keep the non-empty capture of each.
+    return [a or b for (a, b) in _PLACEHOLDER_RE.findall(path or "")]
 
 
 def _id_placeholders(path: str) -> list[str]:
