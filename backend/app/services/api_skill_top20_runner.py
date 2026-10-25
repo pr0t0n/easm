@@ -170,7 +170,17 @@ def _params_by_endpoint(db: Any, endpoint_ids: list[int]) -> dict[int, list[dict
 # other skills can actually enumerate objects and surface codes/data.
 _SAMPLE_UUID = "05be75cc-8f8a-414a-891f-434aa9b4e7a5"
 _NUMERIC_ENUM = ["1", "2", "3", "10", "100", "9001"]
-_PATH_PLACEHOLDER_RE = re.compile(r"\{([^/{}]+)\}")
+_PATH_PLACEHOLDER_RE = re.compile(r"\{([^/{}]+)\}|:([^/{}]+)")
+
+
+def _path_placeholder_names(path: str) -> list[str]:
+    """Placeholder names from a path in both {param} and :param styles."""
+    return [a or b for (a, b) in _PATH_PLACEHOLDER_RE.findall(path or "")]
+
+
+def _fill_path_placeholder(url: str, name: str, value: str) -> str:
+    """Substitute a path placeholder written as {name} or :name with value."""
+    return url.replace("{" + name + "}", value).replace(":" + name, value)
 _MAX_ENUM_VARIANTS = 8
 _UUID_SEG_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
 
@@ -186,7 +196,7 @@ def _path_template_key(path: str) -> str:
     for s in str(path or "").strip("/").split("/"):
         if not s:
             continue
-        if ("{" in s and "}" in s) or s.isdigit() or _UUID_SEG_RE.match(s):
+        if ("{" in s and "}" in s) or s.startswith(":") or s.isdigit() or _UUID_SEG_RE.match(s):
             segs.append("{}")
         else:
             segs.append(s.lower())
@@ -264,7 +274,7 @@ def _expand_templated_endpoints(endpoints: list[Endpoint], test_variables: dict[
     for ep in endpoints:
         expanded.append(ep)
         seen_urls.add(ep.url)
-        placeholders = _PATH_PLACEHOLDER_RE.findall(urlparse(ep.url).path)
+        placeholders = _path_placeholder_names(urlparse(ep.url).path)
         if not placeholders:
             continue
         params_by_name = {str(p.get("name")): p for p in ep.parameters if str(p.get("location")) == "path"}
@@ -283,7 +293,7 @@ def _expand_templated_endpoints(endpoints: list[Endpoint], test_variables: dict[
             fill = {**base_fill, primary: val}
             url = ep.url
             for ph, v in fill.items():
-                url = url.replace("{" + ph + "}", str(v))
+                url = _fill_path_placeholder(url, ph, str(v))
             if url in seen_urls:
                 continue
             seen_urls.add(url)
@@ -869,7 +879,7 @@ def _object_id_params(ep: Endpoint) -> list[str]:
     """Path variables that identify an object/transaction (id, requestId,
     externalId, uuid, *_id). These are the BOLA access-control surface."""
     out: list[str] = []
-    for name in _PATH_PLACEHOLDER_RE.findall(urlparse(ep.url).path):
+    for name in _path_placeholder_names(urlparse(ep.url).path):
         nl = name.lower()
         if any(tok in nl for tok in ("id", "uuid", "request", "external", "order")):
             out.append(name)
