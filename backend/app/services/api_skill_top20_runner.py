@@ -743,23 +743,47 @@ _BYPASS_FLAGS = ["optIn", "optin", "skip", "skipValidation", "skipLiveness", "sk
 
 
 def _fuzz_cases(ep: Endpoint, allow_mutations: bool, test_variables: dict[str, Any] | None = None) -> list[tuple[str, str, Any, str]]:
-    """Property/schema fuzzing probes (Schemathesis-style): malformed values for
-    query params and request-body fields. Returns (method, url, json_body, label).
-    Body fuzzing (mutating) is gated behind allow_mutations."""
+    """Property/schema fuzzing probes: malformed/boundary/injection values for
+    EVERY declared query param and request-body field, from the schema-driven
+    generator. Returns (method, url, json_body, label). Body fuzzing (mutating)
+    is gated behind allow_mutations."""
     cases: list[tuple[str, str, Any, str]] = []
-    # Query param to fuzz: a declared query parameter (spec endpoints keep params
-    # in ep.parameters, NOT in the URL), else an existing URL query key.
-    query_names = [str(p.get("name")) for p in ep.parameters if str(p.get("location")) == "query" and p.get("name")]
+    try:
+        from app.services.api_fuzz_generator import fuzz_values_for_param
+    except Exception:
+        fuzz_values_for_param = None  # type: ignore[assignment]
+
+    def attack_values(param: dict[str, Any], n: int) -> list[tuple[Any, str]]:
+        if fuzz_values_for_param is None:
+            return [(p, f"query:{param.get('name')}") for p in _FUZZ_QUERY_PAYLOADS[:n]]
+        vals = [(v, lb) for (v, lb) in fuzz_values_for_param(param, cap=12) if not lb.startswith(("valid", "idor"))]
+        return vals[:n]
+
+    # Query fuzzing: every declared query parameter (spec keeps params in
+    # ep.parameters, not the URL) plus any existing URL query key.
+    query_params = [p for p in ep.parameters if str(p.get("location")) == "query" and p.get("name")]
     existing = parse_qsl(urlparse(ep.url).query, keep_blank_values=True)
-    pname = query_names[0] if query_names else (existing[0][0] if existing else "")
-    if pname and ep.method.upper() in {"GET", "HEAD"}:
+    if not query_params and existing:
+        query_params = [{"name": existing[0][0]}]
+    if query_params and ep.method.upper() in {"GET", "HEAD"}:
         parsed = urlparse(ep.url)
-        base_pairs = dict(existing)
-        for payload in _FUZZ_QUERY_PAYLOADS:
-            base_pairs[pname] = payload
-            furl = urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, urlencode(base_pairs), parsed.fragment))
-            cases.append(("GET", furl, None, f"query:{pname}={payload[:12]}"))
+        per = 6 if allow_mutations else 4
+        for qp in query_params[:6]:
+            qn = str(qp.get("name"))
+            for value, label in attack_values(qp, per):
+                base_pairs = dict(existing)
+                base_pairs[qn] = str(value)
+                furl = urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, urlencode(base_pairs), parsed.fragment))
+                cases.append(("GET", furl, None, f"query:{qn}:{label}"))
     json_fields = [str(p.get("name")) for p in ep.parameters if str(p.get("location")) == "json" and p.get("name")]
+    json_params = [p for p in ep.parameters if str(p.get("location")) == "json" and p.get("name")]
+    if json_params and ep.method.upper() in {"POST", "PUT", "PATCH"} and allow_mutations:
+        # Per-field injection: each body field gets a few malformed/injection values.
+        base_body = {f: "x" for f in json_fields}
+        for jp in json_params[:8]:
+            fn = str(jp.get("name"))
+            for value, label in attack_values(jp, 3):
+                cases.append((ep.method.upper(), ep.url, {**base_body, fn: value}, f"body:{fn}:{label}"))
     if json_fields and ep.method.upper() in {"POST", "PUT", "PATCH"} and allow_mutations:
         cases.append((ep.method.upper(), ep.url, {f: "A" * 2000 for f in json_fields}, "body:oversized"))
         cases.append((ep.method.upper(), ep.url, {f: [] for f in json_fields}, "body:type-confusion"))
@@ -777,7 +801,9 @@ def _fuzz_cases(ep: Endpoint, allow_mutations: bool, test_variables: dict[str, A
             body.update({k: tv[k] for k in tv if k not in ("requestId", "x-api-key", "x-organization-id", "x-project-id")})
             body["optIn"] = True
             cases.append((ep.method.upper(), ep.url, body, "body:optin-with-vars"))
-    return cases[:14]
+    # Bound per-endpoint request volume (higher ceiling now that every variable
+    # is fuzzed, but still capped to avoid hammering the target).
+    return cases[: (60 if allow_mutations else 30)]
 
 
 # Curated API route segments for active shadow-route discovery (kiterunner idea):
