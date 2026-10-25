@@ -30,6 +30,11 @@ _UUID_SEG_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-
 _ID_TOKENS = ("id", "uuid", "request", "external", "order", "account", "customer", "tenant", "file", "project", "invoice", "transaction")
 _CREATE_METHODS = {"POST", "PUT"}
 _READ_METHODS = {"GET", "HEAD"}
+# Last path segment that marks an endpoint as the ORIGIN/creator of a flow object
+# (the thing that mints the id/token), vs a sibling step that just reuses it.
+_CREATE_SEGMENTS = {"flow", "create", "start", "init", "new", "register", "open",
+                    "session", "sessions", "intent", "intents", "token", "tokens",
+                    "customer", "business", "transaction", "transactions"}
 
 
 # --------------------------------------------------------------------------- #
@@ -154,69 +159,103 @@ def _node_id(ep: Any) -> str:
     return f"{_method(ep)} {_template_key(_path(ep))}"
 
 
+# Fields that look like a reusable identifier/token (the variables that chain the
+# flow). Covers ids AND auth tokens (platformId, intentToken, accessToken, ...).
+_VAR_TOKENS = ("token", "intent", "platform", "session", "secret", "key", "uuid",
+               "request", "external", "file", "project", "account", "order",
+               "transaction", "tenant", "customer", "invoice", "protocol")
+_VAR_EXCLUDE_SUFFIX = ("url", "data", "name", "status", "date", "type", "message", "description", "count")
+
+
+def _leaf(field: str) -> str:
+    return str(field).split(".")[-1]
+
+
+def _is_linkable_field(name: str) -> bool:
+    """A response/request field worth chaining: an id or a token, not free data
+    (requestData / requestProcessUrl are excluded; requestId / intentToken are in)."""
+    n = _leaf(name).lower()
+    if not n:
+        return False
+    if any(n.endswith(suf) for suf in _VAR_EXCLUDE_SUFFIX):
+        return False
+    return n.endswith("id") or any(tok in n for tok in _VAR_TOKENS)
+
+
 # --------------------------------------------------------------------------- #
 # graph
 # --------------------------------------------------------------------------- #
-def build_flow_graph(endpoints: Iterable[Any]) -> dict[str, Any]:
+def build_flow_graph(endpoints: Iterable[Any], schema_hints: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
     """Infer producer->consumer edges and the operation lifecycle.
 
-    Returns ``{nodes, edges, lifecycle, external_variables, stats}``.
-    - A ``create`` endpoint (POST/PUT with no id consumed) *produces* the
-      id-variable(s) of its resource group.
-    - A ``step``/``read``/``admin`` endpoint *consumes* id-variables. We link it
-      to the best-matching producer (exact resource base > longest static path
-      prefix). Variables with no producer are reported as ``external_variables``
-      (must be seeded via test_variables, e.g. a real requestId/projectId).
+    Returns ``{nodes, edges, lifecycle, external_variables, stats, schema_driven}``.
+
+    When ``schema_hints`` (from the OpenAPI request/response schemas, keyed by
+    ``"METHOD /template"``) is given, edges are **schema-driven**: a field in an
+    endpoint's RESPONSE makes it a *producer*; the same field in another's request
+    (body/path/header/query) makes it a *consumer*; the *origin* producer is one
+    that produces the field without consuming it (favouring create methods + same
+    resource root). This captures real token chains (e.g. platformId -> requestId)
+    that pure path-parameter matching misses. Without hints it falls back to the
+    create-heuristic. Variables with no producer -> ``external_variables`` (seed).
     """
+    schema_hints = schema_hints or {}
+    schema_driven = bool(schema_hints)
     eps = [ep for ep in endpoints if ep is not None]
-    # Deduplicate by node id, keep first.
     nodes_by_id: dict[str, dict[str, Any]] = {}
-    raw_by_id: dict[str, Any] = {}
     for ep in eps:
         nid = _node_id(ep)
         if nid in nodes_by_id:
             continue
-        raw_by_id[nid] = ep
+        hint = schema_hints.get(nid, {})
+        # consumes: schema request fields (id/token-like) UNION path placeholders.
+        consumes = sorted({_leaf(f) for f in hint.get("consumes", []) if _is_linkable_field(f)} | set(_consumed_vars(ep)))
+        produces = sorted({_leaf(f) for f in hint.get("produces", []) if _is_linkable_field(f)})
         nodes_by_id[nid] = {
             "id": nid,
             "method": _method(ep),
             "path": _template_key(_path(ep)),
             "url": str(_get(ep, "url", "") or ""),
             "stage": _stage(ep),
-            "consumes": _consumed_vars(ep),
-            "produces": [],  # filled below
+            "consumes": consumes,
+            "produces_fields": produces,   # from response schema (schema-driven)
+            "produces": [],                # attributed edges (filled below)
             "documented": bool(_get(ep, "documented", True)),
             "tags": [str(t).lower() for t in list(_get(ep, "tags", []) or [])],
             "owasp": _OWASP_BY_STAGE.get(_stage(ep), ""),
         }
 
-    # Producers: create endpoints. Each is a candidate producer of the id-vars
-    # consumed elsewhere in its resource group. We attribute a produced var name
-    # to a creator by matching the consumer's var to a creator in the same group.
-    creators = [n for n in nodes_by_id.values() if n["stage"] in ("create", "setup") and _method_of(n) in _CREATE_METHODS]
-
-    # All id-vars consumed anywhere.
-    consumed_vars: set[str] = set()
-    for n in nodes_by_id.values():
-        consumed_vars.update(n["consumes"])
-
     edges: list[dict[str, Any]] = []
     external_variables: set[str] = set()
 
-    for consumer in nodes_by_id.values():
-        for var in consumer["consumes"]:
-            producer = _best_producer(var, consumer, creators)
-            if producer is None:
-                external_variables.add(var)
-                continue
-            if var not in producer["produces"]:
-                producer["produces"].append(var)
-            edges.append({
-                "from": producer["id"],
-                "to": consumer["id"],
-                "variable": var,
-                "kind": "produces",
-            })
+    if schema_driven:
+        # Schema-driven: origin producers per field (produce it, don't consume it).
+        producers_by_field: dict[str, list[dict[str, Any]]] = {}
+        for n in nodes_by_id.values():
+            for f in n["produces_fields"]:
+                if f not in n["consumes"]:
+                    producers_by_field.setdefault(f, []).append(n)
+        for consumer in nodes_by_id.values():
+            for var in consumer["consumes"]:
+                producer = _best_origin_producer(var, consumer, producers_by_field.get(var, []))
+                if producer is None:
+                    external_variables.add(var)
+                    continue
+                if var not in producer["produces"]:
+                    producer["produces"].append(var)
+                edges.append({"from": producer["id"], "to": consumer["id"], "variable": var, "kind": "produces"})
+    else:
+        # Fallback: create-heuristic (no schema available).
+        creators = [n for n in nodes_by_id.values() if n["stage"] in ("create", "setup") and _method_of(n) in _CREATE_METHODS]
+        for consumer in nodes_by_id.values():
+            for var in consumer["consumes"]:
+                producer = _best_producer(var, consumer, creators)
+                if producer is None:
+                    external_variables.add(var)
+                    continue
+                if var not in producer["produces"]:
+                    producer["produces"].append(var)
+                edges.append({"from": producer["id"], "to": consumer["id"], "variable": var, "kind": "produces"})
 
     # Lifecycle: stable order by stage then path, giving the operation timeline.
     lifecycle = [
@@ -230,17 +269,59 @@ def build_flow_graph(endpoints: Iterable[Any]) -> dict[str, Any]:
         "by_stage": _count_by(nodes_by_id.values(), "stage"),
         "external_variables_total": len(external_variables),
     }
+    stats["schema_driven"] = schema_driven
     return {
         "nodes": list(nodes_by_id.values()),
         "edges": edges,
         "lifecycle": lifecycle,
         "external_variables": sorted(external_variables),
         "stats": stats,
+        "schema_driven": schema_driven,
     }
 
 
 def _method_of(node: dict[str, Any]) -> str:
     return str(node.get("method") or "GET").upper()
+
+
+def _best_origin_producer(var: str, consumer: dict[str, Any], producers: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Among endpoints whose RESPONSE yields ``var`` (and that don't consume it),
+    pick the origin for this consumer: same resource root first, then a create
+    method, then cross-group reuse (producer's root appears in the consumer path)."""
+    if not producers:
+        return None
+    c_segs = _static_segments(consumer["path"])
+    c_root = _resource_root(consumer["path"])
+    c_seg_set = set(c_segs)
+
+    def score(p: dict[str, Any]) -> int:
+        p_segs = _static_segments(p["path"])
+        p_root = _resource_root(p["path"])
+        s = 0
+        if p_root and p_root == c_root:
+            s += 100
+        elif p_root and p_root in c_seg_set:
+            s += 30
+        if _method_of(p) in _CREATE_METHODS:
+            s += 40
+        # The ORIGIN of an id is the endpoint that CREATES the object, not a sibling
+        # step that merely echoes the id back. Prefer a creation-named last segment.
+        if p_segs and p_segs[-1] in _CREATE_SEGMENTS:
+            s += 60
+        # Fewer produced fields => more likely a focused creator than a rich listing.
+        s -= len(p.get("produces_fields", []))
+        # exact resource base (consumer = producer path + {id}/...)
+        if p_segs and c_segs[: len(p_segs)] == p_segs:
+            s += 20
+        s += _common_prefix_len(c_segs, p_segs) * 2
+        s -= len(p_segs)
+        return s
+
+    best = max(producers, key=score)
+    # Require a minimal relationship to avoid spurious cross-domain links.
+    if score(best) <= 0:
+        return None
+    return best
 
 
 def _best_producer(var: str, consumer: dict[str, Any], creators: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -484,3 +565,73 @@ def _is_confirmed(f: dict[str, Any]) -> bool:
     except Exception:
         sc = 0
     return 200 <= sc < 400
+
+
+# --------------------------------------------------------------------------- #
+# OpenAPI schema -> flow hints (produces/consumes per operation)
+# --------------------------------------------------------------------------- #
+def parse_spec_flow_hints(spec: Any) -> dict[str, dict[str, list[str]]]:
+    """From an OpenAPI dict, extract per-operation ``produces`` (fields in the 2xx
+    response schema) and ``consumes`` (fields in the request body + path/header/
+    query params). Keyed by ``"METHOD /template"`` (same as node ids). Resolves
+    local ``$ref`` and unwraps common ``data``/``result`` envelopes. Best-effort;
+    returns {} on any problem so the graph falls back to the create-heuristic."""
+    try:
+        if isinstance(spec, (str, bytes)):
+            import json
+            spec = json.loads(spec)
+        if not isinstance(spec, dict):
+            return {}
+        comps = ((spec.get("components") or {}).get("schemas") or {})
+
+        def deref(s: Any, depth: int = 0) -> Any:
+            if not isinstance(s, dict) or depth > 8:
+                return s if isinstance(s, dict) else {}
+            if "$ref" in s:
+                name = str(s["$ref"]).split("/")[-1]
+                return deref(comps.get(name, {}), depth + 1)
+            return s
+
+        def fields(schema: Any, depth: int = 0) -> set[str]:
+            out: set[str] = set()
+            schema = deref(schema, depth)
+            if not isinstance(schema, dict) or depth > 8:
+                return out
+            for combiner in ("allOf", "oneOf", "anyOf"):
+                for sub in (schema.get(combiner) or []):
+                    out |= fields(sub, depth + 1)
+            props = schema.get("properties") or {}
+            for k, v in props.items():
+                out.add(str(k))
+                if str(k).lower() in ("data", "result", "content", "payload"):
+                    out |= {f"{k}.{x}" for x in fields(v, depth + 1)}
+            if "items" in schema:
+                out |= fields(schema["items"], depth + 1)
+            return out
+
+        hints: dict[str, dict[str, list[str]]] = {}
+        for path, methods in (spec.get("paths") or {}).items():
+            if not isinstance(methods, dict):
+                continue
+            for method, op in methods.items():
+                if method.lower() not in ("get", "post", "put", "delete", "patch") or not isinstance(op, dict):
+                    continue
+                consumes: set[str] = set()
+                rb = ((op.get("requestBody") or {}).get("content") or {})
+                for _ct, media in rb.items():
+                    consumes |= fields((media or {}).get("schema", {}))
+                for pr in (op.get("parameters") or []):
+                    pr = deref(pr) if isinstance(pr, dict) and "$ref" in pr else pr
+                    if isinstance(pr, dict) and pr.get("name"):
+                        consumes.add(str(pr["name"]))
+                produces: set[str] = set()
+                for code, r in (op.get("responses") or {}).items():
+                    if not str(code).startswith("2"):
+                        continue
+                    for _ct, media in ((deref(r).get("content") or {}) if isinstance(r, dict) else {}).items():
+                        produces |= fields((media or {}).get("schema", {}))
+                key = f"{method.upper()} {_template_key(path)}"
+                hints[key] = {"produces": sorted(produces), "consumes": sorted(consumes)}
+        return hints
+    except Exception:
+        return {}

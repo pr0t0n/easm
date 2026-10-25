@@ -23,7 +23,7 @@ from urllib.parse import urlparse
 from sqlalchemy.orm import Session
 
 from app.models.models import Finding, OffensiveEndpoint, ScanJob, ScanWorkItem
-from app.services.api_flow_graph import build_attack_paths, build_flow_graph
+from app.services.api_flow_graph import build_attack_paths, build_flow_graph, parse_spec_flow_hints
 from app.services.api_skill_coverage import API_SPEC_SOURCES, _is_api_skill_item, _parsed_result
 from app.services.api_skill_top20_runner import load_api_top20_skills
 
@@ -316,7 +316,21 @@ def build_api_endpoint_report(db: Session, job: ScanJob) -> dict[str, Any]:
     # reused, and the attack-path below the OWASP table) shows up even when the
     # dynamic Caido-backed flow runner has not executed. When the runner DID run,
     # its richer output (variable lineage + executed attack-paths) is preferred.
-    flow_graph = build_flow_graph(docs)
+    # Schema-driven flow: parse the ingested OpenAPI spec (request/response field
+    # names) so the graph captures real token chains (e.g. platformId -> requestId),
+    # not just path-parameter matches. Falls back to the create-heuristic if absent.
+    spec_hints: dict[str, Any] = {}
+    try:
+        import json
+        import os
+        cfg = dict((getattr(job, "state_data", None) or {}).get("api_scan_config") or {})
+        spec_path = str(cfg.get("inline_spec_file") or "")
+        if spec_path and os.path.exists(spec_path):
+            with open(spec_path) as _fh:
+                spec_hints = parse_spec_flow_hints(json.load(_fh))
+    except Exception:
+        spec_hints = {}
+    flow_graph = build_flow_graph(docs, schema_hints=spec_hints)
     attack_paths = build_attack_paths(flow_graph, real_findings + advisory_findings)
     variables: list[dict[str, Any]] = []
     dynamic_executed = False
