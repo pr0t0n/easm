@@ -6,6 +6,14 @@ x-vulnerability-catalog-env: &vulnerability_catalog_env
   VULNERABILITY_CATALOG_ENABLED: "${VULNERABILITY_CATALOG_ENABLED:-true}"
   VULNERABILITY_CATALOG_DIR: "${VULNERABILITY_CATALOG_DIR:-/app/skills/vulnerability_testing}"
   VULNERABILITY_CATALOG_SKILLS: "${VULNERABILITY_CATALOG_SKILLS:-account_takeover,api_security,auth_bypass,bola_bfla,business_logic,clickjacking,command_injection,component_memory_corruption,cors_misconfiguration,crypto_storage,csrf,deserialization,graphql,host_header_injection,http_request_smuggling,idor_object_authorization,information_disclosure,jwt_oauth,open_redirect,path_traversal,race_condition,resource_consumption,rbac_role_self_escalation,sqli,sqli_testing,ssrf,ssti,stored_xss_testing,subdomain_takeover,web_cache,xss,xxe,vulnerable_components,prompt_injection}"
+  # Caido traffic/replay engine for the API module (opt-in). Empty by default =
+  # OFF (runner uses direct requests). To enable, set these in ./.env pointing at
+  # a reachable Caido instance — e.g. the user's Caido Desktop on the host:
+  #   CAIDO_INSTANCE_URL=http://host.docker.internal:8080   (GraphQL port)
+  #   CAIDO_PAT=caido_xxxxx                                  (Developer page token)
+  # Fase 0 (gate) validates the free-instance + PAT round-trip before trusting it.
+  CAIDO_INSTANCE_URL: "${CAIDO_INSTANCE_URL:-}"
+  CAIDO_PAT: "${CAIDO_PAT:-}"
 
 services:
   # ─────────────────────────────────────────────────────────────────
