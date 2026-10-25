@@ -76,46 +76,85 @@ class CaidoClient:
         self._replay_sessions: dict[str, str] = {}   # host:port:tls -> sessionId
         self._enabled: bool | None = None
         self._last_error = ""
+        # Caido rejects requests whose Host is not in its allow-list ("Domain X
+        # not allowed"), so when we reach it by a compose service name we must
+        # present an allowed Host (localhost/127.0.0.1). Override via env if needed.
+        self._host_header = os.getenv("CAIDO_HOST_HEADER", "localhost")
+        # Effective Bearer used on calls. A raw Cloud PAT is NOT a valid instance
+        # token; a local --allow-guests instance mints a working accessToken via
+        # loginAsGuest(). We start with any provided token and fall back to guest.
+        self._bearer = self.token
 
     # ------------------------------------------------------------------ #
     @property
     def configured(self) -> bool:
-        return bool(self._graphql and self.token)
+        # Token is optional: a --allow-guests instance serves GraphQL without one.
+        return bool(self._graphql)
 
-    def _gql(self, query: str, variables: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _gql(self, query: str, variables: dict[str, Any] | None = None, *, _retry: bool = True) -> dict[str, Any]:
+        headers = {"Content-Type": "application/json", "Host": self._host_header}
+        if self._bearer:
+            headers["Authorization"] = f"Bearer {self._bearer}"
         resp = self._session.post(
             self._graphql,
             json={"query": query, "variables": variables or {}},
-            headers={"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"},
+            headers=headers,
             timeout=self.timeout,
             verify=False,
         )
         resp.raise_for_status()
         payload = resp.json()
-        if payload.get("errors"):
-            raise RuntimeError(f"graphql_errors: {json.dumps(payload['errors'])[:300]}")
+        errors = payload.get("errors")
+        if errors:
+            blob = json.dumps(errors)
+            # An expired/invalid token on a mutation -> mint a fresh guest token
+            # and retry once (the local instance allows guests).
+            if _retry and "INVALID_TOKEN" in blob:
+                self._bearer = ""
+                if self._login_guest():
+                    return self._gql(query, variables, _retry=False)
+            raise RuntimeError(f"graphql_errors: {blob[:300]}")
         return payload.get("data") or {}
 
+    def _login_guest(self) -> bool:
+        """Obtain a valid instance accessToken from a --allow-guests instance."""
+        try:
+            prev, self._bearer = self._bearer, ""  # unauthenticated call
+            data = self._gql("mutation{ loginAsGuest { token { accessToken } } }", _retry=False)
+            token = (((data.get("loginAsGuest") or {}).get("token") or {}).get("accessToken"))
+            self._bearer = str(token) if token else prev
+            return bool(token)
+        except Exception as exc:  # noqa: BLE001
+            self._last_error = f"login_guest: {type(exc).__name__}: {exc}"
+            return False
+
     def health(self) -> dict[str, Any]:
-        """Fase-0 feasibility probe: confirm the free instance + token can drive
-        GraphQL. Returns {ok, detail}. Caches the enabled flag."""
+        """Fase-0 feasibility probe: confirm the instance is reachable and we can
+        obtain a usable token (provided or guest). Caches the enabled flag."""
         if not self.configured:
             self._enabled = False
-            return {"ok": False, "detail": "caido_not_configured (CAIDO_INSTANCE_URL/CAIDO_PAT ausentes)"}
+            return {"ok": False, "detail": "caido_not_configured (CAIDO_INSTANCE_URL ausente)"}
         try:
-            data = self._gql("query{ viewer { id } }")
-            self._enabled = bool(data)
-            return {"ok": True, "detail": "viewer_ok", "viewer": data.get("viewer")}
+            self._gql("query{ __typename }", _retry=False)  # reachability (guest-ok)
         except Exception as exc:  # noqa: BLE001
-            # Some releases expose __typename only; try a schema ping.
-            try:
-                self._gql("query{ __typename }")
-                self._enabled = True
-                return {"ok": True, "detail": "schema_ping_ok"}
-            except Exception as exc2:  # noqa: BLE001
+            self._enabled = False
+            self._last_error = f"{type(exc).__name__}: {exc}"
+            return {"ok": False, "detail": f"unreachable: {type(exc).__name__}: {str(exc)[:160]}"}
+        # Ensure a token that authorizes mutations (createReplaySession, ...).
+        if not self._bearer or not self._login_ok():
+            if not self._login_guest():
                 self._enabled = False
-                self._last_error = f"{type(exc2).__name__}: {exc2}"
-                return {"ok": False, "detail": f"health_failed: {type(exc).__name__}: {str(exc)[:200]}"}
+                return {"ok": False, "detail": "no_usable_token (loginAsGuest falhou; instância sem --allow-guests?)"}
+        self._enabled = True
+        return {"ok": True, "detail": "guest_token" if self._bearer.endswith(".guest") else "provided_token"}
+
+    def _login_ok(self) -> bool:
+        """Cheap check that the current bearer authorizes a viewer query."""
+        try:
+            self._gql("query{ viewer { id } }", _retry=False)
+            return True
+        except Exception:
+            return False
 
     @property
     def enabled(self) -> bool:
@@ -124,31 +163,20 @@ class CaidoClient:
         return bool(self._enabled)
 
     # ------------------------------------------------------------------ #
-    def _ensure_session(self, host: str, port: int, tls: bool) -> str | None:
-        key = f"{host}:{port}:{int(tls)}"
-        if key in self._replay_sessions:
-            return self._replay_sessions[key]
-        mutation = """
-        mutation($in: CreateReplaySessionInput) {
-          createReplaySession(input: $in) { session { id } }
-        }
-        """
-        try:
-            data = self._gql(mutation, {"in": {"requestSource": {"raw": {
-                "connectionInfo": {"host": host, "port": port, "isTLS": tls},
-                "raw": "",
-            }}}})
-            sid = (((data.get("createReplaySession") or {}).get("session") or {}).get("id"))
-            if not sid:
-                # fall back to a session with no source (created empty)
-                data = self._gql("mutation{ createReplaySession(input:{}) { session { id } } }")
-                sid = (((data.get("createReplaySession") or {}).get("session") or {}).get("id"))
-            if sid:
-                self._replay_sessions[key] = str(sid)
-            return str(sid) if sid else None
-        except Exception as exc:  # noqa: BLE001
-            self._last_error = f"create_session: {type(exc).__name__}: {exc}"
-            return None
+    # Caido Replay GraphQL (schema v0.58): createReplaySession(requestSource.raw)
+    # -> startReplayTask(sessionId) -> replayEntry(id, sessionKind: HTTP).
+    _CREATE_SESSION = (
+        "mutation($in: CreateReplaySessionInput!) {"
+        " createReplaySession(input: $in) { session { id } error { __typename } } }"
+    )
+    _START_TASK = (
+        "mutation($id: ID!) { startReplayTask(sessionId: $id) {"
+        " task { id replayEntry { id } } error { __typename } } }"
+    )
+    _READ_ENTRY = (
+        "query($id: ID!) { replayEntry(id: $id, sessionKind: HTTP) { error"
+        " ... on ReplayEntryHttp { request { response { statusCode raw } } } } }"
+    )
 
     def send(self, method: str, url: str, identity_headers: dict[str, str] | None = None,
              cookies: dict[str, str] | None = None, json_body: Any = None,
@@ -169,17 +197,27 @@ class CaidoClient:
         body = json.dumps(json_body, ensure_ascii=False) if json_body is not None else ""
         if json_body is not None:
             headers.setdefault("Content-Type", "application/json")
-        raw = self._build_raw(method, path, host, headers, body)
+        host_hdr = host if port in (80, 443) else f"{host}:{port}"
+        raw = self._build_raw(method, path, host_hdr, headers, body)
         request_body = body[:_EVIDENCE_BODY_MAX]
 
         if not self.enabled:
             return {"ok": False, "error": "caido_disabled", "detail": self._last_error, "curl": curl, "request_body": request_body}
-        sid = self._ensure_session(host, port, tls)
-        if not sid:
-            return {"ok": False, "error": "caido_no_session", "detail": self._last_error, "curl": curl, "request_body": request_body}
         try:
-            entry_id = self._start_task(sid, raw, host, port, tls)
-            status, hdrs, text = self._poll_entry(entry_id, timeout or self.timeout)
+            b64 = base64.b64encode(raw.encode("utf-8", "ignore")).decode()
+            d1 = self._gql(self._CREATE_SESSION, {"in": {
+                "kind": "HTTP",
+                "requestSource": {"raw": {"connectionInfo": {"host": host, "port": int(port), "isTLS": tls}, "raw": b64}},
+            }})
+            sid = (((d1.get("createReplaySession") or {}).get("session") or {}).get("id"))
+            if not sid:
+                return {"ok": False, "error": "caido_no_session", "detail": str((d1.get("createReplaySession") or {}).get("error")), "curl": curl, "request_body": request_body}
+            d2 = self._gql(self._START_TASK, {"id": sid})
+            task = (d2.get("startReplayTask") or {}).get("task") or {}
+            eid = (task.get("replayEntry") or {}).get("id") or task.get("id")
+            if not eid:
+                return {"ok": False, "error": "caido_no_entry", "detail": str((d2.get("startReplayTask") or {}).get("error")), "curl": curl, "request_body": request_body}
+            status, hdrs, text = self._poll_entry(str(eid), timeout or self.timeout)
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": "caido_replay_failed", "detail": f"{type(exc).__name__}: {str(exc)[:200]}",
                     "curl": curl, "request_body": request_body}
@@ -199,39 +237,10 @@ class CaidoClient:
             "response_truncated": len(body_text) > _EVIDENCE_BODY_MAX,
         }
 
-    def _start_task(self, session_id: str, raw: str, host: str, port: int, tls: bool) -> str:
-        mutation = """
-        mutation($id: ID!, $in: StartReplayTaskInput!) {
-          startReplayTask(id: $id, input: $in) { task { id replayEntry { id } } }
-        }
-        """
-        data = self._gql(mutation, {"id": session_id, "in": {
-            "replaySessionId": session_id,
-            "request": {"raw": base64.b64encode(raw.encode("utf-8", "ignore")).decode(),
-                        "connectionInfo": {"host": host, "port": port, "isTLS": tls}},
-            "settings": {"placeholders": [], "updateContentLength": True},
-            "connectionInfo": {"host": host, "port": port, "isTLS": tls},
-            "updateContentLength": True,
-        }})
-        task = (data.get("startReplayTask") or {}).get("task") or {}
-        eid = (task.get("replayEntry") or {}).get("id") or task.get("id")
-        if not eid:
-            raise RuntimeError("no_replay_entry_id")
-        return str(eid)
-
     def _poll_entry(self, entry_id: str, timeout: int) -> tuple[int, dict[str, str], str]:
-        query = """
-        query($id: ID!) {
-          replayEntry(id: $id) {
-            id error
-            request { response { statusCode raw } }
-          }
-        }
-        """
         deadline = time.time() + max(3, timeout)
-        last = None
         while time.time() < deadline:
-            data = self._gql(query, {"id": entry_id})
+            data = self._gql(self._READ_ENTRY, {"id": entry_id})
             entry = data.get("replayEntry") or {}
             if entry.get("error"):
                 raise RuntimeError(f"replay_error: {str(entry.get('error'))[:160]}")
@@ -242,10 +251,7 @@ class CaidoClient:
                 if resp.get("statusCode"):
                     status = int(resp["statusCode"])
                 return status, hdrs, text
-            last = resp
             time.sleep(0.4)
-        if last and last.get("statusCode"):
-            return int(last["statusCode"]), {}, ""
         raise RuntimeError("replay_timeout")
 
     # ------------------------------------------------------------------ #
