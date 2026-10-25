@@ -762,6 +762,49 @@ services:
       start_period: 10s
 
   # ─────────────────────────────────────────────────────────────────
+  # Caido — traffic/replay engine for the API module (opt-in profile).
+  # Free, headless CLI with --allow-guests. Baixa a CLI Linux no 1º start.
+  # FASE 0 (gate): depois de subir, validar o round-trip Replay via GraphQL.
+  # NOTA de auth: um PAT da Caido Cloud NÃO autentica instância local — o token
+  # do GraphQL local é o accessToken da sessão (7 dias). Setar no ./.env:
+  #   CAIDO_INSTANCE_URL=http://caido:8080   (dentro do compose)
+  #   CAIDO_ACCESS_TOKEN=<accessToken local> (ou CAIDO_PAT, o cliente aceita ambos)
+  # Alternativa grátis sem container: Caido Desktop no host →
+  #   CAIDO_INSTANCE_URL=http://host.docker.internal:8080
+  # ─────────────────────────────────────────────────────────────────
+
+  caido:
+    image: debian:bookworm-slim
+    container_name: scriptkiddo_caido
+    restart: unless-stopped
+    profiles: ["caido"]
+    environment:
+      TZ: America/Sao_Paulo
+      CAIDO_VERSION: "${CAIDO_VERSION:-latest}"
+    command:
+      - bash
+      - -lc
+      - |
+        set -e
+        if [ ! -x /opt/caido/caido-cli ]; then
+          apt-get update >/dev/null && apt-get install -y curl jq ca-certificates tar >/dev/null
+          mkdir -p /opt/caido && cd /opt/caido
+          arch=$$(uname -m)
+          url=$$(curl -fsSL https://caido.download/releases/latest | jq -r --arg a "$$arch" '.links[]|select(.os=="linux" and .arch==$$a and .kind=="cli")|.link' | head -1)
+          echo "[caido] arch=$$arch baixando $$url"
+          curl -fsSL "$$url" -o caido.tar.gz
+          tar xzf caido.tar.gz
+          bin=$$(find /opt/caido -maxdepth 2 -name 'caido-cli' -type f | head -1)
+          [ "$$bin" = "/opt/caido/caido-cli" ] || cp "$$bin" /opt/caido/caido-cli
+          chmod +x /opt/caido/caido-cli
+        fi
+        exec /opt/caido/caido-cli --listen 0.0.0.0:8080 --no-open --no-logging --allow-guests --data-path /data
+    volumes:
+      - caido_data:/data
+    ports:
+      - "${CAIDO_HOST_PORT:-8083}:8080"
+
+  # ─────────────────────────────────────────────────────────────────
   # Frontend
   # ─────────────────────────────────────────────────────────────────
 
@@ -797,3 +840,4 @@ volumes:
   browser_traces:
   bas_ca_data:
   chroma_data:
+  caido_data:
