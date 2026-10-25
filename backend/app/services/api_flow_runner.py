@@ -25,6 +25,10 @@ from urllib.parse import urlparse
 _ID_FIELDS = ("requestid", "request_id", "id", "externalid", "external_id",
               "fileid", "file_id", "token", "transactionid", "transaction_id",
               "protocol", "uuid", "sessionid", "session_id")
+# Token/auth-handshake substrings so the store captures undocumented chain values
+# like intentToken/platformId/accessToken (user: platformID -> intentToken -> requestID).
+_TOKEN_SUBSTR = ("token", "intent", "platform", "session", "secret")
+_SKIP_SUFFIX = ("url", "data", "name", "status", "date", "type", "message", "description")
 _PLACEHOLDER_RE = re.compile(r"\{\{\s*([a-zA-Z0-9_]+)\s*\}\}|\{([a-zA-Z0-9_]+)\}")
 # Flags that attempt to skip a validation step (the optIn bypass family).
 _BYPASS_FLAGS = {"optIn": True, "skipValidation": True, "bypass": True, "force": True}
@@ -110,7 +114,9 @@ def extract_ids_from_response(body: Any, store: VariableStore, source_endpoint: 
         if not isinstance(val, (str, int)) or isinstance(val, bool):
             return
         kl = str(key).lower()
-        if kl in _ID_FIELDS or kl.endswith("id"):
+        if any(kl.endswith(suf) for suf in _SKIP_SUFFIX):
+            return
+        if kl in _ID_FIELDS or kl.endswith("id") or any(tok in kl for tok in _TOKEN_SUBSTR):
             store.put(key, val, source_endpoint, key)
             captured.append(str(key))
 
