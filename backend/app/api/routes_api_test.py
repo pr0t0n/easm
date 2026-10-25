@@ -222,6 +222,61 @@ def _esc(v: Any) -> str:
     return html.escape(str(v if v is not None else ""))
 
 
+def _attackpath_html(rep: dict[str, Any], kind: str) -> str:
+    """Fluxo da operação + Attack Path, renderizado ABAIXO da tabela OWASP.
+    Mostra como um atacante encadeia endpoints reutilizando variáveis
+    (requestId/projectId/...) até um achado — o pedido do usuário."""
+    flow = rep.get("flow", {}) or {}
+    stats = flow.get("stats", {}) or {}
+    paths = rep.get("attack_paths", []) or []
+    variables = rep.get("variables", []) or []
+    by_stage = stats.get("by_stage", {}) or {}
+    stage_line = " · ".join(f"{v} {k}" for k, v in by_stage.items()) or "—"
+    ext = flow.get("external_variables", []) or []
+    dyn = "sim (executado via Caido)" if rep.get("summary", {}).get("flow_dynamic") else "não (modelo estático do contrato)"
+    out = [
+        "<h2>Fluxo da operação</h2>",
+        f'<p class="flowmeta">Nós: <b>{_esc(stats.get("nodes_total", 0))}</b> · '
+        f'Dependências (produtor→consumidor): <b>{_esc(stats.get("edges_total", 0))}</b> · '
+        f'Estágios: {_esc(stage_line)} · Execução dinâmica: {_esc(dyn)}'
+        + (f' · Variáveis sem produtor (seed necessário): {_esc(", ".join(ext[:8]))}' if ext else "")
+        + "</p>",
+    ]
+    if not paths:
+        out.append('<p class="flowmeta">Nenhum attack-path derivado do fluxo.</p>')
+        return "\n".join(out)
+    out.append("<h2>Attack Path</h2>")
+    for p in paths[:8]:
+        badge = "CONFIRMADO" if p.get("confirmed") else "potencial"
+        sev = _esc(p.get("severity"))
+        owasp = ", ".join(p.get("owasp") or [])
+        out.append(f'<div class="apc apc-{"conf" if p.get("confirmed") else "pot"}">')
+        out.append(f'<div class="aph"><span class="apb apb-{sev}">{_esc(badge)}</span> '
+                   f'<b>{_esc(p.get("name"))}</b> <span class="apo">{_esc(owasp)}</span></div>')
+        out.append("<ol class='apsteps'>")
+        for st in p.get("steps", []):
+            tags = []
+            if st.get("produces"):
+                tags.append(f'→ produz {_esc(", ".join(st["produces"]))}')
+            if st.get("consumes"):
+                tags.append(f'← reusa {_esc(", ".join(st["consumes"]))}')
+            tagline = f' <span class="aptag">{" | ".join(tags)}</span>' if tags else ""
+            mark = ' <span class="apfind">◆ ACHADO</span>' if st.get("finding") else ""
+            owa = f' <span class="apo">[{_esc(st.get("owasp"))}/{_esc(st.get("severity"))}]</span>' if st.get("owasp") else ""
+            out.append(f'<li><code>{_esc(st.get("method"))} {_esc(st.get("path"))}</code>{owa}{mark}'
+                       f'<div class="apr">{_esc(st.get("result"))}{tagline}</div></li>')
+        out.append("</ol></div>")
+    if kind == "technical" and variables:
+        out.append("<h2>Variáveis observadas (lineage)</h2>")
+        out.append('<table><thead><tr><th>Variável</th><th>Origem</th><th>Campo</th><th>Reutilizada em</th></tr></thead><tbody>')
+        for v in variables[:40]:
+            reused = ", ".join(v.get("reused_in", []) or [])
+            out.append(f'<tr><td><code>{_esc(v.get("name"))}</code></td><td>{_esc(v.get("source_endpoint"))}</td>'
+                       f'<td>{_esc(v.get("source_field"))}</td><td>{_esc(reused)}</td></tr>')
+        out.append("</tbody></table>")
+    return "\n".join(out)
+
+
 def _api_report_html(rep: dict[str, Any], kind: str) -> str:
     s = rep.get("summary", {})
     sev = s.get("findings_by_severity", {}) or {}
@@ -241,6 +296,7 @@ def _api_report_html(rep: dict[str, Any], kind: str) -> str:
         f'<td>{_esc(sk.get("owasp"))}</td><td>{"BAC" if sk.get("is_bac") else ""}</td><td>{_esc(sk.get("endpoints_covered"))}</td><td>{_esc(sk.get("findings"))}</td></tr>'
         for sk in rep.get("skills_catalog", [])
     )
+    attackpath_html = _attackpath_html(rep, kind)
     body = f"""
     <h1>{_esc(title)}</h1>
     <div class="meta">Alvo: <b>{_esc(rep.get('target'))}</b> · Teste #{_esc(rep.get('scan_id'))} · Status: {_esc(rep.get('status'))}</div>
@@ -248,6 +304,7 @@ def _api_report_html(rep: dict[str, Any], kind: str) -> str:
     <p class="sev">Severidade dos achados: {_esc(sevline)}</p>
     <h2>Conformidade OWASP API Top 20</h2>
     <table><thead><tr><th></th><th>Teste</th><th>OWASP</th><th></th><th>Endpoints</th><th>Achados</th></tr></thead><tbody>{cat_rows}</tbody></table>
+    {attackpath_html}
     """
     if kind == "technical":
         ep_rows = ""
@@ -284,7 +341,16 @@ def _api_report_html(rep: dict[str, Any], kind: str) -> str:
     .s-critical,.s-high{color:#dc2626} .s-medium{color:#d97706} .adv{color:#d97706}
     .ev{margin:6px 0;border-left:3px solid #e2e8f0;padding-left:8px} .evh{font-size:11px;font-weight:700;color:#334155}
     pre{background:#f8fafc;border:1px solid #e2e8f0;border-radius:5px;padding:6px;font-size:10.5px;white-space:pre-wrap;word-break:break-all;margin:3px 0}
-    @media print{body{padding:0} .epc{break-inside:avoid}}
+    .flowmeta{font-size:12px;color:#334155;margin:4px 0 10px}
+    .apc{border:1px solid #e2e8f0;border-radius:8px;padding:10px 12px;margin-bottom:10px}
+    .apc-conf{border-left:4px solid #dc2626;background:rgba(220,38,38,.04)} .apc-pot{border-left:4px solid #94a3b8}
+    .aph{font-size:13px;margin-bottom:6px} .apo{color:#2563eb;font-size:11px;font-weight:700}
+    .apb{font-size:10px;font-weight:800;padding:1px 6px;border-radius:4px;color:#fff;background:#94a3b8}
+    .apb-critical,.apb-high{background:#dc2626} .apb-medium{background:#d97706} .apb-low,.apb-info{background:#64748b}
+    ol.apsteps{margin:4px 0;padding-left:20px;font-size:12px} ol.apsteps li{margin:4px 0}
+    ol.apsteps code{background:#f1f5f9;padding:1px 5px;border-radius:4px;font-size:11.5px}
+    .apr{color:#64748b;font-size:11px;margin-top:2px} .aptag{color:#0f766e} .apfind{color:#dc2626;font-weight:800;font-size:10.5px}
+    @media print{body{padding:0} .epc{break-inside:avoid} .apc{break-inside:avoid}}
     """
     return f"<!doctype html><html lang='pt-br'><head><meta charset='utf-8'><title>{_esc(title)}</title><style>{css}</style></head><body>{body}</body></html>"
 
@@ -389,6 +455,28 @@ def api_test_report_csv(
                     q.get("label"), q.get("score"), e.get("skills_tested_count"),
                     "sim" if e.get("bac_tested") else "nao", http, len(e.get("findings") or []),
                     sev, len(e.get("advisories") or [])])
+    w.writerow([])
+
+    w.writerow(["# ATTACK PATH"])
+    w.writerow(["path_nome", "confirmado", "severidade", "owasp", "ordem", "metodo", "endpoint",
+                "produz", "reusa", "achado", "resultado"])
+    for p in rep.get("attack_paths", []):
+        owasp = "|".join(p.get("owasp") or [])
+        for st in p.get("steps", []):
+            w.writerow([p.get("name"), "sim" if p.get("confirmed") else "nao", p.get("severity"), owasp,
+                        st.get("order"), st.get("method"), st.get("path"),
+                        ";".join(st.get("produces") or []), ";".join(st.get("consumes") or []),
+                        "sim" if st.get("finding") else "", st.get("result")])
+    w.writerow([])
+
+    w.writerow(["# VARIAVEIS / LINEAGE"])
+    w.writerow(["variavel", "origem_endpoint", "campo_origem", "reutilizada_em"])
+    for v in rep.get("variables", []):
+        w.writerow([v.get("name"), v.get("source_endpoint"), v.get("source_field"),
+                    ";".join(v.get("reused_in") or [])])
+    if not rep.get("variables"):
+        for ev in (rep.get("flow", {}) or {}).get("external_variables", []):
+            w.writerow([ev, "(sem produtor — seed necessário)", "", ""])
 
     filename = f"api-report-scan-{test_id}.csv"
     return Response(content=buf.getvalue(), media_type="text/csv",

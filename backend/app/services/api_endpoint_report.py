@@ -23,6 +23,7 @@ from urllib.parse import urlparse
 from sqlalchemy.orm import Session
 
 from app.models.models import Finding, OffensiveEndpoint, ScanJob, ScanWorkItem
+from app.services.api_flow_graph import build_attack_paths, build_flow_graph
 from app.services.api_skill_coverage import API_SPEC_SOURCES, _is_api_skill_item, _parsed_result
 from app.services.api_skill_top20_runner import load_api_top20_skills
 
@@ -122,10 +123,13 @@ def build_api_endpoint_report(db: Session, job: ScanJob) -> dict[str, Any]:
     )
     observations: list[dict[str, Any]] = []
     executed_skills: set[str] = set()
+    dynamic_flow: dict[str, Any] = {}
     for item in items:
         if not _is_api_skill_item(item):
             continue
         parsed = _parsed_result(item)
+        if isinstance(parsed.get("api_flow"), dict) and parsed["api_flow"]:
+            dynamic_flow = parsed["api_flow"]
         sid = str(parsed.get("api_skill_id") or parsed.get("skill_id") or "")
         status = str(getattr(item, "status", "") or "").lower()
         if sid and status in {"completed", "done"}:
@@ -307,6 +311,23 @@ def build_api_endpoint_report(db: Session, job: ScanJob) -> dict[str, Any]:
         if f["owasp"]:
             owasp_counts[f["owasp"]] += 1
 
+    # 7) Flow model + attack-paths. The STATIC graph is derived here from the
+    # endpoint forest + findings, so the depth (operation flow, how variables are
+    # reused, and the attack-path below the OWASP table) shows up even when the
+    # dynamic Caido-backed flow runner has not executed. When the runner DID run,
+    # its richer output (variable lineage + executed attack-paths) is preferred.
+    flow_graph = build_flow_graph(docs)
+    attack_paths = build_attack_paths(flow_graph, real_findings + advisory_findings)
+    variables: list[dict[str, Any]] = []
+    dynamic_executed = False
+    caido_project = ""
+    if dynamic_flow:
+        variables = list(dynamic_flow.get("variables") or [])
+        if dynamic_flow.get("attack_paths"):
+            attack_paths = list(dynamic_flow["attack_paths"])
+        dynamic_executed = bool(dynamic_flow.get("dynamic_executed"))
+        caido_project = str(dynamic_flow.get("caido_project") or "")
+
     return {
         "version": "api-endpoint-report-v1",
         "scan_id": int(job.id),
@@ -330,8 +351,16 @@ def build_api_endpoint_report(db: Session, job: ScanJob) -> dict[str, Any]:
             "bac_advisories": sum(1 for f in advisory_findings if f["is_bac"]),
             "skills_catalog_total": len(catalog),
             "skills_executed": len(executed_skills & set(catalog)),
+            "attack_paths_total": len(attack_paths),
+            "attack_paths_confirmed": sum(1 for p in attack_paths if p.get("confirmed")),
+            "flow_edges": flow_graph.get("stats", {}).get("edges_total", 0),
+            "flow_dynamic": dynamic_executed,
         },
         "skills_catalog": catalog_rows,
         "endpoints": endpoint_rows,
         "shadow_paths": sorted(shadow_paths)[:50],
+        "flow": flow_graph,
+        "variables": variables,
+        "attack_paths": attack_paths,
+        "caido_project": caido_project,
     }

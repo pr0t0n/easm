@@ -183,6 +183,82 @@ function ApiReportDetail({ id }) {
         </div>
       </div>
 
+      {/* Operation flow + Attack Path (below the OWASP table) */}
+      <div style={card}>
+        <h2 style={{ margin: "0 0 6px", fontSize: 15, fontWeight: 800, color: "var(--ink)" }}>Fluxo da operação</h2>
+        <div className="sk-mono" style={{ fontSize: 11.5, color: "var(--ink-muted)", marginBottom: 4 }}>
+          {(() => {
+            const fl = data.flow || {}, st = fl.stats || {}, bs = st.by_stage || {};
+            const stageLine = Object.entries(bs).map(([k, v]) => `${v} ${k}`).join(" · ") || "—";
+            const ext = fl.external_variables || [];
+            return (
+              <>
+                Nós: <b style={{ color: "var(--ink)" }}>{st.nodes_total || 0}</b> · Dependências (produtor→consumidor):{" "}
+                <b style={{ color: "var(--ink)" }}>{st.edges_total || 0}</b> · Estágios: {stageLine} · Execução:{" "}
+                {data.summary?.flow_dynamic ? "dinâmica (via Caido)" : "estática (modelo do contrato)"}
+                {ext.length > 0 && <> · Variáveis sem produtor (seed): <b style={{ color: "var(--ink)" }}>{ext.slice(0, 8).join(", ")}</b></>}
+              </>
+            );
+          })()}
+        </div>
+        <h2 style={{ margin: "14px 0 8px", fontSize: 15, fontWeight: 800, color: "var(--ink)" }}>
+          Attack Path <span className="sk-mono" style={{ fontSize: 11, color: "var(--ink-muted)", fontWeight: 400 }}>
+            ({(data.attack_paths || []).length} cadeia{(data.attack_paths || []).length === 1 ? "" : "s"})
+          </span>
+        </h2>
+        {(data.attack_paths || []).length === 0 && (
+          <div className="sk-mono" style={{ fontSize: 12, color: "var(--ink-muted)" }}>Nenhum attack-path derivado do fluxo.</div>
+        )}
+        {(data.attack_paths || []).slice(0, 8).map((p, pi) => (
+          <div key={pi} style={{ border: "1px solid var(--border)", borderLeft: `4px solid ${p.confirmed ? "#dc2626" : "#94a3b8"}`,
+            borderRadius: 8, padding: "9px 12px", marginBottom: 9, background: p.confirmed ? "var(--sev-high-bg, rgba(220,38,38,.05))" : "transparent" }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "var(--ink)", marginBottom: 5 }}>
+              <span style={{ fontSize: 10, fontWeight: 800, color: "#fff", background: SEV_COLOR[p.severity] || "#64748b",
+                padding: "1px 6px", borderRadius: 4, marginRight: 7 }}>{p.confirmed ? "CONFIRMADO" : "potencial"}</span>
+              {p.name}
+              {(p.owasp || []).length > 0 && <span style={{ color: "var(--brand,#2563eb)", fontSize: 11, marginLeft: 6 }}>{(p.owasp || []).join(", ")}</span>}
+            </div>
+            <ol className="sk-mono" style={{ margin: "4px 0", paddingLeft: 20, fontSize: 11.5 }}>
+              {(p.steps || []).map((st, si) => (
+                <li key={si} style={{ margin: "4px 0" }}>
+                  <code style={{ background: "var(--surface-2,#f1f5f9)", padding: "1px 5px", borderRadius: 4 }}>{st.method} {st.path}</code>
+                  {st.owasp && <span style={{ color: "var(--brand,#2563eb)", marginLeft: 6 }}>[{st.owasp}/{st.severity}]</span>}
+                  {st.finding && <span style={{ color: "var(--sev-high-text,#dc2626)", fontWeight: 800, marginLeft: 6 }}>◆ ACHADO</span>}
+                  <div style={{ color: "var(--ink-muted)", fontSize: 10.5, marginTop: 1 }}>
+                    {st.result}
+                    {(st.produces || []).length > 0 && <span style={{ color: "#0f766e" }}> · → produz {st.produces.join(", ")}</span>}
+                    {(st.consumes || []).length > 0 && <span style={{ color: "#0f766e" }}> · ← reusa {st.consumes.join(", ")}</span>}
+                  </div>
+                </li>
+              ))}
+            </ol>
+          </div>
+        ))}
+        {(data.variables || []).length > 0 && (
+          <>
+            <h2 style={{ margin: "14px 0 8px", fontSize: 14, fontWeight: 800, color: "var(--ink)" }}>Variáveis observadas (lineage)</h2>
+            <div style={{ overflowX: "auto" }}>
+              <table className="sk-mono" style={{ width: "100%", borderCollapse: "collapse", fontSize: 11.5 }}>
+                <thead><tr style={{ textAlign: "left", color: "var(--ink-muted)", borderBottom: "1px solid var(--border)" }}>
+                  <th style={{ padding: "5px 8px" }}>Variável</th><th style={{ padding: "5px 8px" }}>Origem</th>
+                  <th style={{ padding: "5px 8px" }}>Campo</th><th style={{ padding: "5px 8px" }}>Reutilizada em</th>
+                </tr></thead>
+                <tbody>
+                  {(data.variables || []).slice(0, 40).map((v, vi) => (
+                    <tr key={vi} style={{ borderBottom: "1px solid var(--border)" }}>
+                      <td style={{ padding: "5px 8px", fontWeight: 700 }}>{v.name}</td>
+                      <td style={{ padding: "5px 8px" }}>{v.source_endpoint}</td>
+                      <td style={{ padding: "5px 8px" }}>{v.source_field}</td>
+                      <td style={{ padding: "5px 8px", color: "var(--ink-muted)" }}>{(v.reused_in || []).join(", ")}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+      </div>
+
       {/* Per-endpoint forest */}
       <div style={card}>
         <h2 style={{ margin: "0 0 10px", fontSize: 15, fontWeight: 800, color: "var(--ink)" }}>
