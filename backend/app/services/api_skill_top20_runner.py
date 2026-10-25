@@ -171,7 +171,7 @@ def _params_by_endpoint(db: Any, endpoint_ids: list[int]) -> dict[int, list[dict
 _SAMPLE_UUID = "05be75cc-8f8a-414a-891f-434aa9b4e7a5"
 _NUMERIC_ENUM = ["1", "2", "3", "10", "100", "9001"]
 _PATH_PLACEHOLDER_RE = re.compile(r"\{([^/{}]+)\}")
-_MAX_ENUM_VARIANTS = 5
+_MAX_ENUM_VARIANTS = 8
 _UUID_SEG_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
 
 
@@ -211,26 +211,46 @@ def _looks_uuid(name: str, sample: str, type_hint: str) -> bool:
 
 
 def _path_param_candidates(param: dict[str, Any]) -> list[str]:
+    """Values to try for a path variable. Delegates to the schema-driven fuzz
+    generator (format-valid samples + IDOR/BOLA enumeration) instead of the old
+    ~6 hand-rolled values; capped for path expansion to bound request volume."""
+    try:
+        from app.services.api_fuzz_generator import fuzz_values_for_param
+        res: list[str] = []
+        seen: set[str] = set()
+        # Keep only the useful classes for a path id (valid + id-enumeration).
+        for value, label in fuzz_values_for_param(param, cap=12):
+            if not (label.startswith("valid") or label.startswith("idor")):
+                continue
+            v = str(value)
+            if v and "{" not in v and v not in seen:
+                seen.add(v)
+                res.append(v)
+        if res:
+            return res[:12]
+    except Exception:
+        pass
+    # Fallback (generator unavailable): minimal legacy probes.
     name = str(param.get("name") or "")
     type_hint = str(param.get("type_hint") or "")
     sample = str(param.get("sample_value") or "").strip()
     out: list[str] = []
     if sample and "{" not in sample:
-        out.append(sample)            # Swagger example/enum/format value
+        out.append(sample)
     if _looks_uuid(name, sample, type_hint):
         out.append(_SAMPLE_UUID)
     if _looks_numeric(type_hint, name):
-        out.extend(_NUMERIC_ENUM)     # numeric enumeration (BOLA/IDOR)
+        out.extend(_NUMERIC_ENUM)
     if not out:
-        out.extend(["1", "test"])     # unknown shape: minimal probes
-    seen: set[str] = set()
-    res: list[str] = []
+        out.extend(["1", "test"])
+    seen2: set[str] = set()
+    res2: list[str] = []
     for v in out:
         v = str(v)
-        if v and v not in seen:
-            seen.add(v)
-            res.append(v)
-    return res[:6]
+        if v and v not in seen2:
+            seen2.add(v)
+            res2.append(v)
+    return res2[:6]
 
 
 def _expand_templated_endpoints(endpoints: list[Endpoint], test_variables: dict[str, Any] | None = None) -> list[Endpoint]:
