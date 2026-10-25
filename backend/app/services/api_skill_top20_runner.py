@@ -455,12 +455,27 @@ def _build_curl(method: str, url: str, headers: dict[str, str], cookies: dict[st
     return " ".join(parts)
 
 
+# Optional Caido traffic/replay transport. Set per-scan in run_api_top20_for_scan
+# when the scan opted in (use_caido) and a headless Caido is reachable. When set,
+# every probe is replayed through Caido (captured in the project); on any failure
+# we fall back to direct requests, so Caido is never a hard dependency.
+_CAIDO_CLIENT: Any = None
+
+
 def _request(session: requests.Session, method: str, url: str, identity: Identity, *, headers: dict[str, str] | None = None, json_body: Any = None, timeout: int = DEFAULT_TIMEOUT_SECONDS) -> dict[str, Any]:
     req_headers = {"User-Agent": "ValidCyber-API-SkillTop20/1.0", "Accept": "application/json, text/plain, */*"}
     req_headers.update(identity.headers or {})
     req_headers.update(headers or {})
     curl = _build_curl(method, url, req_headers, identity.cookies or {}, json_body, identity.key)
     request_body = json.dumps(json_body, ensure_ascii=False) if json_body is not None else ""
+    if _CAIDO_CLIENT is not None:
+        try:
+            via = _CAIDO_CLIENT.send(method, url, identity_headers={**(identity.headers or {}), **(headers or {})},
+                                     cookies=identity.cookies or {}, json_body=json_body, curl=curl, timeout=timeout)
+            if via.get("ok"):
+                return via
+        except Exception:
+            pass  # fall back to direct requests below
     try:
         response = session.request(method.upper(), url, headers=req_headers, cookies=identity.cookies or {}, json=json_body, timeout=timeout, allow_redirects=False, verify=False)
         body = response.text or ""
@@ -1110,6 +1125,19 @@ def run_api_top20_for_scan(scan_id: int, target: str, *, api_skill_id: str | Non
             spec_fallback_reason = "api_spec_unavailable_using_previous_inventory"
         limits = dict(catalog.get("default_limits") or {})
         allow_mutations = bool(api_config.get("allow_mutations"))
+        # Route all probes through a headless Caido (traffic/replay engine) when
+        # the scan opted in and Caido is reachable; otherwise direct requests.
+        global _CAIDO_CLIENT
+        _CAIDO_CLIENT = None
+        caido_status = {"enabled": False, "detail": "not_configured"}
+        try:
+            from app.services.caido_client import get_caido_client_for_config
+            _client = get_caido_client_for_config(api_config)
+            if _client is not None:
+                _CAIDO_CLIENT = _client
+                caido_status = {"enabled": True, "detail": "caido_replay", "instance": _client.base_url}
+        except Exception as _cexc:  # noqa: BLE001
+            caido_status = {"enabled": False, "detail": f"caido_init_failed: {type(_cexc).__name__}"}
         all_findings: list[dict[str, Any]] = []
         all_observations: list[dict[str, Any]] = []
         skill_results: list[dict[str, Any]] = []
@@ -1209,6 +1237,29 @@ def run_api_top20_for_scan(scan_id: int, target: str, *, api_skill_id: str | Non
                 if dict(finding.get("details") or {}).get("anonymous_access") is True
             ]),
             "duration_seconds": round(time.time() - started, 3),
+        }
+        # Flow/Caido metadata. The static flow graph + attack-paths are recomputed
+        # (cleanly, from the deduped DB inventory) by build_api_endpoint_report;
+        # here we carry Caido transport status and a placeholder for dynamic
+        # variable lineage (filled once the stateful flow runner executes).
+        try:
+            from app.services.api_flow_graph import build_flow_graph
+            _fg = build_flow_graph([
+                {"method": ep.method, "url": ep.url, "parameters": ep.parameters,
+                 "tags": ep.tags, "documented": ep.documented, "metadata": ep.metadata}
+                for ep in endpoints
+            ])
+            _flow_stats = _fg.get("stats", {})
+            _external_vars = _fg.get("external_variables", [])
+        except Exception:
+            _flow_stats, _external_vars = {}, []
+        parsed["api_flow"] = {
+            "caido": caido_status,
+            "caido_project": caido_status.get("instance", ""),
+            "dynamic_executed": False,
+            "variables": [],
+            "external_variables": _external_vars,
+            "graph_stats": _flow_stats,
         }
         return {
             "status": "success",
