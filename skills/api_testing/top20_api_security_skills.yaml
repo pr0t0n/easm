@@ -374,3 +374,23 @@ skills:
       vuln_family: input_validation
       finding_class: schema_property_fuzzing
       severity: medium
+  - id: skill.api.business_flow_fraud_bypass
+    priority: 22
+    name: Business Flow / Fraud Bypass (stateful)
+    objective: "Executa a OPERAÇÃO de ponta a ponta (cria transação, reusa o requestId retornado) para expor falhas que só aparecem no fluxo — ex. step de fraude aceitando optIn true SEM imagem (bypass de regra de negócio) e leitura do resultado de outro dono (BOLA cross-identity). É o reteste do incidente de onboarding."
+    typical_criticality: critical
+    owasp: API6:2023
+    categories: [business_logic, authorization, stateful_flow]
+    requires_authorization: true
+    requires_two_identities_for_confirmation: true
+    mutating_confirmation_requires_fixture: true
+    stateful: true
+    safe_methods: [GET, POST]
+    selectors:
+      path_keywords: [steps, flow, fraud, result, onboarding, transaction, optin]
+      parameter_keywords: [requestId, optIn, request_id]
+    evidence_required: [created_request_id, fraud_step_response, cross_identity_result]
+    finding:
+      vuln_family: business_logic
+      finding_class: business_flow_bypass
+      severity: high

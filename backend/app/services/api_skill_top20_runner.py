@@ -1150,6 +1150,8 @@ def run_api_top20_for_scan(scan_id: int, target: str, *, api_skill_id: str | Non
                 "findings_extracted": [],
             }
         for skill in skills:
+            if str(skill.get("id")) == "skill.api.business_flow_fraud_bypass":
+                continue  # handled by the dedicated stateful flow runner below
             if str(skill.get("id")) == "skill.api.inventory_shadow_api":
                 # Descoberta ATIVA de rotas (kiterunner): acha endpoints fora da
                 # spec/collection enviada. O BOLA do DevOps é um shadow endpoint.
@@ -1201,6 +1203,43 @@ def run_api_top20_for_scan(scan_id: int, target: str, *, api_skill_id: str | Non
                 "findings": len(result.get("findings") or []),
                 "blocked_reason": result.get("blocked_reason"),
             })
+
+        # Stateful business-logic flow (onboarding incident): create -> harvest
+        # requestId -> fraud optIn-without-image (API6) -> result BOLA cross-identity
+        # (API1). Runs when the skill is in the catalog and mutations are allowed.
+        flow_lineage: list[dict[str, Any]] = []
+        flow_dynamic = False
+        flow_steps: list[dict[str, Any]] = []
+        _bf_skill = next((s for s in skills if str(s.get("id")) == "skill.api.business_flow_fraud_bypass"), None)
+        if _bf_skill is not None:
+            try:
+                from app.services.api_flow_runner import VariableStore, run_business_flow
+                with requests.Session() as _bfsess:
+                    requests.packages.urllib3.disable_warnings()  # type: ignore[attr-defined]
+
+                    def _bf_request(method, url, identity, *, headers=None, json_body=None, timeout=DEFAULT_TIMEOUT_SECONDS):
+                        return _request(_bfsess, method, url, identity, headers=headers, json_body=json_body, timeout=timeout)
+
+                    _store = VariableStore(seed=test_variables)
+                    _bf = run_business_flow(endpoints, identities, _bf_request, _store,
+                                            allow_mutations=allow_mutations, skill=_bf_skill, make_finding=_finding)
+                all_findings.extend(_bf.get("findings") or [])
+                flow_lineage = _bf.get("variables") or []
+                flow_dynamic = bool(_bf.get("dynamic_executed"))
+                flow_steps = _bf.get("steps") or []
+                skill_results.append({
+                    "skill_id": _bf_skill.get("id"), "name": _bf_skill.get("name"),
+                    "priority": _bf_skill.get("priority"),
+                    "status": "completed" if flow_dynamic else "blocked",
+                    "selected_endpoints": len(flow_steps), "attempts": len(flow_steps),
+                    "coverage_complete": True, "coverage_gap_reason": None,
+                    "findings": len(_bf.get("findings") or []),
+                    "blocked_reason": _bf.get("skipped"),
+                })
+            except Exception as _bfexc:  # noqa: BLE001
+                skill_results.append({"skill_id": "skill.api.business_flow_fraud_bypass", "status": "error",
+                                      "blocked_reason": type(_bfexc).__name__, "findings": 0,
+                                      "coverage_complete": True})
         parsed = {
             "scan_type": "api_skill_top20",
             "target": target,
@@ -1256,8 +1295,9 @@ def run_api_top20_for_scan(scan_id: int, target: str, *, api_skill_id: str | Non
         parsed["api_flow"] = {
             "caido": caido_status,
             "caido_project": caido_status.get("instance", ""),
-            "dynamic_executed": False,
-            "variables": [],
+            "dynamic_executed": flow_dynamic,
+            "variables": flow_lineage,
+            "flow_steps": flow_steps,
             "external_variables": _external_vars,
             "graph_stats": _flow_stats,
         }
