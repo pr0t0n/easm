@@ -957,9 +957,10 @@ def _spec_audit_findings(skill: dict[str, Any]) -> list[dict[str, Any]]:
         sev = _worst_sev([i.get("severity", "low") for i in items]) if "_worst_sev" in globals() else items[0].get("severity", "low")
         owasp = items[0].get("owasp", "")
         locs = [i["location"] for i in items][:12]
+        _srv = _SPEC_DOC.get("servers", [{}])[0].get("url", "") if _SPEC_DOC.get("servers") else ""
         findings.append(_finding(
             skill,
-            _SPEC_DOC.get("servers", [{}])[0].get("url", "") if _SPEC_DOC.get("servers") else "spec://audit",
+            f"{_srv}#spec-audit/{t}" if _srv else f"spec://audit/{t}",
             f"Auditoria de contrato — {t} ({len(items)} ocorrência(s), {owasp}): {items[0].get('detail')} Ex.: {', '.join(locs[:5])}.",
             "static", severity=sev, verification_status="confirmed",
             evidence_extra={"audit_type": t, "owasp": owasp, "count": len(items), "locations": locs, "static_spec_audit": True},
