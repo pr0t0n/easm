@@ -177,7 +177,7 @@ export default function ApiOperationsCenterPage() {
   const cd = `${String(Math.floor(countdown / 60)).padStart(2, "0")}:${String(countdown % 60).padStart(2, "0")}`;
 
   return (
-    <div style={{ background: "#000", color: TV.text, display: "flex", flexDirection: "column", minHeight: "100vh" }}>
+    <div style={{ background: "#000", color: TV.text, display: "flex", flex: 1, flexDirection: "column", minHeight: "100vh", width: "100%" }}>
       <div style={{ alignItems: "center", borderBottom: `1px solid ${TV.border}`, display: "flex", flexWrap: "wrap", gap: 12, padding: "16px 24px" }}>
         <div>
           <div style={{ fontSize: 15, fontWeight: 700 }}>Centro Operacional de APIs</div>
