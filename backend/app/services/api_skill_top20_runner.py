@@ -1168,6 +1168,20 @@ def _run_endpoint_skill(skill: dict[str, Any], endpoints: list[Endpoint], identi
                         extra = _response_evidence(result, cmethod)
                         extra.update({"conformance_issue": iss.get("type"), "http_status": csc})
                         findings.append(_finding(skill, ep.url, f"Divergência de contrato ({iss.get('type')}): {iss.get('detail')}", identity.key, severity=str(iss.get("severity") or "medium"), verification_status="confirmed", evidence_extra=extra))
+                    # Oráculo profundo (read-only): validação FULL da resposta 2xx
+                    # contra o schema declarado (tipo/formato/enum/constraint).
+                    if 200 <= csc < 300 and _OP_SCHEMAS:
+                        _opsc = _OP_SCHEMAS.get(f"{cmethod} {_path_template_key(urlparse(ep.url).path)}") or _OP_SCHEMAS.get(f"GET {_path_template_key(urlparse(ep.url).path)}")
+                        if _opsc and _opsc.get("resp"):
+                            try:
+                                from app.services.api_fuzz_engine import validate_against_schema
+                                viols = validate_against_schema(cbody, _opsc["resp"])
+                            except Exception:
+                                viols = []
+                            if viols:
+                                extra = _response_evidence(result, cmethod)
+                                extra.update({"schema_violations": viols[:8], "http_status": csc})
+                                findings.append(_finding(skill, ep.url, f"Resposta 2xx VIOLA o schema do contrato ({len(viols)}): {viols[:3]} — drift/tipo incorreto (OWASP API9/API3).", identity.key, severity="low", verification_status="confirmed", evidence_extra=extra))
                     continue
                 if skill_id == "skill.api.security_headers":
                     # Akto-style, autônomo: headers de segurança ausentes / verbose.
