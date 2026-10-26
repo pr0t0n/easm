@@ -1,4 +1,5 @@
 import logging
+import re
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -43,9 +44,9 @@ def _build_cors_config() -> tuple[list[str] | str, str | None]:
             continue
         origins.extend([item.strip() for item in str(raw).split(",") if item.strip()])
     
-    # Remove duplicatas e adiciona wildcard
+    # Remove duplicatas. Não adicionar "*" quando allow_credentials=True:
+    # wildcard torna a política permissiva e contradiz a allowlist/regex.
     origins = list(dict.fromkeys(origins))
-    origins.append("*")  # Protegido pelo regex abaixo
     
     # Regex para IPs locais: localhost, 127.0.0.1, 192.168.x.x, 10.x.x.x, 172.16-31.x.x
     regex = (
@@ -59,6 +60,15 @@ def _build_cors_config() -> tuple[list[str] | str, str | None]:
     return origins, regex
 
 _cors_origins_list, _cors_regex = _build_cors_config()
+_cors_origin_pattern = re.compile(_cors_regex) if _cors_regex else None
+
+
+def _origin_allowed(origin: str | None) -> bool:
+    if not origin:
+        return False
+    if origin in _cors_origins_list:
+        return True
+    return bool(_cors_origin_pattern and _cors_origin_pattern.fullmatch(origin))
 
 app.add_middleware(
     CORSMiddleware,
@@ -82,7 +92,7 @@ async def _unhandled_exception_handler(request: Request, exc: Exception):
     logger.exception("Unhandled error on %s %s", request.method, request.url.path)
     headers: dict[str, str] = {}
     origin = request.headers.get("origin")
-    if origin and origin in _cors_origins_list:
+    if _origin_allowed(origin):
         headers["Access-Control-Allow-Origin"] = origin
         headers["Access-Control-Allow-Credentials"] = "true"
         headers["Vary"] = "Origin"
