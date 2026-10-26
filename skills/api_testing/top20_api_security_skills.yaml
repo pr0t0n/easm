@@ -394,3 +394,21 @@ skills:
       vuln_family: business_logic
       finding_class: business_flow_bypass
       severity: high
+  - id: skill.api.tenant_isolation
+    priority: 23
+    name: Tenant Isolation (cross-org/project)
+    objective: "Valida isolamento multi-tenant: troca x-organization-id/x-project-id/platformId (header, path projectId ou body) por outro tenant/valor e verifica se a API ainda responde 2xx com dados — vazamento cross-tenant (OWASP API1/API5). Requer um baseline autenticado para confirmar; sem credencial, reporta como advisório."
+    typical_criticality: critical
+    owasp: API5:2023
+    categories: [authorization, multi_tenant, object_access]
+    requires_authorization: true
+    requires_two_identities_for_confirmation: false
+    safe_methods: [GET, HEAD]
+    selectors:
+      path_keywords: [project, organization, tenant, settings, steps, know, transactions]
+      parameter_keywords: [projectId, organizationId, tenantId, x-organization-id, x-project-id, platformId]
+    evidence_required: [baseline_tenant_response, swapped_tenant_response, cross_tenant_access]
+    finding:
+      vuln_family: broken_access_control
+      finding_class: tenant_isolation_bypass
+      severity: critical

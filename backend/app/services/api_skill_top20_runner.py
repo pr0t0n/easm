@@ -493,6 +493,23 @@ _CAIDO_CLIENT: Any = None
 # Burst size for the rate-limit control validation (0 => use skill default).
 _RATE_LIMIT_BURST: int = 0
 
+# Request headers that carry multi-tenant context (swapped by tenant_isolation).
+_TENANT_HEADER_KEYS = {"x-organization-id", "x-project-id", "x-tenant-id", "organizationid", "projectid", "x-platform-id", "platformid"}
+
+
+def _body_similarity(a: str, b: str) -> float:
+    """Rough similarity (0..1) between two response bodies, to tell whether a
+    tenant-swapped response returned *equivalent* data (cross-tenant leak) vs a
+    different/denied one. Bounded for cost."""
+    import difflib
+    a = (a or "")[:4000]
+    b = (b or "")[:4000]
+    if not a and not b:
+        return 1.0
+    if not a or not b:
+        return 0.0
+    return difflib.SequenceMatcher(None, a, b).ratio()
+
 
 def _request(session: requests.Session, method: str, url: str, identity: Identity, *, headers: dict[str, str] | None = None, json_body: Any = None, timeout: int = DEFAULT_TIMEOUT_SECONDS) -> dict[str, Any]:
     req_headers = {"User-Agent": "ValidCyber-API-SkillTop20/1.0", "Accept": "application/json, text/plain, */*"}
@@ -1000,6 +1017,46 @@ def _run_endpoint_skill(skill: dict[str, Any], endpoints: list[Endpoint], identi
                             f"Rate-limit NÃO SATISFATÓRIO: {total} requisições sem 429 e sem headers de rate-limit (status repetido {codes[:1]}). Controle ausente/ineficaz nesta rota.",
                             identity.key, severity="medium", verification_status="confirmed",
                             evidence_extra={"rate_limit": "absent", "burst": burst, "status_seen": sorted(set(codes))}))
+                    continue
+                if skill_id == "skill.api.tenant_isolation":
+                    # Multi-tenant isolation: establish a baseline with the real
+                    # tenant context (headers x-organization-id/x-project-id or a
+                    # path projectId), then SWAP that tenant id for other values
+                    # and check whether the API still serves data. Hard rule: a
+                    # cross-tenant positive requires baseline 2xx AND swapped 2xx
+                    # with a similar body; 401/403 on the swap => control OK; no
+                    # authenticated baseline => advisory.
+                    method = _probe_method(skill, ep)
+                    tenant_hdr_keys = [k for k in (identity.headers or {}) if k.lower() in _TENANT_HEADER_KEYS]
+                    path_proj = [ph for ph in _path_placeholder_names(urlparse(ep.url).path) if ph.lower() in ("projectid", "organizationid", "tenantid")]
+                    if not tenant_hdr_keys and not path_proj:
+                        continue  # no tenant context on this endpoint
+                    attempts += 1
+                    base = _request(session, method, ep.url, identity, timeout=timeout)
+                    observations.append(_response_observation(skill, ep, identity, method, base))
+                    bresp = base.get("response")
+                    bsc = int(getattr(bresp, "status_code", 0) or 0) if bresp is not None else 0
+                    bbody = base.get("response_body") or (getattr(bresp, "text", "") if bresp is not None else "")
+                    # candidate "other tenant" ids
+                    others = ["00000000-0000-0000-0000-000000000000", "1", "2", "99999", _SAMPLE_UUID]
+                    if tenant_hdr_keys:
+                        hk = tenant_hdr_keys[0]
+                        cur = str((identity.headers or {}).get(hk) or "")
+                        for other in [o for o in others if o != cur][:4]:
+                            attempts += 1
+                            swapped = _request(session, method, ep.url, identity, headers={hk: other}, timeout=timeout)
+                            observations.append(_response_observation(skill, ep, identity, method, swapped))
+                            sresp = swapped.get("response")
+                            ssc = int(getattr(sresp, "status_code", 0) or 0) if sresp is not None else 0
+                            sbody = swapped.get("response_body") or (getattr(sresp, "text", "") if sresp is not None else "")
+                            if 200 <= bsc < 300 and 200 <= ssc < 300 and _body_similarity(bbody, sbody) >= 0.6:
+                                extra = _response_evidence(swapped, method)
+                                extra.update({"tenant_header": hk, "swapped_to": other, "baseline_status": bsc, "cross_tenant": True})
+                                findings.append(_finding(skill, ep.url, f"Isolamento de tenant FALHOU: trocar {hk} para outro valor ({other}) ainda retornou {ssc} com dados equivalentes — acesso cross-tenant (OWASP API5/API1).", identity.key, severity="critical", verification_status="confirmed", evidence_extra=extra))
+                                break
+                            if not (200 <= bsc < 300):
+                                findings.append(_finding(skill, ep.url, f"Isolamento de tenant: sem baseline autenticado (HTTP {bsc}) — não confirmável sem credencial; revisar manualmente trocando {hk}.", identity.key, severity="info", verification_status="advisory"))
+                                break
                     continue
                 if skill_id == "skill.api.schema_fuzzing":
                     for (fmethod, furl, fbody, label) in _fuzz_cases(ep, allow_mutations, test_variables):
