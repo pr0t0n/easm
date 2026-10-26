@@ -1426,16 +1426,26 @@ def run_api_top20_for_scan(scan_id: int, target: str, *, api_skill_id: str | Non
         _bf_skill = next((s for s in skills if str(s.get("id")) == "skill.api.business_flow_fraud_bypass"), None)
         if _bf_skill is not None:
             try:
-                from app.services.api_flow_runner import VariableStore, run_business_flow
+                from app.services.api_flow_runner import VariableStore, run_business_flow, run_generic_flow
                 with requests.Session() as _bfsess:
                     requests.packages.urllib3.disable_warnings()  # type: ignore[attr-defined]
 
                     def _bf_request(method, url, identity, *, headers=None, json_body=None, timeout=DEFAULT_TIMEOUT_SECONDS):
                         return _request(_bfsess, method, url, identity, headers=headers, json_body=json_body, timeout=timeout)
 
+                    # GENERIC flow engine (any API) driven by the producer->consumer
+                    # graph, plus the onboarding-specific sequence for named findings.
                     _store = VariableStore(seed=test_variables)
+                    _gen = run_generic_flow(endpoints, identities, _bf_request, _store,
+                                            allow_mutations=allow_mutations, skill=_bf_skill, make_finding=_finding)
                     _bf = run_business_flow(endpoints, identities, _bf_request, _store,
                                             allow_mutations=allow_mutations, skill=_bf_skill, make_finding=_finding)
+                    _bf = {
+                        "findings": (_gen.get("findings") or []) + (_bf.get("findings") or []),
+                        "variables": _store.lineage(),
+                        "steps": (_gen.get("steps") or []) + (_bf.get("steps") or []),
+                        "dynamic_executed": bool(_gen.get("dynamic_executed") or _bf.get("dynamic_executed")),
+                    }
                 all_findings.extend(_bf.get("findings") or [])
                 flow_lineage = _bf.get("variables") or []
                 flow_dynamic = bool(_bf.get("dynamic_executed"))
