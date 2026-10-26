@@ -492,6 +492,8 @@ def _build_curl(method: str, url: str, headers: dict[str, str], cookies: dict[st
 _CAIDO_CLIENT: Any = None
 # Burst size for the rate-limit control validation (0 => use skill default).
 _RATE_LIMIT_BURST: int = 0
+# OpenAPI contract index for conformance checking (METHOD /template -> declared).
+_CONFORMANCE_INDEX: dict[str, Any] = {}
 
 # Request headers that carry multi-tenant context (swapped by tenant_isolation).
 _TENANT_HEADER_KEYS = {"x-organization-id", "x-project-id", "x-tenant-id", "organizationid", "projectid", "x-platform-id", "platformid"}
@@ -1095,6 +1097,33 @@ def _run_endpoint_skill(skill: dict[str, Any], endpoints: list[Endpoint], identi
                             findings.append(_finding(skill, ep.url, f"Isolamento: sem baseline autenticado (HTTP {bsc}) — não confirmável sem credencial; variáveis de escopo detectadas: {[v for v,_ in swaps]}.", identity.key, severity="info", verification_status="advisory"))
                             reported = True
                     continue
+                if skill_id == "skill.api.contract_conformance":
+                    # Autônomo: compara a resposta viva com o contrato OpenAPI.
+                    if not _CONFORMANCE_INDEX:
+                        continue
+                    cmethod = _probe_method(skill, ep)
+                    key = f"{cmethod} {_path_template_key(urlparse(ep.url).path)}"
+                    entry = _CONFORMANCE_INDEX.get(key) or _CONFORMANCE_INDEX.get(f"GET {_path_template_key(urlparse(ep.url).path)}")
+                    if not entry:
+                        continue
+                    attempts += 1
+                    result = _request(session, cmethod, ep.url, identity, timeout=timeout)
+                    observations.append(_response_observation(skill, ep, identity, cmethod, result))
+                    cresp = result.get("response")
+                    if cresp is None:
+                        continue
+                    csc = int(cresp.status_code)
+                    cbody = result.get("response_body") or (cresp.text or "")
+                    try:
+                        from app.services.api_conformance import check_response
+                        issues = check_response(entry, csc, cbody)
+                    except Exception:
+                        issues = []
+                    for iss in issues:
+                        extra = _response_evidence(result, cmethod)
+                        extra.update({"conformance_issue": iss.get("type"), "http_status": csc})
+                        findings.append(_finding(skill, ep.url, f"Divergência de contrato ({iss.get('type')}): {iss.get('detail')}", identity.key, severity=str(iss.get("severity") or "medium"), verification_status="confirmed", evidence_extra=extra))
+                    continue
                 if skill_id == "skill.api.schema_fuzzing":
                     for (fmethod, furl, fbody, label) in _fuzz_cases(ep, allow_mutations, test_variables):
                         attempts += 1
@@ -1205,17 +1234,30 @@ def _run_endpoint_skill(skill: dict[str, Any], endpoints: list[Endpoint], identi
                 if skill_id == "skill.api.broken_authentication" and response is not None and status_code == 200 and any(token in ep.url.lower() for token in ("/me", "profile", "account", "userinfo")):
                     findings.append(_finding(skill, ep.url, "Endpoint sensível retornou 200 sem autenticação.", identity.key, evidence_extra=_response_evidence(baseline, method)))
                 elif skill_id in {"skill.api.sensitive_data_exposure", "skill.api.bopla"} and response is not None and status_code == 200:
+                    # 1) Classificação por VALOR (autônoma): CPF/CNPJ/cartão(Luhn)/
+                    # JWT/segredo reais no corpo — não só nome de campo.
+                    try:
+                        from app.services.api_sensitive_data import classify as _classify_sensitive
+                        _cls = _classify_sensitive(body)
+                    except Exception:
+                        _cls = {"types": {}, "worst_severity": "", "total": 0}
+                    if _cls.get("types"):
+                        types_desc = ", ".join(f"{t}×{d['count']}" for t, d in _cls["types"].items())
+                        extra = _response_evidence(baseline, method)
+                        extra.update({"sensitive_values": _cls["types"], "worst_severity": _cls["worst_severity"], "total_values": _cls["total"]})
+                        findings.append(_finding(skill, ep.url, f"Resposta expõe DADOS sensíveis por valor ({types_desc}) — exposição de dados (OWASP API3).", identity.key, severity=_cls.get("worst_severity") or "medium", verification_status="confirmed", evidence_extra=extra))
+                    # 2) Nome de campo sensível (sinal complementar).
                     fields: set[str] = set()
                     try:
                         fields = _extract_json_field_names(response.json())
                     except Exception:
                         fields = set()
                     sensitive_fields = sorted(field for field in fields if SENSITIVE_RE.search(field))
-                    if sensitive_fields:
+                    if sensitive_fields and not _cls.get("types"):
                         extra = _response_evidence(baseline, method)
                         extra.update({"sensitive_fields": sensitive_fields[:30]})
                         findings.append(_finding(skill, ep.url, f"Resposta expõe campos sensíveis: {', '.join(sensitive_fields[:12])}.", identity.key, verification_status="confirmed", evidence_extra=extra))
-                    elif SENSITIVE_RE.search(body[:8000]):
+                    elif SENSITIVE_RE.search(body[:8000]) and not _cls.get("types") and not sensitive_fields:
                         findings.append(_finding(skill, ep.url, "Resposta contém padrão sensível ou stack trace.", identity.key, verification_status="candidate", evidence_extra=_response_evidence(baseline, method)))
                 elif skill_id in {"skill.api.sql_injection", "skill.api.command_injection", "skill.api.ssrf"} and response is not None and ep.parameters:
                     payload = str((skill.get("payloads") or ["'"])[0])
@@ -1339,9 +1381,21 @@ def run_api_top20_for_scan(scan_id: int, target: str, *, api_skill_id: str | Non
         allow_mutations = bool(api_config.get("allow_mutations"))
         # Route all probes through a headless Caido (traffic/replay engine) when
         # the scan opted in and Caido is reachable; otherwise direct requests.
-        global _CAIDO_CLIENT, _RATE_LIMIT_BURST
+        global _CAIDO_CLIENT, _RATE_LIMIT_BURST, _CONFORMANCE_INDEX
         _CAIDO_CLIENT = None
         _RATE_LIMIT_BURST = int(api_config.get("rate_limit_burst") or 30)
+        # Build the OpenAPI contract index once (for conformance checking).
+        _CONFORMANCE_INDEX = {}
+        try:
+            import json as _json
+            import os as _os
+            _spec_path = str(api_config.get("inline_spec_file") or "")
+            if _spec_path and _os.path.exists(_spec_path):
+                from app.services.api_conformance import build_conformance_index
+                with open(_spec_path) as _sf:
+                    _CONFORMANCE_INDEX = build_conformance_index(_json.load(_sf))
+        except Exception:
+            _CONFORMANCE_INDEX = {}
         caido_status = {"enabled": False, "detail": "not_configured"}
         try:
             from app.services.caido_client import get_caido_client_for_config

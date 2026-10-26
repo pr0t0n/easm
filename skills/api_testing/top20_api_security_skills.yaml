@@ -412,3 +412,18 @@ skills:
       vuln_family: broken_access_control
       finding_class: tenant_isolation_bypass
       severity: critical
+  - id: skill.api.contract_conformance
+    priority: 24
+    name: Contract Conformance (spec vs live)
+    objective: "Compara a resposta viva com o contrato OpenAPI (autônomo, sem credencial): status não-documentado, campos de resposta FORA do contrato (over-exposure/drift) e campos obrigatórios ausentes. Complementa o shadow: a implementação divergindo do próprio contrato."
+    typical_criticality: medium
+    owasp: API9:2023
+    categories: [inventory, conformance, data_exposure]
+    requires_authorization: false
+    safe_methods: [GET, HEAD]
+    selectors: {}
+    evidence_required: [declared_contract, live_response, divergence]
+    finding:
+      vuln_family: improper_inventory
+      finding_class: contract_conformance_divergence
+      severity: medium
