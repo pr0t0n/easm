@@ -198,7 +198,15 @@ html {
 html,
 body {
   width: 100%;
+  margin: 0;
   overflow-x: hidden;
+}
+
+html.api-ops-active,
+html.api-ops-active body,
+html.api-ops-active #root {
+  background: #000 !important;
+  color-scheme: dark;
 }
 
 body {

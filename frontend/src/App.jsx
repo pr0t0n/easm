@@ -62,6 +62,11 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    document.documentElement.classList.toggle("api-ops-active", apiOperationsRoute);
+    return () => document.documentElement.classList.remove("api-ops-active");
+  }, [apiOperationsRoute]);
+
+  useEffect(() => {
     const syncMe = async () => {
       if (!authStore.token) {
         setReady(true);
