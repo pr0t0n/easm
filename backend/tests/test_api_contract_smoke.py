@@ -8,6 +8,8 @@ def test_openapi_exposes_unified_control_plane_and_paginated_report_contract():
     paths = schema["paths"]
     assert "/api/dashboard/control-plane" in paths
     assert "/api/pentest/scans/{scan_id}/report-contract" in paths
+    assert "/api/apitest/fuzz-library/catalog" in paths
+    assert "/api/apitest/fuzz-library/sample" in paths
     parameters = paths["/api/pentest/scans/{scan_id}/report-contract"]["get"]["parameters"]
     assert {parameter["name"] for parameter in parameters} >= {"findings_limit", "findings_offset"}
 

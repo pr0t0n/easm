@@ -16,8 +16,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, require_admin
@@ -62,6 +62,12 @@ class ApiTestCreate(BaseModel):
     # {"requestId": "<uuid válido>", "cpf": "12345678900"}). Necessário p/ testes
     # como optIn, que exigem um REQUEST_ID válido de transação.
     variables: dict[str, Any] | None = None
+    # Optional deep corpus mode. The library contains 10,000 deterministic
+    # synthetic candidates; this budget controls how many are selected per
+    # variable, so creating a test never implies 10,000 network requests.
+    fuzz_profile: str = "safe"
+    fuzz_library_size: int = Field(default=10_000, ge=1_000, le=10_000)
+    fuzz_library_budget: int = Field(default=0, ge=0, le=64)
     access_group_id: int | None = None
     access_group_name: str | None = None
     authorization_code: str | None = None
@@ -85,6 +91,9 @@ def _api_scan_payload(payload: ApiTestCreate) -> ScanCreate:
         # path/body preenchidas por nome (requestId, cpf, ...).
         "test_headers": {str(k): str(v) for k, v in (payload.headers or {}).items()},
         "test_variables": dict(payload.variables or {}),
+        "fuzz_profile": payload.fuzz_profile,
+        "fuzz_library_size": payload.fuzz_library_size,
+        "fuzz_library_budget": payload.fuzz_library_budget,
     }
     return ScanCreate(
         target_query=payload.target_url,
@@ -179,6 +188,41 @@ def api_test_catalog(current_user: User = Depends(get_current_user)):
             "is_bac": sid in BAC_SKILL_IDS,
         })
     return {"skills": skills, "total": len(skills), "bac_total": sum(1 for s in skills if s["is_bac"])}
+
+
+@router.get("/fuzz-library/catalog")
+def api_fuzz_library_catalog(
+    current_user: User = Depends(get_current_user),
+):
+    """Describe the built-in 10k OpenAPI variable corpus without returning all
+    payloads. Values are synthetic and intended for controlled, authorized API
+    testing only."""
+    from app.services.api_fuzz_corpus import corpus_catalog
+
+    return corpus_catalog()
+
+
+@router.get("/fuzz-library/sample")
+def api_fuzz_library_sample(
+    limit: int = Query(default=100, ge=1, le=500),
+    category: str | None = Query(default=None),
+    current_user: User = Depends(get_current_user),
+):
+    """Return a bounded, inspectable slice of the synthetic corpus for UI and
+    rule-authoring. The endpoint intentionally caps responses at 500 entries."""
+    from app.services.api_fuzz_corpus import build_openapi_variable_corpus
+
+    rows = list(build_openapi_variable_corpus())
+    if category:
+        wanted = category.strip().lower()
+        rows = [row for row in rows if str(row.get("category") or "").lower() == wanted]
+    return {
+        "version": "openapi-variable-corpus-v1",
+        "total_available": len(rows),
+        "limit": limit,
+        "category": category,
+        "items": rows[:limit],
+    }
 
 
 def _get_api_job(db: Session, current_user: User, test_id: int) -> ScanJob:

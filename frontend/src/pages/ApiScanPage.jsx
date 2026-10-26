@@ -50,6 +50,9 @@ export default function ApiScanPage() {
   const [headerName, setHeaderName] = useState("");
   const [headerValue, setHeaderValue] = useState("");
   const [headerValueB, setHeaderValueB] = useState("");
+  const [fuzzProfile, setFuzzProfile] = useState("safe");
+  const [fuzzLibraryBudget, setFuzzLibraryBudget] = useState(16);
+  const [fuzzLibraryCatalog, setFuzzLibraryCatalog] = useState(null);
 
   const [catalog, setCatalog] = useState([]);
   const [showCatalog, setShowCatalog] = useState(false);
@@ -85,6 +88,9 @@ export default function ApiScanPage() {
     client.get("/api/apitest/catalog")
       .then(({ data }) => setCatalog(Array.isArray(data?.skills) ? data.skills : []))
       .catch(() => {});
+    client.get("/api/apitest/fuzz-library/catalog")
+      .then(({ data }) => setFuzzLibraryCatalog(data || null))
+      .catch(() => {});
   }, []);
 
   function buildAuth() {
@@ -117,6 +123,9 @@ export default function ApiScanPage() {
         spec_type: specType,
         allow_mutations: allowMutations,
         active_level: "safe",
+        fuzz_profile: fuzzProfile,
+        fuzz_library_size: 10000,
+        fuzz_library_budget: fuzzProfile === "deep" ? Number(fuzzLibraryBudget || 16) : 0,
         scope_authorization_attested: attested,
         access_group_id: accessGroupId ? Number(accessGroupId) : undefined,
       };
@@ -290,6 +299,34 @@ export default function ApiScanPage() {
               style={{ background: "none", border: "none", color: "var(--brand, #2563eb)", cursor: "pointer", fontSize: 11.5, fontWeight: 700, padding: 0 }}>+ adicionar</button>
           </div>
         ))}
+
+        <div style={{ marginTop: 14, borderTop: "1px solid var(--border)", paddingTop: 12 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            <label style={{ ...label, marginBottom: 0 }}>Profundidade do fuzzing</label>
+            <select style={{ ...input, width: "auto" }} value={fuzzProfile}
+              onChange={(e) => {
+                const value = e.target.value;
+                setFuzzProfile(value);
+                if (value === "deep" && !fuzzLibraryBudget) setFuzzLibraryBudget(16);
+              }}>
+              <option value="safe">Safe — payloads essenciais</option>
+              <option value="deep">Deep — biblioteca de 10.000 variáveis</option>
+            </select>
+            {fuzzProfile === "deep" && (
+              <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12, color: "var(--ink)" }}>
+                Candidatos por variável
+                <input style={{ ...input, width: 78 }} type="number" min="1" max="64" value={fuzzLibraryBudget}
+                  onChange={(e) => setFuzzLibraryBudget(Math.max(1, Math.min(64, Number(e.target.value) || 1)))} />
+              </label>
+            )}
+            <span className="sk-mono" style={{ color: "var(--ink-muted)", fontSize: 11 }}>
+              {fuzzLibraryCatalog?.size ? `${fuzzLibraryCatalog.size.toLocaleString("pt-BR")} candidatos sintéticos` : "10.000 candidatos sintéticos"}
+            </span>
+          </div>
+          <div style={{ color: "var(--ink-muted)", fontSize: 11, marginTop: 6 }}>
+            O modo Deep seleciona valores por tipo, formato, nome e restrições do OpenAPI; o orçamento limita as requisições e não envia os 10.000 de uma vez.
+          </div>
+        </div>
 
         <div style={{ display: "flex", alignItems: "center", gap: 18, marginTop: 14, flexWrap: "wrap" }}>
           <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12.5, color: "var(--ink)", cursor: "pointer" }}>

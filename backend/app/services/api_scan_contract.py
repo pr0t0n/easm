@@ -56,6 +56,39 @@ def normalize_api_scan_config(
     spec_payload = source.get("spec_payload") if isinstance(source.get("spec_payload"), dict) else None
     enabled = bool(source.get("enabled") or spec_url or spec_payload)
     contexts = api_execution_contexts(auth_config)
+    # Header/body variables are supplied explicitly by the operator for a
+    # controlled replay (for example, the public flow's session context and a
+    # synthetic requestId).  Preserve them through normalization; dropping
+    # them here makes the API-test UI appear configured while the worker runs
+    # anonymously with no way to reproduce a stateful flow.
+    raw_headers = source.get("test_headers")
+    test_headers = {
+        str(key): str(value)
+        for key, value in raw_headers.items()
+        if str(key).strip()
+    } if isinstance(raw_headers, dict) else {}
+    raw_variables = source.get("test_variables")
+    test_variables = {
+        str(key): value
+        for key, value in raw_variables.items()
+        if str(key).strip()
+    } if isinstance(raw_variables, dict) else {}
+    try:
+        fuzz_library_size = max(1_000, min(int(source.get("fuzz_library_size", 10_000)), 10_000))
+    except (TypeError, ValueError):
+        fuzz_library_size = 10_000
+    try:
+        # This is a per-variable candidate budget, not a request count for the
+        # whole scan. Keep it bounded so an operator cannot accidentally turn
+        # one endpoint into an unbounded load test.
+        fuzz_library_budget = max(0, min(int(source.get("fuzz_library_budget", 0)), 64))
+    except (TypeError, ValueError):
+        fuzz_library_budget = 0
+    fuzz_profile = str(source.get("fuzz_profile") or ("deep" if fuzz_library_budget else "safe")).strip().lower()
+    if fuzz_profile not in {"safe", "deep"}:
+        fuzz_profile = "safe"
+    if fuzz_profile == "deep" and fuzz_library_budget == 0:
+        fuzz_library_budget = 16
     return {
         "enabled": enabled,
         "version": "api-scan-complete-v1",
@@ -69,6 +102,11 @@ def normalize_api_scan_config(
         "anonymous_always_on": True,
         "allow_mutations": bool(source.get("allow_mutations", False)),
         "active_level": str(source.get("active_level") or "safe").strip().lower() or "safe",
+        "test_headers": test_headers,
+        "test_variables": test_variables,
+        "fuzz_profile": fuzz_profile,
+        "fuzz_library_size": fuzz_library_size,
+        "fuzz_library_budget": fuzz_library_budget,
     }
 
 

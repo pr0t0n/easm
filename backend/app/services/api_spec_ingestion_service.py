@@ -212,12 +212,20 @@ def _ingest_openapi(inv: OffensiveInventoryService, spec: dict[str, Any], source
                         # the documented shape (example/enum/format) instead of
                         # the literal placeholder.
                         sample_value=_param_sample_value(param, schema),
-                        metadata={"format": schema.get("format"), "enum": schema.get("enum")} if (schema.get("format") or schema.get("enum")) else None,
+                        metadata=_parameter_schema_metadata(param, schema),
                         source_tool="api-spec",
                     )
             request_body = (operation or {}).get("requestBody") if isinstance(operation, dict) else {}
-            for name in _schema_property_names(request_body):
-                inv.upsert_parameter(ep, name, location="json", source_tool="api-spec")
+            for name, property_schema in _schema_properties(request_body):
+                inv.upsert_parameter(
+                    ep,
+                    name,
+                    location="json",
+                    type_hint=str(property_schema.get("type") or ""),
+                    sample_value=_param_sample_value({}, property_schema),
+                    metadata=_parameter_schema_metadata({}, property_schema),
+                    source_tool="api-spec",
+                )
             count += 1
     return count
 
@@ -306,13 +314,39 @@ def _walk_postman_items(items: list[Any]) -> list[dict[str, Any]]:
     return out
 
 
-def _schema_property_names(node: Any) -> list[str]:
+def _parameter_schema_metadata(param: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any]:
+    """Persist the validation-relevant OpenAPI constraints with a variable.
+
+    OffensiveParameter already has a JSON metadata column, so this does not
+    require a migration and keeps the fuzz runner aware of examples, formats,
+    enums and boundaries after ingestion.
+    """
+    keys = (
+        "type", "format", "default", "example", "examples", "enum", "minimum", "maximum",
+        "exclusiveMinimum", "exclusiveMaximum", "minLength", "maxLength", "minItems", "maxItems",
+        "pattern", "nullable", "items", "$ref",
+    )
+    out = {"schema": {key: schema[key] for key in keys if key in schema}}
+    if param.get("example") not in (None, "", [], {}):
+        out["example"] = param["example"]
+    # Keep the flattened fields for older consumers and simple SQL/reporting.
+    for key in ("format", "enum", "default", "example", "examples", "pattern", "minimum", "maximum", "minLength", "maxLength"):
+        if key in schema:
+            out[key] = schema[key]
+    return out
+
+
+def _schema_properties(node: Any) -> list[tuple[str, dict[str, Any]]]:
     if not isinstance(node, dict):
         return []
-    names = []
+    properties: list[tuple[str, dict[str, Any]]] = []
     content = node.get("content") or {}
     for media in content.values():
         schema = media.get("schema") if isinstance(media, dict) else {}
         props = (schema or {}).get("properties") or {}
-        names.extend(str(k) for k in props.keys())
-    return names
+        properties.extend((str(k), value if isinstance(value, dict) else {}) for k, value in props.items())
+    return properties
+
+
+def _schema_property_names(node: Any) -> list[str]:
+    return [name for name, _schema in _schema_properties(node)]

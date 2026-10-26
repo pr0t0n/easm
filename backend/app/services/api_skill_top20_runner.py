@@ -142,7 +142,7 @@ def _canonical_endpoint_url(url: str, target_base: str) -> str:
     return url
 
 
-def _params_by_endpoint(db: Any, endpoint_ids: list[int]) -> dict[int, list[dict[str, str]]]:
+def _params_by_endpoint(db: Any, endpoint_ids: list[int]) -> dict[int, list[dict[str, Any]]]:
     if not endpoint_ids:
         return {}
     param_rows = (
@@ -150,14 +150,19 @@ def _params_by_endpoint(db: Any, endpoint_ids: list[int]) -> dict[int, list[dict
         .filter(OffensiveParameter.endpoint_id.in_(endpoint_ids))
         .all()
     )
-    by_endpoint: dict[int, list[dict[str, str]]] = {}
+    by_endpoint: dict[int, list[dict[str, Any]]] = {}
     for param in param_rows:
+        metadata = dict(param.parameter_metadata or {}) if isinstance(param.parameter_metadata, dict) else {}
+        schema = metadata.get("schema") if isinstance(metadata.get("schema"), dict) else {}
         by_endpoint.setdefault(int(param.endpoint_id), []).append({
             "name": str(param.name or ""),
             "location": str(param.location or "query"),
             "sample_value": str(param.sample_value or ""),
             "type_hint": str(param.type_hint or ""),
             "risk_hint": str(param.risk_hint or ""),
+            "format": str(metadata.get("format") or schema.get("format") or ""),
+            "enum": list(metadata.get("enum") or schema.get("enum") or []),
+            "schema": schema or metadata,
         })
     return by_endpoint
 
@@ -220,7 +225,12 @@ def _looks_uuid(name: str, sample: str, type_hint: str) -> bool:
     return s.count("-") >= 4 and len(s) >= 32
 
 
-def _path_param_candidates(param: dict[str, Any]) -> list[str]:
+def _path_param_candidates(
+    param: dict[str, Any],
+    *,
+    fuzz_library_budget: int = 0,
+    fuzz_library_size: int = 10_000,
+) -> list[str]:
     """Values to try for a path variable. Delegates to the schema-driven fuzz
     generator (format-valid samples + IDOR/BOLA enumeration) instead of the old
     ~6 hand-rolled values; capped for path expansion to bound request volume."""
@@ -229,8 +239,14 @@ def _path_param_candidates(param: dict[str, Any]) -> list[str]:
         res: list[str] = []
         seen: set[str] = set()
         # Keep only the useful classes for a path id (valid + id-enumeration).
-        for value, label in fuzz_values_for_param(param, cap=12):
-            if not (label.startswith("valid") or label.startswith("idor")):
+        for value, label in fuzz_values_for_param(
+            param,
+            cap=12,
+            library_budget=fuzz_library_budget,
+            library_size=fuzz_library_size,
+        ):
+            library_path_value = label.startswith(("library:identifier", "library:uuid", "library:integer", "library:tenant"))
+            if not (label.startswith("valid") or label.startswith("idor") or library_path_value):
                 continue
             v = str(value)
             if v and "{" not in v and v not in seen:
@@ -263,7 +279,13 @@ def _path_param_candidates(param: dict[str, Any]) -> list[str]:
     return res2[:6]
 
 
-def _expand_templated_endpoints(endpoints: list[Endpoint], test_variables: dict[str, Any] | None = None) -> list[Endpoint]:
+def _expand_templated_endpoints(
+    endpoints: list[Endpoint],
+    test_variables: dict[str, Any] | None = None,
+    *,
+    fuzz_library_budget: int = 0,
+    fuzz_library_size: int = 10_000,
+) -> list[Endpoint]:
     """Expand each endpoint with {path-vars} into the template PLUS concrete
     variants (enumerated/sample values) so skills probe real object URLs. A
     value supplied in test_variables (ex.: um requestId válido) é usado primeiro,
@@ -280,7 +302,11 @@ def _expand_templated_endpoints(endpoints: list[Endpoint], test_variables: dict[
         params_by_name = {str(p.get("name")): p for p in ep.parameters if str(p.get("location")) == "path"}
         candidates = {}
         for ph in placeholders:
-            cands = _path_param_candidates(params_by_name.get(ph, {"name": ph}))
+            cands = _path_param_candidates(
+                params_by_name.get(ph, {"name": ph}),
+                fuzz_library_budget=fuzz_library_budget,
+                fuzz_library_size=fuzz_library_size,
+            )
             if ph in test_variables and str(test_variables[ph]):
                 v = str(test_variables[ph])
                 cands = [v] + [c for c in cands if c != v]
@@ -801,7 +827,14 @@ _BYPASS_FLAGS = ["optIn", "optin", "skip", "skipValidation", "skipLiveness", "sk
                  "verified", "approved", "isValid", "validated"]
 
 
-def _fuzz_cases(ep: Endpoint, allow_mutations: bool, test_variables: dict[str, Any] | None = None) -> list[tuple[str, str, Any, str]]:
+def _fuzz_cases(
+    ep: Endpoint,
+    allow_mutations: bool,
+    test_variables: dict[str, Any] | None = None,
+    *,
+    fuzz_library_budget: int = 0,
+    fuzz_library_size: int = 10_000,
+) -> list[tuple[str, str, Any, str]]:
     """Property/schema fuzzing probes: malformed/boundary/injection values for
     EVERY declared query param and request-body field, from the schema-driven
     generator. Returns (method, url, json_body, label). Body fuzzing (mutating)
@@ -815,8 +848,21 @@ def _fuzz_cases(ep: Endpoint, allow_mutations: bool, test_variables: dict[str, A
     def attack_values(param: dict[str, Any], n: int) -> list[tuple[Any, str]]:
         if fuzz_values_for_param is None:
             return [(p, f"query:{param.get('name')}") for p in _FUZZ_QUERY_PAYLOADS[:n]]
-        vals = [(v, lb) for (v, lb) in fuzz_values_for_param(param, cap=12) if not lb.startswith(("valid", "idor"))]
-        return vals[:n]
+        vals = fuzz_values_for_param(
+            param,
+            # Ask for enough candidates to get past the valid/IDOR prefix for
+            # object-like parameters; the endpoint budget below still bounds
+            # emitted requests.
+            cap=48,
+            library_budget=fuzz_library_budget,
+            library_size=fuzz_library_size,
+        )
+        regular = [(v, lb) for (v, lb) in vals if not lb.startswith(("valid", "idor", "library:"))]
+        library = [(v, lb) for (v, lb) in vals if lb.startswith("library:")]
+        # Keep the classic payloads and append the requested library slice.
+        # Endpoint-level slicing below still protects the target from a large
+        # per-parameter budget.
+        return regular[:n] + library[:max(0, min(fuzz_library_budget, 16))]
 
     # Query fuzzing: every declared query parameter (spec keeps params in
     # ep.parameters, not the URL) plus any existing URL query key.
@@ -979,7 +1025,17 @@ def _worst_sev(sevs: list[str]) -> str:
     return best
 
 
-def _run_endpoint_skill(skill: dict[str, Any], endpoints: list[Endpoint], identities: list[Identity], limits: dict[str, Any], allow_mutations: bool, test_variables: dict[str, Any] | None = None) -> dict[str, Any]:
+def _run_endpoint_skill(
+    skill: dict[str, Any],
+    endpoints: list[Endpoint],
+    identities: list[Identity],
+    limits: dict[str, Any],
+    allow_mutations: bool,
+    test_variables: dict[str, Any] | None = None,
+    *,
+    fuzz_library_budget: int = 0,
+    fuzz_library_size: int = 10_000,
+) -> dict[str, Any]:
     max_endpoints = 0
     timeout = int(limits.get("timeout_seconds") or DEFAULT_TIMEOUT_SECONDS)
     all_matching = _select_endpoints(skill, endpoints, 0)
@@ -1220,7 +1276,13 @@ def _run_endpoint_skill(skill: dict[str, Any], endpoints: list[Endpoint], identi
                             findings.append(_finding(skill, durl, f"Versão de API antiga acessível: /v{older}/ responde HTTP {resp.status_code} (pode não ter os controles da /v{cur}; OWASP API9/shadow).", identity.key, severity="medium", verification_status="confirmed", evidence_extra=_response_evidence(result, method)))
                     continue
                 if skill_id == "skill.api.schema_fuzzing":
-                    for (fmethod, furl, fbody, label) in _fuzz_cases(ep, allow_mutations, test_variables):
+                    for (fmethod, furl, fbody, label) in _fuzz_cases(
+                        ep,
+                        allow_mutations,
+                        test_variables,
+                        fuzz_library_budget=fuzz_library_budget,
+                        fuzz_library_size=fuzz_library_size,
+                    ):
                         attempts += 1
                         result = _request(session, fmethod, furl, identity, json_body=fbody, timeout=timeout)
                         obs = _response_observation(skill, ep, identity, fmethod, result)
@@ -1254,8 +1316,10 @@ def _run_endpoint_skill(skill: dict[str, Any], endpoints: list[Endpoint], identi
                     header_params = [p for p in ep.parameters if str(p.get("location")) == "header" and p.get("name")]
                     for hp in header_params[:6]:
                         hn = str(hp.get("name"))
-                        vals = (_fv(hp, cap=8) if _fv else [(p, "hdr") for p in _FUZZ_QUERY_PAYLOADS])
-                        for value, label in [(v, l) for (v, l) in vals if not str(l).startswith(("valid", "idor"))][:4]:
+                        vals = (_fv(hp, cap=32, library_budget=fuzz_library_budget, library_size=fuzz_library_size) if _fv else [(p, "hdr") for p in _FUZZ_QUERY_PAYLOADS])
+                        _hdr_regular = [(v, l) for (v, l) in vals if not str(l).startswith(("valid", "idor", "library:"))]
+                        _hdr_library = [(v, l) for (v, l) in vals if str(l).startswith("library:")]
+                        for value, label in (_hdr_regular[:4] + _hdr_library[:max(0, min(fuzz_library_budget, 8))]):
                             method = _probe_method(skill, ep)
                             attempts += 1
                             result = _request(session, method, ep.url, identity, headers={hn: str(value)}, timeout=timeout)
@@ -1484,6 +1548,14 @@ def run_api_top20_for_scan(scan_id: int, target: str, *, api_skill_id: str | Non
         scope = authorized_scope_for_scan(db, job.id)
         test_headers = {str(k): str(v) for k, v in (api_config.get("test_headers") or {}).items()}
         test_variables = {str(k): v for k, v in (api_config.get("test_variables") or {}).items()}
+        try:
+            fuzz_library_budget = max(0, min(int(api_config.get("fuzz_library_budget") or 0), 64))
+        except (TypeError, ValueError):
+            fuzz_library_budget = 0
+        try:
+            fuzz_library_size = max(1_000, min(int(api_config.get("fuzz_library_size") or 10_000), 10_000))
+        except (TypeError, ValueError):
+            fuzz_library_size = 10_000
         # Per-scan globals + OpenAPI doc/index (declared before any use below).
         global _CAIDO_CLIENT, _RATE_LIMIT_BURST, _CONFORMANCE_INDEX, _SPEC_DOC, _OP_SCHEMAS
         _CAIDO_CLIENT = None
@@ -1506,7 +1578,12 @@ def run_api_top20_for_scan(scan_id: int, target: str, *, api_skill_id: str | Non
             _CONFORMANCE_INDEX = {}
             _SPEC_DOC = {}
             _OP_SCHEMAS = {}
-        endpoints = _expand_templated_endpoints(_collect_endpoints(db, job, scope), test_variables)
+        endpoints = _expand_templated_endpoints(
+            _collect_endpoints(db, job, scope),
+            test_variables,
+            fuzz_library_budget=fuzz_library_budget,
+            fuzz_library_size=fuzz_library_size,
+        )
         # AUTONOMIA SEM SPEC: se não há OpenAPI, derive a superfície do TRÁFEGO
         # observado (técnica mitmproxy2swagger) — permite testar qualquer API só
         # observando/crawleando, sem contrato fornecido.
@@ -1611,7 +1688,16 @@ def run_api_top20_for_scan(scan_id: int, target: str, *, api_skill_id: str | Non
                     ))
                 result = {"status": "completed", "selected": len(endpoints) + len(discovered), "attempts": len(discovered), "findings": findings}
             else:
-                result = _run_endpoint_skill(skill, endpoints, identities, limits, allow_mutations, test_variables)
+                result = _run_endpoint_skill(
+                    skill,
+                    endpoints,
+                    identities,
+                    limits,
+                    allow_mutations,
+                    test_variables,
+                    fuzz_library_budget=fuzz_library_budget,
+                    fuzz_library_size=fuzz_library_size,
+                )
             all_findings.extend(result.get("findings") or [])
             all_observations.extend(result.get("observations") or [])
             skill_results.append({

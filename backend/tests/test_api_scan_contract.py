@@ -56,6 +56,36 @@ def test_api_scan_state_unlocks_openapi_tools_without_storing_inline_payload() -
     assert "spec_payload" not in state["api_scan_config"]
 
 
+def test_api_scan_preserves_explicit_replay_context() -> None:
+    config = normalize_api_scan_config(
+        {
+            "enabled": True,
+            "test_headers": {"Authorization": "Bearer session-token", "": "ignored"},
+            "test_variables": {"requestId": "synthetic-request-id", "": "ignored"},
+        },
+        None,
+    )
+
+    assert config["test_headers"] == {"Authorization": "Bearer session-token"}
+    assert config["test_variables"] == {"requestId": "synthetic-request-id"}
+
+
+def test_api_scan_normalizes_deep_fuzz_library_budget() -> None:
+    config = normalize_api_scan_config(
+        {
+            "enabled": True,
+            "fuzz_profile": "deep",
+            "fuzz_library_size": 999999,
+            "fuzz_library_budget": 999,
+        },
+        None,
+    )
+
+    assert config["fuzz_profile"] == "deep"
+    assert config["fuzz_library_size"] == 10_000
+    assert config["fuzz_library_budget"] == 64
+
+
 def test_api_spec_url_must_match_authorized_scope() -> None:
     assert api_spec_url_in_scope("https://api.example.test/openapi.json", ["example.test"]) is True
     assert api_spec_url_in_scope("https://other.test/openapi.json", ["example.test"]) is False

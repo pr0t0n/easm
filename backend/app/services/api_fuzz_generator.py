@@ -87,21 +87,31 @@ def _format_valid_values(fmt: str, name: str) -> list[str]:
     return []
 
 
-def fuzz_values_for_param(param: dict[str, Any], *, aggressive: bool = False, cap: int = 24) -> list[tuple[Any, str]]:
+def fuzz_values_for_param(
+    param: dict[str, Any],
+    *,
+    aggressive: bool = False,
+    cap: int = 24,
+    library_budget: int = 0,
+    library_size: int = 10_000,
+) -> list[tuple[Any, str]]:
     """Return ``(value, label)`` fuzz candidates for one parameter/field.
 
     ``param`` carries at least ``name`` and optionally ``type_hint``/``schema``/
     ``format``/``enum``/``sample_value``. Produces format-valid samples, enum
     values, boundary values, type-confusion and injection payloads, plus id
     enumeration for id-like names. ``cap`` bounds the count (safe default);
-    ``aggressive`` lifts it and adds the heavy payloads.
+    ``aggressive`` lifts it and adds the heavy payloads. ``library_budget``
+    opts into a bounded slice of the deterministic 10k OpenAPI corpus; the
+    corpus is never expanded into 10k requests implicitly.
     """
     name = str(param.get("name") or "")
     schema = param.get("schema") if isinstance(param.get("schema"), dict) else {}
     type_hint = str(param.get("type_hint") or schema.get("type") or "").lower()
     fmt = str(param.get("format") or schema.get("format") or "")
     enum = param.get("enum") or schema.get("enum") or []
-    sample = str(param.get("sample_value") or "").strip()
+    sample_raw = param.get("sample_value")
+    sample = str(sample_raw or "").strip()
     nlow = name.lower()
 
     out: list[tuple[Any, str]] = []
@@ -117,6 +127,10 @@ def fuzz_values_for_param(param: dict[str, Any], *, aggressive: bool = False, ca
     # 1) valid-ish values (so a well-formed request can reach the object layer)
     if sample and "{" not in sample:
         add(sample, "valid:spec-example")
+    for key in ("example", "default"):
+        candidate = param.get(key, schema.get(key))
+        if candidate not in (None, "", [], {}):
+            add(candidate, f"valid:{key}")
     for v in _format_valid_values(fmt, name):
         add(v, f"valid:{fmt or 'fmt'}")
     for v in list(enum)[:8]:
@@ -132,17 +146,52 @@ def fuzz_values_for_param(param: dict[str, Any], *, aggressive: bool = False, ca
     if base_type in ("integer", "number"):
         for v in _NUMBER_ATTACKS:
             add(v, "boundary:number")
+        for key, label, delta in (("minimum", "minimum", -1), ("maximum", "maximum", 1)):
+            if key in schema:
+                try:
+                    add(schema[key], f"boundary:{label}")
+                    add(float(schema[key]) + delta, f"boundary:{label}-outside")
+                except (TypeError, ValueError):
+                    pass
     else:
         for v in _STRING_ATTACKS[: (len(_STRING_ATTACKS) if aggressive else 14)]:
             add(v, "malformed:string")
+        for key, delta, label in (("minLength", -1, "minlength"), ("maxLength", 1, "maxlength")):
+            if key in schema:
+                try:
+                    length = max(0, int(schema[key]) + delta)
+                    add("A" * length, f"boundary:{label}")
+                except (TypeError, ValueError):
+                    pass
+        if schema.get("pattern"):
+            add("__pattern_break__", "boundary:pattern")
     for v in _TYPE_CONFUSION.get(base_type, _TYPE_CONFUSION["string"]):
         add(v, "type-confusion")
 
-    # Keep valid + idor first (most useful), then the rest, bounded by cap.
-    priority = {"valid": 0, "idor": 1}
-    out.sort(key=lambda t: priority.get(t[1].split(":")[0], 2))
-    limit = cap * 3 if aggressive else cap
-    return out[:limit]
+    if library_budget:
+        try:
+            from app.services.api_fuzz_corpus import select_corpus_values
+            for value, label in select_corpus_values(
+                {**param, "name": name, "type_hint": type_hint, "format": fmt},
+                budget=library_budget,
+                size=library_size,
+            ):
+                add(value, label)
+        except Exception:
+            # The built-in corpus is an enhancement; never make the safe
+            # legacy generator unavailable if an optional import fails.
+            pass
+
+    # Keep valid + idor first (most useful), then an explicitly requested
+    # library slice, then the built-in malformed payloads. This guarantees that
+    # opting into the corpus actually exercises it even for ID-like variables,
+    # which naturally have many valid/IDOR candidates already.
+    base_limit = cap * 3 if aggressive else cap
+    library_limit = max(0, min(int(library_budget or 0), 256))
+    valid_idor = [item for item in out if item[1].split(":")[0] in {"valid", "idor"}]
+    library = [item for item in out if item[1].startswith("library:")]
+    other = [item for item in out if item[1].split(":")[0] not in {"valid", "idor"} and not item[1].startswith("library:")]
+    return (valid_idor[:base_limit] + library[:library_limit] + other)[:base_limit + library_limit]
 
 
 def discover_variables(spec: Any) -> dict[str, list[dict[str, Any]]]:
@@ -177,7 +226,12 @@ def discover_variables(spec: Any) -> dict[str, list[dict[str, Any]]]:
                     found += leaves(vd, f"{nm}.", d + 1)
                 else:
                     found.append({"name": nm, "location": "body", "type_hint": str(vd.get("type") or ""),
-                                  "format": str(vd.get("format") or ""), "enum": vd.get("enum") or []})
+                                  "format": str(vd.get("format") or ""), "enum": vd.get("enum") or [],
+                                  "schema": {k: vd.get(k) for k in (
+                                      "type", "format", "default", "example", "examples", "enum",
+                                      "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum",
+                                      "minLength", "maxLength", "minItems", "maxItems", "pattern", "nullable",
+                                  ) if k in vd}})
             if "items" in schema:
                 found += leaves(schema["items"], prefix, d + 1)
             return found
@@ -196,7 +250,7 @@ def discover_variables(spec: Any) -> dict[str, list[dict[str, Any]]]:
                         sc = deref(pr.get("schema") or {})
                         vrs.append({"name": str(pr["name"]), "location": str(pr.get("in") or "query"),
                                     "type_hint": str(sc.get("type") or ""), "format": str(sc.get("format") or ""),
-                                    "enum": sc.get("enum") or []})
+                                    "enum": sc.get("enum") or [], "schema": sc})
                 rb = ((op.get("requestBody") or {}).get("content") or {})
                 for _ct, media in rb.items():
                     vrs += leaves((media or {}).get("schema", {}))
