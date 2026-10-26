@@ -105,6 +105,37 @@ class VariableStore:
         return list(self._lineage.values())
 
 
+_URL_RE = re.compile(r"https?://[^\s\"'<>\\)]+", re.I)
+
+
+def extract_urls_from_response(body: Any, *, in_scope_hosts: set[str] | None = None) -> list[str]:
+    """Feedback-driven discovery (Schemathesis/RESTler-style): harvest URLs the
+    API returns in its own response (HATEOAS links, requestProcessUrl, callbacks,
+    webhooks) so they can be probed as newly-discovered surface — autonomously,
+    no spec or credential needed. Optionally filtered to in-scope hosts."""
+    text = body if isinstance(body, str) else None
+    if text is None:
+        import json as _json
+        try:
+            text = _json.dumps(body)
+        except Exception:
+            return []
+    seen: dict[str, None] = {}
+    for m in _URL_RE.finditer(text or ""):
+        url = m.group(0).rstrip(".,);")
+        if in_scope_hosts:
+            try:
+                host = urlparse(url).hostname or ""
+            except Exception:
+                host = ""
+            if host and not any(host == h or host.endswith("." + h) for h in in_scope_hosts):
+                continue
+        seen.setdefault(url, None)
+        if len(seen) >= 50:
+            break
+    return list(seen.keys())
+
+
 def extract_ids_from_response(body: Any, store: VariableStore, source_endpoint: str) -> list[str]:
     """Harvest id-like fields from a JSON response body into the store.
     Returns the names captured. Scans top-level and one level of nesting."""
@@ -303,9 +334,16 @@ def run_generic_flow(
     for ep in endpoints:
         ep_by_id.setdefault(_node_id(ep), ep)
 
-    # 1) Creators: harvest REAL ids (POST/PUT creation gated by allow_mutations).
+    discovered_urls: dict[str, None] = {}
+    scope_hosts: set[str] = set()
+    for ep in endpoints:
+        h = urlparse(u_of(ep)).hostname
+        if h:
+            scope_hosts.add(h)
+
+    # 1) Creators: harvest REAL ids + URLs (POST/PUT creation gated by allow_mutations).
     for n in graph.get("nodes", []):
-        if not n.get("produces"):
+        if not (n.get("produces") or n.get("stage") == "create"):
             continue
         ep = ep_by_id.get(n["id"])
         if ep is None:
@@ -314,7 +352,10 @@ def run_generic_flow(
         if m in ("POST", "PUT", "PATCH") and not allow_mutations:
             continue
         r = request_fn(m, u_of(ep), primary, json_body=({} if m in ("POST", "PUT", "PATCH") else None))
-        caps = extract_ids_from_response(_json_body(r), store, _path_of(u_of(ep)))
+        jb = _json_body(r)
+        caps = extract_ids_from_response(jb, store, _path_of(u_of(ep)))
+        for u in extract_urls_from_response(jb if jb is not None else (r.get("response_body") or ""), in_scope_hosts=scope_hosts):
+            discovered_urls.setdefault(u, None)
         steps.append({"step": "create", "node": n["id"], "status": _status(r), "captured": caps})
 
     # 2) Consumers: cross-identity BOLA using harvested/seeded ids (read endpoints).
@@ -356,5 +397,25 @@ def run_generic_flow(
             if 200 <= sc < 300:
                 findings.append(fin(u_of(ep), f"Step state-changing aceitou corpo mínimo + flags de bypass ({list(_BYPASS_FLAGS)[:5]}) — HTTP {sc}: possível bypass de validação/regra de negócio (OWASP API6/API3).",
                                      "high", "API6:2023", True, sc, {"curl": r.get("curl", "")}))
+
+    # 4) Feedback-driven discovery: probe URLs the API returned in its own bodies
+    #    (requestProcessUrl/HATEOAS/callbacks). A 2xx on such a URL — especially as
+    #    a second identity — is undocumented/accessible surface worth flagging.
+    for url in list(discovered_urls)[:20]:
+        probe = request_fn("GET", url, primary)
+        psc = _status(probe)
+        steps.append({"step": "feedback_discovery", "url": url, "status": psc})
+        if 200 <= psc < 300:
+            try:
+                from app.services.api_sensitive_data import classify as _cls_fn
+                cls = _cls_fn(probe.get("response_body") or "")
+            except Exception:
+                cls = {"types": {}, "worst_severity": ""}
+            if cls.get("types"):
+                findings.append(fin(url, f"URL retornada pela API (feedback) acessível e expõe dados sensíveis ({', '.join(cls['types'])}) — HTTP {psc} (OWASP API3/API9).",
+                                     cls.get("worst_severity") or "medium", "API3:2023", True, psc, {"discovered_via": "response_feedback"}))
+            else:
+                findings.append(fin(url, f"URL retornada pela API (feedback) acessível sem controle aparente — HTTP {psc}; superfície não documentada (OWASP API9).",
+                                     "low", "API9:2023", True, psc, {"discovered_via": "response_feedback"}))
 
     return {"findings": findings, "variables": store.lineage(), "steps": steps, "dynamic_executed": bool(steps)}
