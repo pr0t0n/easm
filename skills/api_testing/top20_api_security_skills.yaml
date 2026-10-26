@@ -427,3 +427,50 @@ skills:
       vuln_family: improper_inventory
       finding_class: contract_conformance_divergence
       severity: medium
+  - id: skill.api.spec_security_audit
+    priority: 25
+    name: Spec Security Audit (OWASP, static)
+    objective: "Auditoria estática do OpenAPI (estilo vacuum/42Crunch, autônoma, sem rede): operações sem auth, additionalProperties não-restrito (mass assignment), respostas sem schema (over-exposure), parâmetros sem limites (resource consumption), transporte sem TLS, 401/429 não modelados. Design-time, roda só com o contrato."
+    typical_criticality: medium
+    owasp: API8:2023
+    categories: [design_time, spec_audit, governance]
+    requires_authorization: false
+    local_analysis: true
+    safe_methods: [GET]
+    selectors: {}
+    evidence_required: [contract_weakness]
+    finding:
+      vuln_family: security_misconfiguration
+      finding_class: spec_security_weakness
+      severity: medium
+  - id: skill.api.security_headers
+    priority: 26
+    name: Security Headers (missing/verbose)
+    objective: "Autônomo (sem credencial): verifica headers de segurança ausentes (X-Content-Type-Options, X-Frame-Options, HSTS, CSP) e headers verbosos (Server/X-Powered-By) que vazam tecnologia/versão."
+    typical_criticality: low
+    owasp: API8:2023
+    categories: [misconfiguration, headers]
+    requires_authorization: false
+    safe_methods: [GET, HEAD]
+    selectors: {}
+    evidence_required: [response_headers]
+    finding:
+      vuln_family: security_misconfiguration
+      finding_class: security_headers
+      severity: low
+  - id: skill.api.api_version_downgrade
+    priority: 27
+    name: API Version Downgrade (old version exposed)
+    objective: "Autônomo: reescreve /vN -> /v{N-1} e /v0 e verifica se uma versão ANTIGA da API ainda responde — versões legadas costumam não ter os controles novos (OWASP API9 / shadow). Carro-chefe do Akto."
+    typical_criticality: medium
+    owasp: API9:2023
+    categories: [inventory, versioning]
+    requires_authorization: false
+    safe_methods: [GET, HEAD]
+    selectors:
+      path_keywords: [v1, v2, v3, api]
+    evidence_required: [old_version_response]
+    finding:
+      vuln_family: improper_inventory
+      finding_class: api_version_downgrade
+      severity: medium

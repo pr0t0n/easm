@@ -494,6 +494,8 @@ _CAIDO_CLIENT: Any = None
 _RATE_LIMIT_BURST: int = 0
 # OpenAPI contract index for conformance checking (METHOD /template -> declared).
 _CONFORMANCE_INDEX: dict[str, Any] = {}
+# Full OpenAPI document (for static spec audit).
+_SPEC_DOC: dict[str, Any] = {}
 
 # Request headers that carry multi-tenant context (swapped by tenant_isolation).
 _TENANT_HEADER_KEYS = {"x-organization-id", "x-project-id", "x-tenant-id", "organizationid", "projectid", "x-platform-id", "platformid"}
@@ -937,6 +939,43 @@ def _guessable_identifier(id_params: list[str]) -> bool:
     return any(g in p.lower() for p in id_params for g in ("external", "order"))
 
 
+def _spec_audit_findings(skill: dict[str, Any]) -> list[dict[str, Any]]:
+    """Static OpenAPI security audit (vacuum/OWASP style), aggregated by issue
+    type so the report stays clean (one finding per weakness class)."""
+    if not _SPEC_DOC:
+        return []
+    try:
+        from app.services.api_spec_audit import audit_spec
+        issues = audit_spec(_SPEC_DOC)
+    except Exception:
+        return []
+    by_type: dict[str, list[dict[str, Any]]] = {}
+    for i in issues:
+        by_type.setdefault(i["type"], []).append(i)
+    findings: list[dict[str, Any]] = []
+    for t, items in by_type.items():
+        sev = _worst_sev([i.get("severity", "low") for i in items]) if "_worst_sev" in globals() else items[0].get("severity", "low")
+        owasp = items[0].get("owasp", "")
+        locs = [i["location"] for i in items][:12]
+        findings.append(_finding(
+            skill,
+            _SPEC_DOC.get("servers", [{}])[0].get("url", "") if _SPEC_DOC.get("servers") else "spec://audit",
+            f"Auditoria de contrato — {t} ({len(items)} ocorrência(s), {owasp}): {items[0].get('detail')} Ex.: {', '.join(locs[:5])}.",
+            "static", severity=sev, verification_status="confirmed",
+            evidence_extra={"audit_type": t, "owasp": owasp, "count": len(items), "locations": locs, "static_spec_audit": True},
+        ))
+    return findings
+
+
+def _worst_sev(sevs: list[str]) -> str:
+    rank = {"critical": 5, "high": 4, "medium": 3, "low": 2, "info": 1}
+    best = "low"
+    for s in sevs:
+        if rank.get(str(s).lower(), 0) > rank.get(best, 0):
+            best = str(s).lower()
+    return best
+
+
 def _run_endpoint_skill(skill: dict[str, Any], endpoints: list[Endpoint], identities: list[Identity], limits: dict[str, Any], allow_mutations: bool, test_variables: dict[str, Any] | None = None) -> dict[str, Any]:
     max_endpoints = 0
     timeout = int(limits.get("timeout_seconds") or DEFAULT_TIMEOUT_SECONDS)
@@ -945,7 +984,10 @@ def _run_endpoint_skill(skill: dict[str, Any], endpoints: list[Endpoint], identi
     selected_count = len(selected)
     matched_count = len(all_matching)
     if skill.get("local_analysis"):
-        findings = _decoded_jwt_findings(skill, identities, selected[0].url if selected else "")
+        if str(skill.get("id")) == "skill.api.spec_security_audit":
+            findings = _spec_audit_findings(skill)
+        else:
+            findings = _decoded_jwt_findings(skill, identities, selected[0].url if selected else "")
         return {
             "status": "completed",
             "selected": selected_count,
@@ -1123,6 +1165,42 @@ def _run_endpoint_skill(skill: dict[str, Any], endpoints: list[Endpoint], identi
                         extra = _response_evidence(result, cmethod)
                         extra.update({"conformance_issue": iss.get("type"), "http_status": csc})
                         findings.append(_finding(skill, ep.url, f"Divergência de contrato ({iss.get('type')}): {iss.get('detail')}", identity.key, severity=str(iss.get("severity") or "medium"), verification_status="confirmed", evidence_extra=extra))
+                    continue
+                if skill_id == "skill.api.security_headers":
+                    # Akto-style, autônomo: headers de segurança ausentes / verbose.
+                    method = _probe_method(skill, ep)
+                    attempts += 1
+                    result = _request(session, method, ep.url, identity, timeout=timeout)
+                    observations.append(_response_observation(skill, ep, identity, method, result))
+                    resp = result.get("response")
+                    if resp is not None:
+                        h = {k.lower(): v for k, v in resp.headers.items()}
+                        missing = [x for x in ("x-content-type-options", "x-frame-options", "strict-transport-security", "content-security-policy") if x not in h]
+                        verbose = {k: h[k] for k in ("server", "x-powered-by", "x-aspnet-version") if k in h and h[k]}
+                        if missing:
+                            findings.append(_finding(skill, ep.url, f"Headers de segurança ausentes: {missing} (OWASP API8).", identity.key, severity="low", verification_status="confirmed", evidence_extra={"missing_headers": missing, "http_status": int(resp.status_code)}))
+                        if verbose:
+                            findings.append(_finding(skill, ep.url, f"Headers verbosos expõem tecnologia/versão: {verbose} (fingerprinting, API8).", identity.key, severity="low", verification_status="confirmed", evidence_extra={"verbose_headers": verbose}))
+                    continue
+                if skill_id == "skill.api.api_version_downgrade":
+                    # Akto flagship, autônomo: versão antiga (/vN -> /v{N-1}, /v0) acessível.
+                    m = re.search(r"/v(\d+)/", ep.url)
+                    if not m:
+                        continue
+                    cur = int(m.group(1))
+                    tried = set()
+                    for older in [cur - 1, 0]:
+                        if older < 0 or older == cur or older in tried:
+                            continue
+                        tried.add(older)
+                        durl = ep.url.replace(f"/v{cur}/", f"/v{older}/", 1)
+                        method = _probe_method(skill, ep)
+                        attempts += 1
+                        result = _request(session, method, durl, identity, timeout=timeout)
+                        observations.append(_response_observation(skill, ep, identity, method, result))
+                        resp = result.get("response")
+                        if resp is not None and int(resp.status_code) not in (404, 400) and int(resp.status_code) < 500:
+                            findings.append(_finding(skill, durl, f"Versão de API antiga acessível: /v{older}/ responde HTTP {resp.status_code} (pode não ter os controles da /v{cur}; OWASP API9/shadow).", identity.key, severity="medium", verification_status="confirmed", evidence_extra=_response_evidence(result, method)))
                     continue
                 if skill_id == "skill.api.schema_fuzzing":
                     for (fmethod, furl, fbody, label) in _fuzz_cases(ep, allow_mutations, test_variables):
@@ -1361,6 +1439,34 @@ def run_api_top20_for_scan(scan_id: int, target: str, *, api_skill_id: str | Non
         test_headers = {str(k): str(v) for k, v in (api_config.get("test_headers") or {}).items()}
         test_variables = {str(k): v for k, v in (api_config.get("test_variables") or {}).items()}
         endpoints = _expand_templated_endpoints(_collect_endpoints(db, job, scope), test_variables)
+        # AUTONOMIA SEM SPEC: se não há OpenAPI, derive a superfície do TRÁFEGO
+        # observado (técnica mitmproxy2swagger) — permite testar qualquer API só
+        # observando/crawleando, sem contrato fornecido.
+        if not _SPEC_DOC:
+            try:
+                from app.models.models import ObservedRequest
+                from app.services.api_traffic_inventory import derive_inventory_from_traffic
+                _obs_rows = db.query(ObservedRequest).filter(ObservedRequest.scan_job_id == job.id).limit(1000).all()
+                _traffic = [{
+                    "method": r.method, "url": r.url, "request_headers": dict(r.request_headers or {}),
+                    "request_body": r.request_body, "response_status": r.status_code, "response_body": r.response_excerpt,
+                } for r in _obs_rows if r.url]
+                if _traffic:
+                    _derived = derive_inventory_from_traffic(_traffic)
+                    if not _CONFORMANCE_INDEX and _derived.get("conformance"):
+                        _CONFORMANCE_INDEX = _derived["conformance"]
+                    _have = {(e.method, e.normalized_url) for e in endpoints}
+                    for _de in _derived.get("endpoints", []):
+                        _url = str(_de.get("url") or "")
+                        if not _url.startswith(("http://", "https://")) or not _host_allowed(_url, scope):
+                            continue
+                        _k = (str(_de.get("method") or "GET").upper(), normalize_url(_url))
+                        if _k in _have:
+                            continue
+                        _have.add(_k)
+                        endpoints.append(Endpoint(_k[0], _url, _k[1], list(_de.get("parameters") or []), ["api", "from_traffic"], "traffic-derived", False, {"derived_from_traffic": True}))
+            except Exception:
+                pass
         identities = _collect_identities(db, job)
         # Header variables (x-api-key, x-organization-id, x-project-id, ...) are
         # applied to EVERY request of EVERY identity — passam o gate de auth.
@@ -1381,11 +1487,12 @@ def run_api_top20_for_scan(scan_id: int, target: str, *, api_skill_id: str | Non
         allow_mutations = bool(api_config.get("allow_mutations"))
         # Route all probes through a headless Caido (traffic/replay engine) when
         # the scan opted in and Caido is reachable; otherwise direct requests.
-        global _CAIDO_CLIENT, _RATE_LIMIT_BURST, _CONFORMANCE_INDEX
+        global _CAIDO_CLIENT, _RATE_LIMIT_BURST, _CONFORMANCE_INDEX, _SPEC_DOC
         _CAIDO_CLIENT = None
         _RATE_LIMIT_BURST = int(api_config.get("rate_limit_burst") or 30)
-        # Build the OpenAPI contract index once (for conformance checking).
+        # Build the OpenAPI contract index + keep the full doc (conformance + audit).
         _CONFORMANCE_INDEX = {}
+        _SPEC_DOC = {}
         try:
             import json as _json
             import os as _os
@@ -1393,9 +1500,11 @@ def run_api_top20_for_scan(scan_id: int, target: str, *, api_skill_id: str | Non
             if _spec_path and _os.path.exists(_spec_path):
                 from app.services.api_conformance import build_conformance_index
                 with open(_spec_path) as _sf:
-                    _CONFORMANCE_INDEX = build_conformance_index(_json.load(_sf))
+                    _SPEC_DOC = _json.load(_sf)
+                _CONFORMANCE_INDEX = build_conformance_index(_SPEC_DOC)
         except Exception:
             _CONFORMANCE_INDEX = {}
+            _SPEC_DOC = {}
         caido_status = {"enabled": False, "detail": "not_configured"}
         try:
             from app.services.caido_client import get_caido_client_for_config
