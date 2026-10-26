@@ -115,7 +115,7 @@ export default function App() {
                     <Route path="/logs" element={<AdminOnly><AdminLogsPage /></AdminOnly>} />
                     <Route path="/scan" element={<AdminOnly><ScanOperationsPage /></AdminOnly>} />
                     <Route path="/api" element={<AdminOnly><ApiScanPage /></AdminOnly>} />
-                    <Route path="/api/operacional" element={<AdminOnly><ApiOperationsCenterPage /></AdminOnly>} />
+                    <Route path="/operacional-api" element={<AdminOnly><ApiOperationsCenterPage /></AdminOnly>} />
                     <Route path="/operacional" element={<AdminOnly><OperationsCenterPage /></AdminOnly>} />
                     <Route path="/phase-monitor" element={<Navigate to="/operacional?module=phases_agents" replace />} />
                     <Route path="/workers" element={<Navigate to="/operacional?module=infra" replace />} />
