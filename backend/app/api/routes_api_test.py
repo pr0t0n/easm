@@ -355,6 +355,44 @@ def _api_report_html(rep: dict[str, Any], kind: str) -> str:
     return f"<!doctype html><html lang='pt-br'><head><meta charset='utf-8'><title>{_esc(title)}</title><style>{css}</style></head><body>{body}</body></html>"
 
 
+@router.get("/{test_id}/openapi.json")
+def api_test_openapi_json(test_id: int, download: bool = False, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Swagger/OpenAPI 3.0 GERADO a partir dos endpoints descobertos (fuzzing/brute/
+    crawl/tráfego) quando não há spec fornecido — baixável como JSON."""
+    import json as _json
+
+    from fastapi import Response
+
+    from app.models.models import ObservedRequest, OffensiveEndpoint
+    from app.services.api_openapi_builder import build_openapi_spec
+
+    job = _get_api_job(db, current_user, test_id)
+    rows: list[dict] = []
+    # 1) tráfego observado (tem corpo/headers/resposta -> schemas mais ricos)
+    for r in db.query(ObservedRequest).filter(ObservedRequest.scan_job_id == job.id).limit(2000).all():
+        if not r.url:
+            continue
+        rows.append({
+            "method": r.method, "url": r.url, "request_headers": dict(r.request_headers or {}),
+            "request_body": r.request_body, "status_code": r.status_code, "response_body": r.response_excerpt,
+        })
+    seen = {(str(x["method"]).upper(), str(x["url"])) for x in rows}
+    # 2) endpoints descobertos (brute/crawl/spec) — garante presença mesmo sem tráfego
+    for e in db.query(OffensiveEndpoint).filter(OffensiveEndpoint.scan_job_id == job.id).limit(3000).all():
+        url = str(getattr(e, "normalized_url", None) or getattr(e, "url", "") or "")
+        m = str(getattr(e, "method", "GET") or "GET").upper()
+        if not url or (m, url) in seen:
+            continue
+        seen.add((m, url))
+        rows.append({"method": m, "url": url, "status_code": getattr(e, "status_code", None)})
+    spec = build_openapi_spec(rows, title=f"API descoberta — {job.target_query}", base_url="")
+    content = _json.dumps(spec, ensure_ascii=False, indent=2)
+    headers = {}
+    if download:
+        headers["Content-Disposition"] = f'attachment; filename="openapi-scan-{test_id}.json"'
+    return Response(content=content, media_type="application/json", headers=headers)
+
+
 @router.get("/{test_id}/technical.html")
 def api_test_technical_html(test_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     from fastapi import Response
