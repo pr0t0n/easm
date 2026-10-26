@@ -207,7 +207,7 @@ export default function ApiOperationsCenterPage() {
         <Kpi value={`${authCoverage}%`} label="contexto autenticado" color="#9db4ff" note={`${authenticatedRuns}/${scopedScans.length || 0} testes`} />
       </div>
 
-      <main style={{ flex: 1, minWidth: 0, overflowY: "auto", padding: 16 }}>
+      <main style={{ background: "#000", color: TV.text, flex: 1, minWidth: 0, overflowY: "auto", padding: 16 }}>
         <div style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(3, minmax(0, 1fr))", alignContent: "start" }}>
           <Panel title="Pipeline API · da especificação à prova" right={selected ? `scan #${selected.id}` : "execução real"} span={2}>
             <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(5, minmax(0, 1fr))" }}>
