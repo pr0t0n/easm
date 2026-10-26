@@ -47,3 +47,12 @@ backend/*.tmp
 
 # fastembed model cache (baixado em runtime; embutido na imagem via Dockerfile)
 backend/.fastembed_cache/
+
+# Local security investigation artifacts. These files can contain customer
+# identifiers, request IDs, captured tokens, source maps or raw responses and
+# must never be committed.
+*.js.map
+docs/evidence/
+docs/*onboarding*.md
+backend/_tenanttest.py
+backend/scripts/replay_onboarding_event.py

@@ -63,6 +63,9 @@ const NAV_GROUPS = [
         to: "/api",
         label: "API",
         icon: "api",
+        sub: [
+          { to: "/api/operacional", label: "Centro Operacional", adminOnly: true },
+        ],
       },
     ],
   },
