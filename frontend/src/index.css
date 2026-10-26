@@ -788,6 +788,16 @@ td {
   background: var(--bg-main);
 }
 
+/* The API operations wall owns the complete content canvas. The regular
+   application intentionally uses a light main area, so this route needs an
+   explicit shell-level override rather than relying on the page component's
+   inner div alone. */
+.api-ops-shell,
+.api-ops-shell .main-column,
+.api-ops-main {
+  background: #000 !important;
+}
+
 .app-hdr {
   position: sticky;
   top: 0;

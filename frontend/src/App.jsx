@@ -54,6 +54,8 @@ function RoutedBoundary({ children }) {
 
 export default function App() {
   const [ready, setReady] = useState(false);
+  const { pathname } = useLocation();
+  const apiOperationsRoute = pathname === "/operacional-api";
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", "light");
@@ -89,9 +91,9 @@ export default function App() {
           path="/*"
           element={
             <Protected>
-              <div className="app-shell sk" style={{ backgroundColor: "var(--bg-main)" }}>
+              <div className={`app-shell sk${apiOperationsRoute ? " api-ops-shell" : ""}`} style={{ backgroundColor: apiOperationsRoute ? "#000" : "var(--bg-main)" }}>
                 <Sidebar />
-                <div className="main-column">
+                <div className={`main-column${apiOperationsRoute ? " api-ops-main" : ""}`}>
                   <RoutedBoundary>
                   <Suspense fallback={<div style={{ padding: 24, color: "var(--ink-muted)" }}>Carregando módulo…</div>}>
                   <Routes>
