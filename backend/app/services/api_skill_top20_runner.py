@@ -496,6 +496,30 @@ _RATE_LIMIT_BURST: int = 0
 # Request headers that carry multi-tenant context (swapped by tenant_isolation).
 _TENANT_HEADER_KEYS = {"x-organization-id", "x-project-id", "x-tenant-id", "organizationid", "projectid", "x-platform-id", "platformid"}
 
+# Generic scoping/ownership tokens: ANY variable (header/path/query/body, any API)
+# whose name implies it scopes data to an owner/tenant/account is a cross-tenant
+# surface. Pattern-based so the platform works for any API, not a fixed list.
+_SCOPING_TOKENS = (
+    "org", "organization", "tenant", "project", "account", "owner", "company",
+    "workspace", "group", "customer", "client", "realm", "site", "team", "member",
+    "partner", "merchant", "store", "shop", "user", "subscriber", "platform",
+)
+
+
+def _is_scoping_var(name: str) -> bool:
+    """Heuristic: does this variable name scope data to a tenant/owner? Matches
+    any API's scoping variable (x-organization-id, projectId, accountId, ownerId,
+    companyUuid, tenant, workspaceKey, ...) without hardcoding a specific API."""
+    n = str(name or "").lower().replace("_", "").replace("-", "")
+    if not n:
+        return False
+    if n in {t.replace("-", "") for t in _TENANT_HEADER_KEYS}:
+        return True
+    for tok in _SCOPING_TOKENS:
+        if tok in n and (n.endswith("id") or n.endswith("uuid") or n.endswith("key") or n.endswith("code") or n == tok or n.startswith("x" + tok) or n.startswith(tok)):
+            return True
+    return False
+
 
 def _body_similarity(a: str, b: str) -> float:
     """Rough similarity (0..1) between two response bodies, to tell whether a
@@ -1019,44 +1043,57 @@ def _run_endpoint_skill(skill: dict[str, Any], endpoints: list[Endpoint], identi
                             evidence_extra={"rate_limit": "absent", "burst": burst, "status_seen": sorted(set(codes))}))
                     continue
                 if skill_id == "skill.api.tenant_isolation":
-                    # Multi-tenant isolation: establish a baseline with the real
-                    # tenant context (headers x-organization-id/x-project-id or a
-                    # path projectId), then SWAP that tenant id for other values
-                    # and check whether the API still serves data. Hard rule: a
-                    # cross-tenant positive requires baseline 2xx AND swapped 2xx
-                    # with a similar body; 401/403 on the swap => control OK; no
-                    # authenticated baseline => advisory.
+                    # GENERIC multi-tenant isolation (any API): find every scoping
+                    # variable present on the request — header, path or query whose
+                    # name implies tenancy/ownership (_is_scoping_var) — establish a
+                    # baseline, then SWAP each scoping var for other values and check
+                    # whether the API still serves equivalent data. Hard rule:
+                    # positive requires baseline 2xx AND swapped 2xx with similar
+                    # body; 401/403 on swap => control OK; no 2xx baseline => advisory.
                     method = _probe_method(skill, ep)
-                    tenant_hdr_keys = [k for k in (identity.headers or {}) if k.lower() in _TENANT_HEADER_KEYS]
-                    path_proj = [ph for ph in _path_placeholder_names(urlparse(ep.url).path) if ph.lower() in ("projectid", "organizationid", "tenantid")]
-                    if not tenant_hdr_keys and not path_proj:
-                        continue  # no tenant context on this endpoint
+                    scope_hdrs = [k for k in (identity.headers or {}) if _is_scoping_var(k)]
+                    scope_path = [ph for ph in _path_placeholder_names(urlparse(ep.url).path) if _is_scoping_var(ph)]
+                    scope_query = [str(p.get("name")) for p in ep.parameters if str(p.get("location")) == "query" and _is_scoping_var(str(p.get("name")))]
+                    q_existing = dict(parse_qsl(urlparse(ep.url).query, keep_blank_values=True))
+                    scope_query += [k for k in q_existing if _is_scoping_var(k) and k not in scope_query]
+                    if not (scope_hdrs or scope_path or scope_query):
+                        continue  # no scoping variable on this endpoint
                     attempts += 1
                     base = _request(session, method, ep.url, identity, timeout=timeout)
                     observations.append(_response_observation(skill, ep, identity, method, base))
                     bresp = base.get("response")
                     bsc = int(getattr(bresp, "status_code", 0) or 0) if bresp is not None else 0
                     bbody = base.get("response_body") or (getattr(bresp, "text", "") if bresp is not None else "")
-                    # candidate "other tenant" ids
                     others = ["00000000-0000-0000-0000-000000000000", "1", "2", "99999", _SAMPLE_UUID]
-                    if tenant_hdr_keys:
-                        hk = tenant_hdr_keys[0]
-                        cur = str((identity.headers or {}).get(hk) or "")
-                        for other in [o for o in others if o != cur][:4]:
+                    # (variable, location, swap-builder) across all scoping surfaces
+                    swaps: list[tuple[str, str]] = [(h, "header") for h in scope_hdrs] + [(p, "path") for p in scope_path] + [(q, "query") for q in scope_query]
+                    reported = False
+                    for var, loc in swaps[:4]:
+                        if reported:
+                            break
+                        for other in others[:3]:
                             attempts += 1
-                            swapped = _request(session, method, ep.url, identity, headers={hk: other}, timeout=timeout)
-                            observations.append(_response_observation(skill, ep, identity, method, swapped))
-                            sresp = swapped.get("response")
+                            if loc == "header":
+                                sw = _request(session, method, ep.url, identity, headers={var: other}, timeout=timeout)
+                            elif loc == "path":
+                                sw = _request(session, method, _fill_path_placeholder(ep.url, var, other), identity, timeout=timeout)
+                            else:  # query
+                                pr = urlparse(ep.url); qd = dict(q_existing); qd[var] = other
+                                swurl = urlunparse((pr.scheme, pr.netloc, pr.path, pr.params, urlencode(qd), pr.fragment))
+                                sw = _request(session, method, swurl, identity, timeout=timeout)
+                            observations.append(_response_observation(skill, ep, identity, method, sw))
+                            sresp = sw.get("response")
                             ssc = int(getattr(sresp, "status_code", 0) or 0) if sresp is not None else 0
-                            sbody = swapped.get("response_body") or (getattr(sresp, "text", "") if sresp is not None else "")
+                            sbody = sw.get("response_body") or (getattr(sresp, "text", "") if sresp is not None else "")
                             if 200 <= bsc < 300 and 200 <= ssc < 300 and _body_similarity(bbody, sbody) >= 0.6:
-                                extra = _response_evidence(swapped, method)
-                                extra.update({"tenant_header": hk, "swapped_to": other, "baseline_status": bsc, "cross_tenant": True})
-                                findings.append(_finding(skill, ep.url, f"Isolamento de tenant FALHOU: trocar {hk} para outro valor ({other}) ainda retornou {ssc} com dados equivalentes — acesso cross-tenant (OWASP API5/API1).", identity.key, severity="critical", verification_status="confirmed", evidence_extra=extra))
+                                extra = _response_evidence(sw, method)
+                                extra.update({"scoping_var": var, "location": loc, "swapped_to": other, "baseline_status": bsc, "cross_tenant": True})
+                                findings.append(_finding(skill, ep.url, f"Isolamento FALHOU: trocar {loc} '{var}' por {other} ainda retornou {ssc} com dados equivalentes — acesso cross-tenant (OWASP API5/API1).", identity.key, severity="critical", verification_status="confirmed", evidence_extra=extra))
+                                reported = True
                                 break
-                            if not (200 <= bsc < 300):
-                                findings.append(_finding(skill, ep.url, f"Isolamento de tenant: sem baseline autenticado (HTTP {bsc}) — não confirmável sem credencial; revisar manualmente trocando {hk}.", identity.key, severity="info", verification_status="advisory"))
-                                break
+                        if not (200 <= bsc < 300):
+                            findings.append(_finding(skill, ep.url, f"Isolamento: sem baseline autenticado (HTTP {bsc}) — não confirmável sem credencial; variáveis de escopo detectadas: {[v for v,_ in swaps]}.", identity.key, severity="info", verification_status="advisory"))
+                            reported = True
                     continue
                 if skill_id == "skill.api.schema_fuzzing":
                     for (fmethod, furl, fbody, label) in _fuzz_cases(ep, allow_mutations, test_variables):
@@ -1084,6 +1121,32 @@ def _run_endpoint_skill(skill: dict[str, Any], endpoints: list[Endpoint], identi
                             extra = _response_evidence(result, fmethod)
                             extra.update({"fuzz_case": label})
                             findings.append(_finding(skill, ep.url, f"Fuzz ({label}) disparou erro/stack trace na resposta.", identity.key, severity="high", verification_status="confirmed", evidence_extra=extra))
+                    # Header fuzzing (analisar TUDO: path/query/body JÁ cobertos acima;
+                    # aqui os headers declarados recebem valores malformados/injeção).
+                    try:
+                        from app.services.api_fuzz_generator import fuzz_values_for_param as _fv
+                    except Exception:
+                        _fv = None
+                    header_params = [p for p in ep.parameters if str(p.get("location")) == "header" and p.get("name")]
+                    for hp in header_params[:6]:
+                        hn = str(hp.get("name"))
+                        vals = (_fv(hp, cap=8) if _fv else [(p, "hdr") for p in _FUZZ_QUERY_PAYLOADS])
+                        for value, label in [(v, l) for (v, l) in vals if not str(l).startswith(("valid", "idor"))][:4]:
+                            method = _probe_method(skill, ep)
+                            attempts += 1
+                            result = _request(session, method, ep.url, identity, headers={hn: str(value)}, timeout=timeout)
+                            obs = _response_observation(skill, ep, identity, method, result)
+                            obs["fuzz_case"] = f"header:{hn}:{label}"
+                            observations.append(obs)
+                            resp = result.get("response")
+                            if resp is None:
+                                continue
+                            sc = int(resp.status_code)
+                            rbody = (resp.text or "")[:8000]
+                            if sc >= 500 or SQL_ERROR_RE.search(rbody) or NOSQL_ERROR_RE.search(rbody) or SHELL_ERROR_RE.search(rbody) or STACKTRACE_RE.search(rbody):
+                                extra = _response_evidence(result, method)
+                                extra.update({"fuzz_case": f"header:{hn}:{label}", "http_status": sc})
+                                findings.append(_finding(skill, ep.url, f"Header '{hn}' com valor malformado ({label}) causou HTTP {sc}/erro — validação de header ausente.", identity.key, severity="medium", verification_status="confirmed", evidence_extra=extra))
                     continue
                 if skill_id == "skill.api.bola_idor" and ep.documented and _object_id_params(ep):
                     id_params = _object_id_params(ep)
