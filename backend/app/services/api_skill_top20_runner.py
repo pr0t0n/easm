@@ -496,6 +496,8 @@ _RATE_LIMIT_BURST: int = 0
 _CONFORMANCE_INDEX: dict[str, Any] = {}
 # Full OpenAPI document (for static spec audit).
 _SPEC_DOC: dict[str, Any] = {}
+# Per-op request/response schemas (for the coverage-guided fuzz engine).
+_OP_SCHEMAS: dict[str, Any] = {}
 
 # Request headers that carry multi-tenant context (swapped by tenant_isolation).
 _TENANT_HEADER_KEYS = {"x-organization-id", "x-project-id", "x-tenant-id", "organizationid", "projectid", "x-platform-id", "platformid"}
@@ -1255,6 +1257,35 @@ def _run_endpoint_skill(skill: dict[str, Any], endpoints: list[Endpoint], identi
                                 extra = _response_evidence(result, method)
                                 extra.update({"fuzz_case": f"header:{hn}:{label}", "http_status": sc})
                                 findings.append(_finding(skill, ep.url, f"Header '{hn}' com valor malformado ({label}) causou HTTP {sc}/erro — validação de header ausente.", identity.key, severity="medium", verification_status="confirmed", evidence_extra=extra))
+                    # Coverage-guided grammar fuzz (motor real) p/ endpoints com body:
+                    # mutações estruturais dirigidas pelo schema + oráculo profundo
+                    # (5xx/SQL/stacktrace/violação de schema) + shrinking do PoC.
+                    if allow_mutations and ep.method.upper() in ("POST", "PUT", "PATCH") and _OP_SCHEMAS:
+                        opkey = f"{ep.method.upper()} {_path_template_key(urlparse(ep.url).path)}"
+                        opsc = _OP_SCHEMAS.get(opkey)
+                        if opsc:
+                            try:
+                                from app.services.api_fuzz_engine import coverage_guided_fuzz
+                                _seed = dict(opsc.get("seed") or {})
+                                for _k in list(_seed):
+                                    if _k in (test_variables or {}):
+                                        _seed[_k] = test_variables[_k]
+
+                                def _send(_m, _u, _b):
+                                    _r = _request(session, _m, _u, identity, json_body=_b, timeout=timeout)
+                                    return _r
+
+                                _cg = coverage_guided_fuzz(_send, ep.method.upper(), ep.url,
+                                                           seed_body=_seed, req_schema=opsc.get("req"),
+                                                           resp_schema=opsc.get("resp"), budget=25)
+                                attempts += int(_cg.get("attempts") or 0)
+                                for an in _cg.get("anomalies", [])[:6]:
+                                    findings.append(_finding(skill, ep.url,
+                                        f"Fuzz coverage-guided ({an.get('label')}) -> HTTP {an.get('status')}: {an.get('reason')}. Reprodutor mínimo: {json.dumps(an.get('body'), ensure_ascii=False)[:200]}",
+                                        identity.key, severity=str(an.get("severity") or "medium"), verification_status="confirmed",
+                                        evidence_extra={"fuzz_engine": "coverage_guided", "label": an.get("label"), "http_status": an.get("status"), "minimal_body": an.get("body"), "new_coverage": _cg.get("new_coverage")}))
+                            except Exception:
+                                pass
                     continue
                 if skill_id == "skill.api.bola_idor" and ep.documented and _object_id_params(ep):
                     id_params = _object_id_params(ep)
@@ -1440,23 +1471,27 @@ def run_api_top20_for_scan(scan_id: int, target: str, *, api_skill_id: str | Non
         test_headers = {str(k): str(v) for k, v in (api_config.get("test_headers") or {}).items()}
         test_variables = {str(k): v for k, v in (api_config.get("test_variables") or {}).items()}
         # Per-scan globals + OpenAPI doc/index (declared before any use below).
-        global _CAIDO_CLIENT, _RATE_LIMIT_BURST, _CONFORMANCE_INDEX, _SPEC_DOC
+        global _CAIDO_CLIENT, _RATE_LIMIT_BURST, _CONFORMANCE_INDEX, _SPEC_DOC, _OP_SCHEMAS
         _CAIDO_CLIENT = None
         _RATE_LIMIT_BURST = int(api_config.get("rate_limit_burst") or 30)
         _CONFORMANCE_INDEX = {}
         _SPEC_DOC = {}
+        _OP_SCHEMAS = {}
         try:
             import json as _json
             import os as _os
             _spec_path = str(api_config.get("inline_spec_file") or "")
             if _spec_path and _os.path.exists(_spec_path):
                 from app.services.api_conformance import build_conformance_index
+                from app.services.api_fuzz_engine import build_op_schema_index
                 with open(_spec_path) as _sf:
                     _SPEC_DOC = _json.load(_sf)
                 _CONFORMANCE_INDEX = build_conformance_index(_SPEC_DOC)
+                _OP_SCHEMAS = build_op_schema_index(_SPEC_DOC)
         except Exception:
             _CONFORMANCE_INDEX = {}
             _SPEC_DOC = {}
+            _OP_SCHEMAS = {}
         endpoints = _expand_templated_endpoints(_collect_endpoints(db, job, scope), test_variables)
         # AUTONOMIA SEM SPEC: se não há OpenAPI, derive a superfície do TRÁFEGO
         # observado (técnica mitmproxy2swagger) — permite testar qualquer API só
