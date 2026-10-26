@@ -2857,6 +2857,12 @@ def _requeue_failed_quality_items(db: Session, job: ScanJob, weak_phase_ids: set
 def _fallback_candidates_for_item(item: ScanWorkItem) -> list[str]:
     tool = str(item.tool_name or "").strip().lower()
     phase_id = str(item.phase_id or "").strip()
+    # api-skill-top20 is a purpose-built OWASP API Top 20 orchestrator; a generic
+    # param fuzzer (ffuf-params/wfuzz) is NOT an equivalent capability and would
+    # silently replace the real skill (e.g. rate-limit/BOLA) with an empty run.
+    # Recover by RETRYING the same skill, never by swapping to a generic tool.
+    if tool == "api-skill-top20":
+        return ["api-skill-top20"]
     candidates: list[str] = []
     candidates.extend(QUALITY_TOOL_FALLBACKS.get(tool, []))
     if tool.startswith("nuclei-"):
