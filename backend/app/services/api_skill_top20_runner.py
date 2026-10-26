@@ -490,6 +490,8 @@ def _build_curl(method: str, url: str, headers: dict[str, str], cookies: dict[st
 # every probe is replayed through Caido (captured in the project); on any failure
 # we fall back to direct requests, so Caido is never a hard dependency.
 _CAIDO_CLIENT: Any = None
+# Burst size for the rate-limit control validation (0 => use skill default).
+_RATE_LIMIT_BURST: int = 0
 
 
 def _request(session: requests.Session, method: str, url: str, identity: Identity, *, headers: dict[str, str] | None = None, json_body: Any = None, timeout: int = DEFAULT_TIMEOUT_SECONDS) -> dict[str, Any]:
@@ -951,19 +953,53 @@ def _run_endpoint_skill(skill: dict[str, Any], endpoints: list[Endpoint], identi
                         findings.append(_finding(skill, ep.url, "Introspection GraphQL habilitada e retornando schema.", identity.key, verification_status="confirmed", evidence_extra=_response_evidence(result, "POST")))
                     continue
                 if skill_id == "skill.api.rate_limit_resource_consumption":
-                    codes = []
+                    # Rate-limit CONTROL validation: burst N requests and detect
+                    # whether throttling engages (429), rate-limit headers are
+                    # present, or when the control trips. Burst is configurable via
+                    # api_scan_config.rate_limit_burst (default 30) so it's enough
+                    # to actually exercise the control, not just 3 probes.
+                    burst = _RATE_LIMIT_BURST or int(skill.get("max_repeated_requests") or 3)
+                    codes: list[int] = []
                     header_names: set[str] = set()
-                    for _ in range(int(skill.get("max_repeated_requests") or 3)):
-                        method = _probe_method(skill, ep)
+                    first_429_at = 0
+                    retry_after = ""
+                    method = _probe_method(skill, ep)
+                    for i in range(burst):
                         attempts += 1
                         result = _request(session, method, ep.url, identity, timeout=timeout)
-                        observations.append(_response_observation(skill, ep, identity, method, result))
+                        if i < 4 or (result.get("response") is not None and int(getattr(result.get("response"), "status_code", 0)) == 429):
+                            observations.append(_response_observation(skill, ep, identity, method, result))
                         response = result.get("response")
-                        if response is not None:
-                            codes.append(response.status_code)
-                            header_names.update(k.lower() for k in response.headers)
-                    if len(codes) >= 3 and all(code < 400 for code in codes) and not header_names.intersection(RATE_LIMIT_HEADERS):
-                        findings.append(_finding(skill, ep.url, f"{len(codes)} requisições repetidas sem headers de rate limit; códigos={codes}.", identity.key, severity="medium"))
+                        if response is None:
+                            continue
+                        sc = int(response.status_code)
+                        codes.append(sc)
+                        hdrs = {k.lower(): v for k, v in response.headers.items()}
+                        header_names.update(hdrs.keys())
+                        if sc == 429 and not first_429_at:
+                            first_429_at = i + 1
+                            retry_after = str(hdrs.get("retry-after") or "")
+                            break  # control engaged — enough evidence
+                    rl_headers = sorted(header_names.intersection(RATE_LIMIT_HEADERS))
+                    total = len(codes)
+                    if first_429_at:
+                        findings.append(_finding(
+                            skill, ep.url,
+                            f"Rate-limit SATISFATÓRIO: HTTP 429 após {first_429_at} requisições (Retry-After={retry_after or 'ausente'}; headers={rl_headers or 'nenhum'}).",
+                            identity.key, severity="info", verification_status="confirmed",
+                            evidence_extra={"rate_limit": "enforced", "trips_at": first_429_at, "retry_after": retry_after, "headers": rl_headers, "burst": burst}))
+                    elif rl_headers:
+                        findings.append(_finding(
+                            skill, ep.url,
+                            f"Rate-limit sinalizado por headers ({rl_headers}) em {total} requisições, mas SEM 429 no burst — verificar limiar.",
+                            identity.key, severity="low", verification_status="confirmed",
+                            evidence_extra={"rate_limit": "headers_only", "headers": rl_headers, "burst": burst, "codes_sample": codes[:8]}))
+                    elif total >= min(burst, 10):
+                        findings.append(_finding(
+                            skill, ep.url,
+                            f"Rate-limit NÃO SATISFATÓRIO: {total} requisições sem 429 e sem headers de rate-limit (status repetido {codes[:1]}). Controle ausente/ineficaz nesta rota.",
+                            identity.key, severity="medium", verification_status="confirmed",
+                            evidence_extra={"rate_limit": "absent", "burst": burst, "status_seen": sorted(set(codes))}))
                     continue
                 if skill_id == "skill.api.schema_fuzzing":
                     for (fmethod, furl, fbody, label) in _fuzz_cases(ep, allow_mutations, test_variables):
@@ -1183,8 +1219,9 @@ def run_api_top20_for_scan(scan_id: int, target: str, *, api_skill_id: str | Non
         allow_mutations = bool(api_config.get("allow_mutations"))
         # Route all probes through a headless Caido (traffic/replay engine) when
         # the scan opted in and Caido is reachable; otherwise direct requests.
-        global _CAIDO_CLIENT
+        global _CAIDO_CLIENT, _RATE_LIMIT_BURST
         _CAIDO_CLIENT = None
+        _RATE_LIMIT_BURST = int(api_config.get("rate_limit_burst") or 30)
         caido_status = {"enabled": False, "detail": "not_configured"}
         try:
             from app.services.caido_client import get_caido_client_for_config
