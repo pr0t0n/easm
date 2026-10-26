@@ -1438,6 +1438,24 @@ def run_api_top20_for_scan(scan_id: int, target: str, *, api_skill_id: str | Non
         scope = authorized_scope_for_scan(db, job.id)
         test_headers = {str(k): str(v) for k, v in (api_config.get("test_headers") or {}).items()}
         test_variables = {str(k): v for k, v in (api_config.get("test_variables") or {}).items()}
+        # Per-scan globals + OpenAPI doc/index (declared before any use below).
+        global _CAIDO_CLIENT, _RATE_LIMIT_BURST, _CONFORMANCE_INDEX, _SPEC_DOC
+        _CAIDO_CLIENT = None
+        _RATE_LIMIT_BURST = int(api_config.get("rate_limit_burst") or 30)
+        _CONFORMANCE_INDEX = {}
+        _SPEC_DOC = {}
+        try:
+            import json as _json
+            import os as _os
+            _spec_path = str(api_config.get("inline_spec_file") or "")
+            if _spec_path and _os.path.exists(_spec_path):
+                from app.services.api_conformance import build_conformance_index
+                with open(_spec_path) as _sf:
+                    _SPEC_DOC = _json.load(_sf)
+                _CONFORMANCE_INDEX = build_conformance_index(_SPEC_DOC)
+        except Exception:
+            _CONFORMANCE_INDEX = {}
+            _SPEC_DOC = {}
         endpoints = _expand_templated_endpoints(_collect_endpoints(db, job, scope), test_variables)
         # AUTONOMIA SEM SPEC: se não há OpenAPI, derive a superfície do TRÁFEGO
         # observado (técnica mitmproxy2swagger) — permite testar qualquer API só
@@ -1487,24 +1505,6 @@ def run_api_top20_for_scan(scan_id: int, target: str, *, api_skill_id: str | Non
         allow_mutations = bool(api_config.get("allow_mutations"))
         # Route all probes through a headless Caido (traffic/replay engine) when
         # the scan opted in and Caido is reachable; otherwise direct requests.
-        global _CAIDO_CLIENT, _RATE_LIMIT_BURST, _CONFORMANCE_INDEX, _SPEC_DOC
-        _CAIDO_CLIENT = None
-        _RATE_LIMIT_BURST = int(api_config.get("rate_limit_burst") or 30)
-        # Build the OpenAPI contract index + keep the full doc (conformance + audit).
-        _CONFORMANCE_INDEX = {}
-        _SPEC_DOC = {}
-        try:
-            import json as _json
-            import os as _os
-            _spec_path = str(api_config.get("inline_spec_file") or "")
-            if _spec_path and _os.path.exists(_spec_path):
-                from app.services.api_conformance import build_conformance_index
-                with open(_spec_path) as _sf:
-                    _SPEC_DOC = _json.load(_sf)
-                _CONFORMANCE_INDEX = build_conformance_index(_SPEC_DOC)
-        except Exception:
-            _CONFORMANCE_INDEX = {}
-            _SPEC_DOC = {}
         caido_status = {"enabled": False, "detail": "not_configured"}
         try:
             from app.services.caido_client import get_caido_client_for_config
