@@ -69,9 +69,11 @@ const NAV_GROUPS = [
   {
     grupo: "Entrega",
     itens: [
-      { to: "/relatorios", label: "Relatório SCAN", icon: "relatorios" },
-      { to: "/relatorios/bas", label: "Relatório BAS", icon: "bas" },
-      { to: "/relatorios/api", label: "Relatório API", icon: "api" },
+      // Módulos desacoplados na navegação: "Relatório SCAN" casa só com o próprio
+      // namespace (/relatorios + /relatorios/tecnico), NUNCA com /relatorios/api|bas.
+      { to: "/relatorios", label: "Relatório SCAN", icon: "relatorios", end: true, also: ["/relatorios/tecnico"] },
+      { to: "/relatorios/bas", label: "Relatório BAS", icon: "bas", end: true },
+      { to: "/relatorios/api", label: "Relatório API", icon: "api", end: true, also: ["/relatorios/api"] },
     ],
   },
   {
@@ -105,9 +107,12 @@ export default function Sidebar() {
     navigate("/login");
   };
 
-  const isActive = (to, end = false) => {
-    if (end) return location.pathname === to;
-    return location.pathname === to || location.pathname.startsWith(to + "/");
+  const isActive = (to, end = false, also = []) => {
+    const base = end ? location.pathname === to : (location.pathname === to || location.pathname.startsWith(to + "/"));
+    if (base) return true;
+    // `also` prefixes let an item own extra sub-namespaces (e.g. SCAN owns
+    // /relatorios/tecnico) WITHOUT swallowing sibling modules' paths.
+    return (also || []).some((p) => location.pathname === p || location.pathname.startsWith(p + "/"));
   };
 
   const anySubActive = (sub = []) =>
@@ -149,8 +154,8 @@ export default function Sidebar() {
 
             {visible.map((item) => {
               const visibleSub = (item.sub || []).filter((s) => !s.adminOnly || isAdmin);
-              const active    = isActive(item.to, item.end) || anySubActive(visibleSub);
-              const showSub   = (isActive(item.to, item.end) || anySubActive(visibleSub)) && visibleSub.length > 0;
+              const active    = isActive(item.to, item.end, item.also) || anySubActive(visibleSub);
+              const showSub   = (isActive(item.to, item.end, item.also) || anySubActive(visibleSub)) && visibleSub.length > 0;
 
               return (
                 <div key={item.to}>

@@ -455,7 +455,10 @@ def _finding_source_module(finding: Finding, details: dict) -> str:
     tool = str(finding.tool or "").strip().lower()
     if source == "bas" or tool == "bas-agent":
         return "bas"
-    if tool in {"zap-api", "schemathesis", "openapi-requests", "api-requests"} or details.get("api_tested_via"):
+    # Módulo de API (desacoplado): a tool própria api-skill-top20 + demais engines
+    # de API. Antes, findings da nova plataforma de API eram mal-classificados como
+    # "pentest" por falta de api-skill-top20 aqui.
+    if tool in {"api-skill-top20", "zap-api", "schemathesis", "openapi-requests", "api-requests", "nuclei-swagger", "nuclei-graphql"} or details.get("api_tested_via") or str(details.get("api_skill_id") or "").startswith("skill.api."):
         return "api"
     if details.get("learning_source"):
         return "learning"
@@ -3048,7 +3051,9 @@ def _open_finding_counts_by_scan(db: Session, scan_ids: list[int]) -> dict[int, 
 @router.get("/scans", response_model=list[ScanResponse])
 def list_scans(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     _reconcile_orphan_running_scans(db)
-    query = _authorized_scan_query(db, current_user)
+    # Desacoplamento: o módulo de Pentest (Scan) NÃO lista testes do módulo de API
+    # (mode="api"); estes têm sua própria lista em /api/apitest. BAS já é excluído.
+    query = _authorized_scan_query(db, current_user).filter(ScanJob.mode != "api")
     rows = query.order_by(ScanJob.created_at.desc()).all()
     fc = _open_finding_counts_by_scan(db, [s.id for s in rows])
     out = []
