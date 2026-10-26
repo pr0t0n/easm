@@ -105,6 +105,17 @@ function ApiReportDetail({ id }) {
     } catch (e) { /* ignore */ }
   }
 
+  async function downloadOpenapi() {
+    // OpenAPI 3.0 GERADO dos endpoints descobertos (quando não há spec).
+    try {
+      const resp = await client.get(`/api/apitest/${id}/openapi.json?download=true`, { responseType: "blob" });
+      const url = URL.createObjectURL(new Blob([resp.data], { type: "application/json" }));
+      const a = document.createElement("a");
+      a.href = url; a.download = `openapi-scan-${id}.json`;
+      document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+    } catch (e) { /* ignore */ }
+  }
+
   async function openHtmlReport(kind) {
     // Relatório da PRÓPRIA API (não o do SCAN): busca autenticado e abre em nova aba.
     try {
@@ -131,6 +142,8 @@ function ApiReportDetail({ id }) {
         <span style={{ flex: 1 }} />
         <button type="button" onClick={downloadCsv}
           style={{ padding: "6px 12px", borderRadius: 7, border: "1px solid var(--border)", background: "transparent", color: "var(--ink)", cursor: "pointer", fontSize: 12, fontWeight: 700 }}>⬇ CSV</button>
+        <button type="button" onClick={downloadOpenapi} title="OpenAPI 3.0 gerado dos endpoints descobertos"
+          style={{ padding: "6px 12px", borderRadius: 7, border: "1px solid var(--border)", background: "transparent", color: "#0f766e", cursor: "pointer", fontSize: 12, fontWeight: 700 }}>⬇ OpenAPI (gerado)</button>
         <button type="button" onClick={() => openHtmlReport("executive")}
           style={{ padding: "6px 12px", borderRadius: 7, border: "1px solid var(--border)", background: "transparent", color: "var(--brand, #2563eb)", cursor: "pointer", fontSize: 12, fontWeight: 700 }}>Relatório Executivo</button>
         <button type="button" onClick={() => openHtmlReport("technical")}
