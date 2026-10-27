@@ -1140,6 +1140,30 @@ def _first_active_work_queue_phase(db, scan_id: int) -> str:
     try:
         from app.models.models import ScanWorkItem
 
+        # API scans have a dedicated P16 queue.  Generic discovery items in
+        # P03/P04/P08 may remain gate-blocked by design, but they must not hide
+        # an actively executing API queue from the operator/UI frontier.
+        _scan = db.query(ScanJob).filter(ScanJob.id == int(scan_id)).first()
+        _api_mode = bool(
+            _scan
+            and (
+                str(_scan.mode or "").lower() == "api"
+                or bool((dict(_scan.state_data or {}).get("api_scan_config") or {}).get("enabled"))
+            )
+        )
+        if _api_mode:
+            _api_pending = (
+                db.query(ScanWorkItem.id)
+                .filter(
+                    ScanWorkItem.scan_job_id == int(scan_id),
+                    ScanWorkItem.tool_name.in_(("api-skill-top20", "zap-api")),
+                    ScanWorkItem.status.in_(("queued", "retry", "dispatched", "running", "submitted")),
+                )
+                .first()
+            )
+            if _api_pending:
+                return "P16"
+
         active_statuses = ("queued", "retry", "dispatched", "running", "submitted", "blocked")
         # Work-queue execution is dependency/gate-major, not numeric P01→P22.
         # The UI/current_step must expose the same frontier the dispatcher cares
@@ -1199,6 +1223,29 @@ def _seed_explicit_inventory_work_queue(
 
     if has_pending_work(db, job.id):
         frontier_phase = _first_active_work_queue_phase(db, job.id) or "P02"
+        _api_mode = str(job.mode or "").lower() == "api" or bool(
+            (dict(state.get("api_scan_config") or {})).get("enabled")
+        )
+        if _api_mode:
+            _api_items = (
+                db.query(ScanWorkItem)
+                .filter(
+                    ScanWorkItem.scan_job_id == job.id,
+                    ScanWorkItem.tool_name.in_(("api-skill-top20", "zap-api")),
+                    ~ScanWorkItem.status.in_(("blocked", "cancelled", "canceled")),
+                )
+                .all()
+            )
+            if _api_items:
+                _api_done = sum(
+                    1 for _api_item in _api_items
+                    if str(_api_item.status or "") in {"completed", "done", "failed", "timeout", "skipped"}
+                )
+                job.mission_progress = min(99, int((_api_done / max(1, len(_api_items))) * 99))
+                frontier_phase = "P16" if any(
+                    str(_api_item.status or "") in {"queued", "retry", "dispatched", "running", "submitted"}
+                    for _api_item in _api_items
+                ) else frontier_phase
         wait_seconds = max(15, int(state.get("parallel_wait_seconds") or settings.scan_parallel_wait_seconds or 60))
         more_batches_pending = cursor < total_targets
         state["target_set"] = unique_targets

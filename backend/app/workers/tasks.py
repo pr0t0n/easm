@@ -5154,6 +5154,44 @@ def dispatch_scan_work_items(
             "updated_at": datetime.now().isoformat(),
         }
         _frontier_phase = _first_active_work_queue_phase_for_scan(db, scan_id)
+        # API scans execute their P16 work items independently from the
+        # generic discovery/parameter queues.  The old progress path counted
+        # all gate-blocked P03/P04/P08 items and, more importantly, never
+        # projected the live queue into mission_progress here.  That left a
+        # running API scan displayed as 0% while API Top 20 items were already
+        # completing.  Use the API queue as the progress source when present;
+        # blocked generic items are intentionally excluded from this display.
+        _api_mode = str(getattr(job, "mode", "") or "").lower() == "api" or bool(
+            (state.get("api_scan_config") or {}).get("enabled")
+        )
+        if _api_mode:
+            _api_items = (
+                db.query(ScanWorkItem)
+                .filter(
+                    ScanWorkItem.scan_job_id == scan_id,
+                    ScanWorkItem.tool_name.in_(("api-skill-top20", "zap-api")),
+                )
+                .all()
+            )
+            _api_active = [
+                _api_item
+                for _api_item in _api_items
+                if str(_api_item.status or "") not in {"blocked", "cancelled", "canceled"}
+            ]
+            _api_terminal = {"completed", "done", "failed", "timeout", "skipped"}
+            if _api_active:
+                _api_done = sum(
+                    1 for _api_item in _api_active if str(_api_item.status or "") in _api_terminal
+                )
+                _api_pct = min(99, int((_api_done / max(1, len(_api_active))) * 99))
+                if str(job.status or "").lower() == "running":
+                    job.mission_progress = _api_pct
+                if any(
+                    str(_api_item.status or "")
+                    in {"queued", "retry", "dispatched", "running", "submitted"}
+                    for _api_item in _api_active
+                ):
+                    _frontier_phase = "P16"
         if _frontier_phase:
             state["current_pentest_phase_id"] = _frontier_phase
         if str(job.status or "").lower() == "running":

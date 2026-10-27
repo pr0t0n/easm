@@ -1618,6 +1618,15 @@ def run_api_top20_for_scan(scan_id: int, target: str, *, api_skill_id: str | Non
         if test_headers:
             for _idn in identities:
                 _idn.headers = {**(_idn.headers or {}), **test_headers}
+        # The runner performs outbound HTTP requests for a potentially long
+        # time. End the read-only SQLAlchemy transaction before entering that
+        # network loop; otherwise PostgreSQL's idle-in-transaction timeout can
+        # terminate the connection while the API skill is still executing, and
+        # the MCP adapter reports a misleading HTTP 500 at the end.
+        try:
+            db.rollback()
+        except Exception:
+            pass
         reused_inventory_scan_ids = sorted({
             int(ep.metadata.get("reused_from_scan_id"))
             for ep in endpoints
@@ -1674,8 +1683,9 @@ def run_api_top20_for_scan(scan_id: int, target: str, *, api_skill_id: str | Non
                                 inv.upsert_endpoint(sep.url, method="GET", source_tool="route-brute", tags=["api", "shadow"], metadata=dict(sep.metadata))
                             except Exception:
                                 continue
-                        db.flush()
+                        db.commit()
                     except Exception:
+                        db.rollback()
                         pass
                 findings = _shadow_api_findings(skill, endpoints + discovered)
                 for sep in discovered:
