@@ -5,6 +5,7 @@
 import { Fragment, useCallback, useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import client from "../api/client";
+import ApplicationInteractionMap from "../components/ApplicationInteractionMap";
 
 const SEV_COLOR = {
   critical: "var(--sev-high-text, #dc2626)",
@@ -271,6 +272,13 @@ function ApiReportDetail({ id }) {
           </>
         )}
       </div>
+
+      <ApplicationInteractionMap
+        flow={data.flow}
+        variables={data.variables}
+        endpoints={data.endpoints}
+        attackPaths={data.attack_paths}
+      />
 
       {/* Per-endpoint forest */}
       <div style={card}>
