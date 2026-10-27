@@ -115,3 +115,20 @@ def test_dns_resolution_failure_fails_open_to_allow_scope_decision_elsewhere(mon
     monkeypatch.setattr(runner.socket, "getaddrinfo", _raise)
     unsafe, reason = runner._disallowed_dns_rebind("nonexistent.invalid", ["nonexistent.invalid"])
     assert unsafe is False
+
+
+def test_url_fragment_is_not_part_of_scope_host(monkeypatch, tmp_path):
+    runner = _load_runner(monkeypatch, tmp_path)
+
+    assert runner._target_host("https://example.com#spec-audit/param_no_maxlength") == "example.com"
+    assert runner._is_target_in_scope(
+        "https://example.com#spec-audit/param_no_maxlength", ["example.com"]
+    ) == (True, "")
+
+
+def test_url_fragment_cannot_hide_loopback_target(monkeypatch, tmp_path):
+    runner = _load_runner(monkeypatch, tmp_path)
+
+    unsafe, reason = runner._is_unsafe_target("http://127.0.0.1#synthetic-marker")
+    assert unsafe is True
+    assert "loopback" in reason

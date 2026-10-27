@@ -140,12 +140,12 @@ def _is_unsafe_target(target: str) -> tuple[bool, str]:
     t = (target or "").strip()
     if not t:
         return True, "empty target"
-    # Strip URL prefix to evaluate just the host portion
-    host = t
-    for prefix in ("http://", "https://"):
-        if host.startswith(prefix):
-            host = host[len(prefix):]
-    host = host.split("/")[0].split(":")[0]
+    # Parse the authority instead of splitting on '/' and ':'.  A URL fragment
+    # is not sent to the server, but it is used by the API report to annotate
+    # synthetic verification targets (for example ``#spec-audit/...``).  If
+    # the fragment is kept in the host string, an in-scope target is rejected
+    # by the runner's scope gate and loopback targets can bypass PRIVATE_NET_RE.
+    host = _target_host(t)
     if PRIVATE_NET_RE.match(host):
         return True, f"loopback/link-local blocked: {host}"
     if any(ch in t for ch in [";", "&&", "||", "`", "$(", "\n", "\r", "|", ">", "<", "'"]):
@@ -154,11 +154,23 @@ def _is_unsafe_target(target: str) -> tuple[bool, str]:
 
 
 def _target_host(target: str) -> str:
-    host = (target or "").strip().lower()
+    raw = str(target or "").strip()
+    if not raw:
+        return ""
+    # urlparse needs an explicit scheme or a //-prefixed authority to parse
+    # ports/IPv6/paths correctly.  It also removes query and fragment parts,
+    # which are never part of the network authority.
+    parsed = urlparse(raw if "://" in raw else f"//{raw}")
+    host = (parsed.hostname or "").strip().lower().strip(".")
+    if host:
+        return host
+    # Keep a conservative fallback for malformed legacy targets.  This path
+    # is intentionally only used when urlparse could not recover a hostname.
     for prefix in ("http://", "https://"):
-        if host.startswith(prefix):
-            host = host[len(prefix):]
-    return host.split("/")[0].split(":")[0].strip(".")
+        if raw.lower().startswith(prefix):
+            raw = raw[len(prefix):]
+            break
+    return raw.split("/", 1)[0].split(":", 1)[0].split("?", 1)[0].split("#", 1)[0].strip().lower().strip(".")
 
 
 def _is_target_in_scope(target: str, authorized_scope: list[str] | None) -> tuple[bool, str]:
