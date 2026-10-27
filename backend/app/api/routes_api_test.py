@@ -356,6 +356,7 @@ def _api_report_html(rep: dict[str, Any], kind: str) -> str:
             q = e.get("quality", {})
             finds = "".join(f'<li class="s-{_esc(f.get("severity"))}">{_esc(f.get("severity"))}: {_esc(f.get("title"))} ({_esc(f.get("owasp"))})</li>' for f in e.get("findings", []))
             advs = "".join(f'<li class="adv">advisory: {_esc(a.get("title"))}</li>' for a in e.get("advisories", []))
+            http = " ".join(f'{_esc(k)}×{_esc(v)}' for k, v in (e.get("http_status_counts") or {}).items()) or "nenhuma"
             evs = ""
             for ev in (e.get("evidence") or [])[:4]:
                 evs += (f'<div class="ev"><div class="evh">{_esc(ev.get("method"))} {_esc(ev.get("url"))} → HTTP {_esc(ev.get("response_status"))} '
@@ -368,6 +369,7 @@ def _api_report_html(rep: dict[str, Any], kind: str) -> str:
             ep_rows += (f'<div class="epc"><div class="eph"><b>{_esc(e.get("method"))}</b> {_esc(e.get("path"))} '
                         f'<span class="q q-{_esc(q.get("level"))}">{_esc(q.get("label"))}</span> '
                         f'<span class="src">{_esc(e.get("source"))}</span></div>'
+                        f'<div class="httpobs">Respostas HTTP observadas: {http}</div>'
                         f'<ul>{finds}{advs}</ul>{evs}</div>')
         body += f"<h2>Detalhe por endpoint (achados, advisórios e evidência)</h2>{ep_rows or '<p>Sem achados/evidências por endpoint.</p>'}"
     css = """
@@ -383,6 +385,7 @@ def _api_report_html(rep: dict[str, Any], kind: str) -> str:
     .q{font-weight:800;font-size:11px;padding:1px 6px;border-radius:4px} .q-good{color:#16a34a} .q-partial{color:#d97706} .q-weak,.q-none{color:#dc2626}
     .src{color:#2563eb;font-size:11px} ul{margin:4px 0;padding-left:18px;font-size:12px}
     .s-critical,.s-high{color:#dc2626} .s-medium{color:#d97706} .adv{color:#d97706}
+    .httpobs{font-size:11px;color:#475569;margin:3px 0 6px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
     .ev{margin:6px 0;border-left:3px solid #e2e8f0;padding-left:8px} .evh{font-size:11px;font-weight:700;color:#334155}
     pre{background:#f8fafc;border:1px solid #e2e8f0;border-radius:5px;padding:6px;font-size:10.5px;white-space:pre-wrap;word-break:break-all;margin:3px 0}
     .flowmeta{font-size:12px;color:#334155;margin:4px 0 10px}

@@ -321,6 +321,9 @@ function ApiReportDetail({ id }) {
                       <tr style={{ background: "var(--surface-2, #f8fafc)" }}>
                         <td colSpan={8} style={{ padding: "8px 14px" }}>
                           <div style={{ fontSize: 11, color: "var(--ink-muted)", marginBottom: 4 }}>URL: {e.url}</div>
+                          <div style={{ fontSize: 11, marginBottom: 6 }}>
+                            Respostas HTTP observadas: {Object.entries(e.http_status_counts || {}).map(([status, count]) => `${status}×${count}`).join(" ") || "nenhuma"}
+                          </div>
                           <div style={{ fontSize: 11, marginBottom: 6 }}>Skills aplicadas: {e.skills_tested?.length ? e.skills_tested.map((x) => x.replace("skill.api.", "")).join(", ") : "nenhuma"}</div>
                           {e.identities?.length > 0 && <div style={{ fontSize: 11, marginBottom: 6 }}>Identidades: {e.identities.join(", ")}</div>}
                           {e.findings?.length > 0 ? (

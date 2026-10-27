@@ -89,6 +89,41 @@ def _quality(tested: bool, skills: set[str], real_responses: int, bac_tested: bo
     return {"score": score, "label": label, "level": level}
 
 
+def _representative_evidence(candidates: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    """Keep drill-down evidence representative across observed HTTP statuses.
+
+    The endpoint summary already aggregates every response status, but taking
+    the first N evidence rows made a busy endpoint appear to have only its
+    earliest status (usually 401).  Prefer one row per distinct status, then
+    fill the remaining slots in execution order.  This keeps the payload small
+    without hiding 403/404/431 (or any other observed status) from the report.
+    """
+    if not candidates or limit <= 0:
+        return []
+    selected: list[dict[str, Any]] = []
+    selected_indices: set[int] = set()
+    seen_statuses: set[str] = set()
+    for index, row in enumerate(candidates):
+        status = row.get("response_status")
+        if status is None:
+            status = row.get("http_status")
+        key = str(status) if status is not None else "-"
+        if key in seen_statuses:
+            continue
+        selected.append(row)
+        selected_indices.add(index)
+        seen_statuses.add(key)
+        if len(selected) >= limit:
+            return selected
+    for index, row in enumerate(candidates):
+        if index in selected_indices:
+            continue
+        selected.append(row)
+        if len(selected) >= limit:
+            break
+    return selected
+
+
 def build_api_endpoint_report(db: Session, job: ScanJob) -> dict[str, Any]:
     catalog = _skill_catalog()
 
@@ -195,7 +230,7 @@ def build_api_endpoint_report(db: Session, job: ScanJob) -> dict[str, Any]:
 
     _EVIDENCE_PER_EP = 10
     obs_by_ep: dict[tuple[str, str], dict[str, Any]] = defaultdict(
-        lambda: {"skills": set(), "identities": set(), "statuses": defaultdict(int), "real": 0, "count": 0, "evidence": []}
+        lambda: {"skills": set(), "identities": set(), "statuses": defaultdict(int), "real": 0, "count": 0, "evidence_candidates": []}
     )
     shadow_paths: set[str] = set()
     for o in observations:
@@ -215,9 +250,11 @@ def build_api_endpoint_report(db: Session, job: ScanJob) -> dict[str, Any]:
             if isinstance(st, int) and st > 0:
                 agg["real"] += 1
         agg["count"] += 1
-        # cURL + request body + response as evidence for the drill-down.
-        if o.get("curl") and len(agg["evidence"]) < _EVIDENCE_PER_EP:
-            agg["evidence"].append({
+        # cURL + request body + response as evidence for the drill-down. Keep
+        # candidates first; final selection is status-aware so a burst of 401s
+        # cannot hide later 403/404/431 responses.
+        if o.get("curl"):
+            agg["evidence_candidates"].append({
                 "skill_id": str(o.get("skill_id") or ""),
                 "method": str(o.get("method") or ""),
                 "url": str(o.get("endpoint") or o.get("url") or ""),
@@ -272,7 +309,10 @@ def build_api_endpoint_report(db: Session, job: ScanJob) -> dict[str, Any]:
             "findings": [{"severity": f["severity"], "title": f["title"], "owasp": f["owasp"], "skill_id": f["skill_id"], "is_bac": f["is_bac"], "verification": f["verification"], "http_status": f.get("http_status")} for f in fs],
             "findings_by_severity": dict(sev_counts),
             "advisories": [{"title": f["title"], "owasp": f["owasp"], "skill_id": f["skill_id"], "is_bac": f["is_bac"]} for f in adv_by_ep.get(key, [])],
-            "evidence": list(agg["evidence"]) if agg else [],
+            "evidence": _representative_evidence(
+                list(agg.get("evidence_candidates") or []) if agg else [],
+                _EVIDENCE_PER_EP,
+            ),
             "quality": _quality(tested, skills, real, bac_tested, len(fs)),
         })
 
