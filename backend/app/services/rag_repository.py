@@ -474,13 +474,22 @@ def knowledge_health(*, db: Session | None = None) -> dict[str, Any]:
                 text("SELECT source_kind, COUNT(*) FROM rag_knowledge_store GROUP BY source_kind")
             ).fetchall()
         }
+        # "Sem síntese" = accepted sem raw_llm_response E sem conteúdo utilizável
+        # (learned_prompt/learned_mission/steps_to_reproduce). Alinhado com
+        # _learning_can_be_accepted/_trusted_accepted_learning_clause: rows do
+        # crawler H1 e curated seeds são aceitas deterministicamente sem chamada
+        # LLM — contá-las como problema era falso positivo do health check
+        # (10k learnings legítimas sinalizavam rag_warmup ok=false).
         unsynthesized_accepted = int(
             db.execute(
                 text(
                     "SELECT COUNT(*) FROM vulnerability_learnings "
                     "WHERE status = 'accepted' "
                     "AND COALESCE(source_kind, '') <> 'curated_learning_seed' "
-                    "AND (raw_llm_response IS NULL OR trim(raw_llm_response) = '')"
+                    "AND (raw_llm_response IS NULL OR trim(raw_llm_response) = '') "
+                    "AND COALESCE(learned_prompt, '') = '' "
+                    "AND COALESCE(learned_mission, '') = '' "
+                    "AND COALESCE(steps_to_reproduce, '') = ''"
                 )
             ).scalar()
             or 0

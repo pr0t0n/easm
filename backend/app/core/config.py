@@ -99,7 +99,7 @@ class Settings(BaseSettings):
     # disabled independently without disabling the evidence/wire lifecycle.
     finding_adjudication_enabled: bool = True
     finding_adjudication_use_ollama: bool = True
-    finding_adjudication_timeout_seconds: int = 12
+    finding_adjudication_timeout_seconds: int = 60
     finding_adjudication_shadow_mode: bool = True
     frontend_origin: str = "http://localhost:5173"
     frontend_origins: str = "http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174"

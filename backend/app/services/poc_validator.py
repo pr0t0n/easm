@@ -106,8 +106,21 @@ def _select_validation_tool(finding: Any) -> tuple[str | None, str]:
     if any(k in title for k in ("oauth", "open id connect")):
         return "nuclei-oauth", target_url
 
-    # RCE / Command Injection
-    if any(k in title for k in ("rce", "remote code execution", "command injection", "os injection")):
+    # Header misconfigs (clickjacking, CSP, HSTS, CORP...) — verify via
+    # nuclei-headers. Vem ANTES de RCE/CORS: "cross-origin-resource-policy"
+    # contém "rce" ("resou-rce") e era desviado para nuclei-rce, que puxava
+    # CVE intelligence genérico e corrompia a severidade para critical (9.8).
+    header_name = str(details.get("header_name") or "").lower().strip()
+    if header_name or any(k in title for k in (
+        "clickjacking", "x-frame-options", "content security policy",
+        "content-security-policy", "hsts", "missing security header",
+        "header de seguranca", "header de segurança",
+    )):
+        return "nuclei-headers", target_url
+
+    # RCE / Command Injection — word-boundary: substring "rce" casa com
+    # "resource"/"source" e desvia findings de header/caminho para nuclei-rce.
+    if any(k in title for k in ("remote code execution", "command injection", "os injection")) or re.search(r"\brce\b", title):
         return "nuclei-rce", target_url
 
     # LFI / Path Traversal
@@ -141,14 +154,10 @@ def _select_validation_tool(finding: Any) -> tuple[str | None, str]:
     if "subdomain takeover" in title or "dangling cname" in title:
         return "nuclei-takeover", target_url
 
-    # CORS Misconfiguration
+    # CORS Misconfiguration — "cors" como substring é seguro, mas mantém
+    # após o bloco de headers para não capturar nomes de header.
     if "cors" in title:
         return "nuclei-cors", target_url
-
-    # Header misconfigs (clickjacking, CSP, HSTS) — verify via nuclei-headers
-    if any(k in title for k in ("clickjacking", "x-frame-options", "content security policy",
-                                 "hsts", "missing security header")):
-        return "nuclei-headers", target_url
 
     # Generic Nuclei candidate: re-run original template on the specific matched_at URL
     if tool_orig.startswith("nuclei"):

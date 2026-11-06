@@ -463,7 +463,7 @@ def review_with_llm(dossier: dict[str, Any]) -> tuple[dict[str, Any], dict[str, 
     prompt = f"{schema_instruction}\n\n{untrusted}"
     prompt_hash = _canonical_hash(prompt)
     try:
-        timeout = min(20.0, max(3.0, float(getattr(settings, "finding_adjudication_timeout_seconds", 12))))
+        timeout = min(60.0, max(3.0, float(getattr(settings, "finding_adjudication_timeout_seconds", 60))))
         with httpx.Client(timeout=timeout) as client:
             response = client.post(
                 f"{str(settings.ollama_base_url).rstrip('/')}/api/generate",
@@ -863,6 +863,35 @@ def adjudicate_finding(db: Session, job: Any, finding: Any, *, force: bool = Fal
     if latest is not None and latest.dossier_hash == dossier_hash and not force:
         return adjudication_to_dict(latest, wires=_wires_for_adjudication(db, latest.id))
     decision = deterministic_verdict(dossier)
+    # Findings puramente informacionais (fingerprint, tecnologia detectada,
+    # porta aberta) não têm vetor exploitável a validar — exigir proof pack /
+    # baseline-vs-exploit deles (scan #2: 11 info → blocked) é categoria
+    # errada. Veredito not_applicable/informational, respeitando vereditos
+    # terminais já produzidos pelo gate determinístico.
+    if (
+        str(getattr(finding, "severity", "") or "").lower() == "info"
+        and decision["verdict"] not in {"confirmed", "refuted", "not_applicable"}
+        and not (decision["verdict"] == "blocked" and decision["reason_code"] == "scope_blocked")
+    ):
+        informational = FindingAdjudication(
+            scan_job_id=job.id,
+            finding_id=finding.id,
+            cycle=int(getattr(latest, "cycle", 0) or 0) + 1,
+            status="completed",
+            dossier_hash=dossier_hash,
+            dossier=dossier,
+            final_verdict="not_applicable",
+            reason_code="informational_observation",
+            confidence=1.0,
+            completed_at=datetime.now(),
+            decision_metadata={"single_judge": "deterministic_evidence_gate"},
+        )
+        db.add(informational)
+        db.flush()
+        project_adjudication_to_finding(db, finding, informational)
+        record_adjudication_feedback(db, job, finding, informational)
+        persist_attack_paths(db, job)
+        return adjudication_to_dict(informational, wires=[])
     cycle = int(getattr(latest, "cycle", 0) or 0) + 1
     if cycle > MAX_CYCLES_PER_FINDING:
         if latest is not None:
@@ -957,6 +986,22 @@ def adjudicate_finding(db: Session, job: Any, finding: Any, *, force: bool = Fal
                 getattr(settings, "finding_adjudication_shadow_mode", True)
             ) else None
             action = dict(model_action or _default_action(dossier, decision))
+            # Família sem validator automático: sem ferramenta, o wire seria
+            # criado condenado (wire_not_materializable → "blocked" em massa,
+            # scan #2: 19/22 findings bloqueados por gap de tooling, não por
+            # evidência). O veredito honesto é needs_human_review.
+            _tool, _profile = _wire_tool(str(action.get("action_id") or ""), finding)
+            if not _tool:
+                adjudication.status = "completed"
+                adjudication.final_verdict = "needs_human_review"
+                adjudication.reason_code = "no_validator_for_family"
+                adjudication.completed_at = datetime.now()
+                db.add(adjudication)
+                db.flush()
+                project_adjudication_to_finding(db, finding, adjudication)
+                record_adjudication_feedback(db, job, finding, adjudication)
+                persist_attack_paths(db, job)
+                return adjudication_to_dict(adjudication, wires=[])
             wire = create_validation_wire(db, job, finding, adjudication, dossier, action)
             wires.append(wire)
             if wire.action_id == "request_human_input" or wire.status == "blocked":
@@ -1019,7 +1064,9 @@ def project_adjudication_to_finding(db: Session, finding: Any, adjudication: Any
     verdict = str(adjudication.final_verdict or "inconclusive").lower()
     reason = str(adjudication.reason_code or "insufficient_evidence")
     finding.verification_status = verdict
-    finding.is_false_positive = verdict in {"refuted", "not_applicable"}
+    # not_applicable por "informational_observation" NÃO é falso positivo —
+    # é uma observação válida fora da categoria de vulnerabilidade validável.
+    finding.is_false_positive = verdict in {"refuted", "not_applicable"} and not reason.startswith("informational")
     details = dict(finding.details or {})
     if verdict == "confirmed" and not str(finding.recommendation or "").strip():
         try:
@@ -1641,7 +1688,10 @@ def refresh_finding_intelligence(db: Session, job: Any, finding: Any) -> dict[st
         "public_exploit_status": snapshot.public_exploit_status,
     }
     finding.details = details
-    if snapshot.cvss_score is not None:
+    # Só aplica CVSS de intelligence quando o finding realmente carrega um CVE:
+    # lookup genérico estava sobrescrevendo findings de configuração (ex.: header
+    # ausente, sem CVE) com score de CVE alheio (scan #2: CORP → cvss 9.8).
+    if snapshot.cvss_score is not None and str(getattr(finding, "cve", "") or "").strip():
         finding.cvss = snapshot.cvss_score
     db.add(finding)
     db.flush()
