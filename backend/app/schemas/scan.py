@@ -59,13 +59,19 @@ class ScanCreate(BaseModel):
     llm_risk_strategy_profile: str | None = None
     llm_risk_request_template: str | None = None
     llm_risk_response_field: str | None = None
-    # EASM scan level: 'full' (P01-P22) or 'asm' (passive recon only P01-P08+P18+P21-P22)
-    scan_level: str = "full"
+    # EASM scan level: 'full' (P01-P22) or 'asm' (passive recon only P01-P08+P18+P21-P22).
+    # Default 'aggressive' por decisão do sponsor (2026-11-04): o standard da
+    # plataforma é o perfil profundo. Ver docs/LANGGRAPH_BRAIN_PLAN.md §0.
+    scan_level: str = "aggressive"
     # Target authentication for scanner (propagated to ffuf/curl/sqlmap)
     auth_config: dict[str, Any] | None = None
     # Optional source/repository input for SAST and secret scanners.
     source_config: dict[str, Any] | None = None
     api_scan_config: dict[str, Any] | None = None
+    # Engine de decisão do scan: "operator" (fila de work items) ou "langgraph"
+    # (grafo supervisor). None = resolve por settings.scan_engine / flag legada.
+    # docs/LANGGRAPH_BRAIN_PLAN.md (Fase 0).
+    scan_engine: str | None = None
 
 
 class ScanResponse(BaseModel):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 import httpx
@@ -333,6 +334,202 @@ class MCPClient:
         legacy["execution_path"] = result.get("execution_path") or "mcp_to_kali"
         legacy["profile"] = result.get("profile") or profile_name
         legacy["raw_mcp_status"] = result.get("status")
+        # Fase 2 (LANGGRAPH_BRAIN_PLAN): o envelope v1 acompanha o resultado
+        # para o grafo consumir findings_raw na borda (extração conservadora
+        # já feita no MCP/runner). Mesma versão do contrato do mcp_server.
+        try:
+            from app.services.result_envelope import build_envelope
+
+            legacy["envelope"] = build_envelope(
+                tool=requested,
+                target=normalized_target,
+                status=str(result.get("status") or "unknown"),
+                return_code=result.get("return_code") if isinstance(result.get("return_code"), int) else None,
+                stdout=str(result.get("stdout") or ""),
+                stderr=str(result.get("stderr") or ""),
+                parsed=result.get("parsed"),
+                command=str(result.get("command") or ""),
+                workdir=str(result.get("workdir") or ""),
+                duration_seconds=result.get("duration_seconds"),
+                job_id=str(result.get("dispatch_task_id") or result.get("job_id") or ""),
+            )
+        except Exception:
+            pass
+        if skill_context:
+            legacy["skill_context"] = dict(skill_context)
+            if skill_context.get("skill_id"):
+                legacy["skill_id"] = skill_context.get("skill_id")
+        if normalized_target != original_target:
+            legacy["original_target"] = original_target
+        return legacy
+
+    def submit_kali_tool_async(
+        self,
+        tool_name: str,
+        target: str,
+        *,
+        targets: list[str] | None = None,
+        scan_id: int | str | None = None,
+        timeout: int | None = None,
+        extra_args: list[str] | None = None,
+        expected_evidence: list[str] | None = None,
+        poll_interval: float = 5.0,
+        on_tick=None,
+    ) -> dict[str, Any]:
+        """Fase 4 — despacho ASSÍNCRONO via MCP: submit retorna na hora e o
+        poll acontece aqui, com ticks de progresso.
+
+        O caminho sync (`execute_kali_tool_sync`) segura uma chamada HTTP pelo
+        timeout inteiro da ferramenta (até 15 min p/ sqlmap/wapiti) — o nó do
+        grafo congela e o state não persiste, parecendo "spin" (diagnosticado
+        via faulthandler no scan 1/www.example.com, 2026-11-05). Aqui o estado
+        do job é consultado a cada `poll_interval`s e `on_tick(elapsed_s)` é
+        chamado para progresso visível.
+        """
+        requested = str(tool_name or "").strip()
+        original_target = str(target or "").strip()
+        normalized_target = normalize_target_for_kali(original_target)
+        payload = {
+            "phase_id": "",
+            "skill_id": "",
+            "tool_name": requested,
+            "profile": "",
+            "target": normalized_target,
+            "arguments": {
+                "scan_id": scan_id or "mcp_scan",
+                "timeout": timeout,
+                "extra_args": [str(a) for a in (extra_args or []) if str(a).strip()],
+                "authorized_scope": resolve_authorized_scope_for_dispatch(
+                    scan_id if isinstance(scan_id, int) else None
+                ),
+            },
+            "expected_evidence": list(expected_evidence or ["stdout"]),
+        }
+        if targets and len(targets) > 1:
+            payload["targets"] = [normalize_target_for_kali(str(t or "").strip()) for t in targets if str(t or "").strip()]
+
+        started = time.monotonic()
+        try:
+            with httpx.Client(base_url=self.base_url, timeout=self._sync_timeout(30.0)) as client:
+                response = client.post("/mcp/submit", json=payload)
+                response.raise_for_status()
+                contract = dict(response.json())
+        except Exception as exc:  # noqa: BLE001
+            return {"status": "error", "dispatch_error": f"submit_failed:{type(exc).__name__}: {exc}", "tool": requested}
+
+        if contract.get("status") != "submitted" or not contract.get("dispatch_task_id"):
+            contract.setdefault("tool", requested)
+            return contract
+
+        job_id = str(contract["dispatch_task_id"])
+        deadline = started + float(timeout or 1800) + 30.0
+        terminal = {"done", "failed", "timeout", "skipped"}
+        while True:
+            elapsed = time.monotonic() - started
+            try:
+                with httpx.Client(base_url=self.base_url, timeout=self._sync_timeout(15.0)) as client:
+                    status_response = client.get(f"/mcp/jobs/{job_id}")
+                    status_response.raise_for_status()
+                    job_status = str(status_response.json().get("status") or "")
+            except Exception:
+                job_status = ""
+            if job_status in terminal:
+                break
+            if time.monotonic() > deadline:
+                return {
+                    "status": "error",
+                    "dispatch_error": f"async_poll_timeout job={job_id}",
+                    "dispatch_task_id": job_id,
+                    "tool": requested,
+                }
+            if callable(on_tick):
+                try:
+                    on_tick(int(elapsed))
+                except Exception:
+                    pass
+            time.sleep(max(1.0, poll_interval))
+
+        try:
+            with httpx.Client(base_url=self.base_url, timeout=self._sync_timeout(120.0)) as client:
+                result_response = client.get(f"/mcp/jobs/{job_id}/result")
+                result_response.raise_for_status()
+                result = dict(result_response.json())
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "status": "error",
+                "dispatch_error": f"result_fetch_failed:{type(exc).__name__}: {exc}",
+                "dispatch_task_id": job_id,
+                "tool": requested,
+            }
+        result.setdefault("job_id", job_id)
+        return result
+
+    def execute_kali_tool_async(
+        self,
+        tool_name: str,
+        target: str,
+        *,
+        targets: list[str] | None = None,
+        scan_id: int | str | None = None,
+        timeout: int | None = None,
+        extra_args: list[str] | None = None,
+        expected_evidence: list[str] | None = None,
+        skill_context: dict[str, Any] | None = None,
+        poll_interval: float = 5.0,
+        on_tick=None,
+    ) -> dict[str, Any]:
+        """Versão async do execute_kali_tool_sync: mesmo contrato de saída
+        (shape legado + envelope), mas sem segurar HTTP pelo timeout inteiro."""
+        requested = str(tool_name or "").strip()
+        original_target = str(target or "").strip()
+        normalized_target = normalize_target_for_kali(original_target)
+        result = self.submit_kali_tool_async(
+            requested,
+            original_target,
+            targets=targets,
+            scan_id=scan_id,
+            timeout=timeout,
+            extra_args=extra_args,
+            expected_evidence=expected_evidence,
+            poll_interval=poll_interval,
+            on_tick=on_tick,
+        )
+        if str(result.get("status") or "").lower() == "error" and not result.get("stdout"):
+            result.setdefault("tool", requested)
+            result.setdefault("target", normalized_target)
+            return result
+
+        profile_name = profile_for_tool(requested.lower()) or TOOL_TO_PROFILE.get(requested.lower(), requested)
+        legacy = normalize_kali_result(
+            tool_name=requested,
+            target=normalized_target,
+            scan_mode="unit",
+            result=result,
+        )
+        legacy["execution_path"] = "mcp_to_kali_async"
+        legacy["profile"] = result.get("profile") or profile_name
+        legacy["raw_mcp_status"] = result.get("status")
+        try:
+            from app.services.result_envelope import build_envelope
+
+            envelope = result.get("envelope") if isinstance(result.get("envelope"), dict) else None
+            if envelope is None:
+                envelope = build_envelope(
+                    tool=requested,
+                    target=normalized_target,
+                    status=str(result.get("status") or "unknown"),
+                    return_code=result.get("return_code") if isinstance(result.get("return_code"), int) else None,
+                    stdout=str(result.get("stdout") or ""),
+                    stderr=str(result.get("stderr") or ""),
+                    parsed=result.get("parsed"),
+                    command=str(result.get("command") or ""),
+                    workdir=str(result.get("workdir") or ""),
+                    duration_seconds=result.get("duration_seconds"),
+                    job_id=str(result.get("job_id") or ""),
+                )
+            legacy["envelope"] = envelope
+        except Exception:
+            pass
         if skill_context:
             legacy["skill_context"] = dict(skill_context)
             if skill_context.get("skill_id"):

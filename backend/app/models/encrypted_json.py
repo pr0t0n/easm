@@ -70,6 +70,23 @@ class StateDataJSON(TypeDecorator):
 
     _SENSITIVE_KEYS = ("auth_config", "llm_risk")
 
+    _CAPPED_LISTS = {
+        "activity_metrics": 500,
+        "node_history": 400,
+        "autonomy_notes": 300,
+        "autonomy_todos": 300,
+        "autonomy_actions": 300,
+        "autonomy_observations": 300,
+        "autonomy_errors": 300,
+        "llm_reasoning": 200,
+        "llm_reasoning_feedback": 200,
+        "strategy_runtime_timeline": 240,
+        "envelope_findings": 200,
+        "tool_execution_results": 300,
+        "delegation_log": 200,
+        "supervisor_evaluations": 200,
+    }
+
     def process_bind_param(self, value: Any, dialect) -> Any:
         if value is None or not isinstance(value, dict):
             return value
@@ -82,6 +99,16 @@ class StateDataJSON(TypeDecorator):
                 continue  # already encrypted (e.g. re-saving a loaded row unchanged)
             plaintext = json.dumps(sub, default=str).encode("utf-8")
             out[key] = {"__enc__": _fernet().encrypt(plaintext).decode("ascii")}
+        # Fase 1 (LANGGRAPH_BRAIN_PLAN) — state slim: listas de telemetria
+        # append-only ganham cap no checkpoint para o JSONB não crescer sem
+        # limite em scans longos. Só entra lista de telemetria — nunca as de
+        # decisão (executed_tool_runs = contrato de dedup; vulnerabilidades_
+        # encontradas = dado central; logs_terminais = cópia primária de log
+        # durante o scan, flushada para ScanLog ao final).
+        for key, cap in self._CAPPED_LISTS.items():
+            sub = out.get(key)
+            if isinstance(sub, list) and len(sub) > cap:
+                out[key] = sub[-cap:]
         return out
 
     def process_result_value(self, value: Any, dialect) -> Any:

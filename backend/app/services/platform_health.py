@@ -132,10 +132,15 @@ def _worker_has_active_scan_task(short_name: str) -> bool | None:
         db = SessionLocal()
         try:
             recent_cutoff = datetime.now() - timedelta(seconds=max(_WATCHDOG_STALE_SECONDS, 300))
+            # Sem filtro de mode/worker_name: heartbeats são gravados por
+            # hostname (WORKER_NAME não está no compose) e com mode=unit, então
+            # o filtro antigo (mode == "scope") NUNCA casava — o guard reiniciava
+            # o worker_scope no meio de scans ativos (ciclo de restart 2026-11-04).
+            # worker_scope é o único consumidor de scan.unit: qualquer heartbeat
+            # busy com scan recente implica trabalho de scan em voo.
             active_hb = (
                 db.query(WorkerHeartbeat.id)
                 .filter(
-                    WorkerHeartbeat.mode == worker_group,
                     WorkerHeartbeat.current_scan_id.isnot(None),
                     WorkerHeartbeat.status.in_(["busy", "running", "active"]),
                     WorkerHeartbeat.last_seen_at >= recent_cutoff,

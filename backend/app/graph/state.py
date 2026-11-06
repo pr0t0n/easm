@@ -106,6 +106,56 @@ class AgentState(TypedDict):
     pentest_strategy: dict[str, Any]
     pending_pentest_tactic: dict[str, Any]
     pentest_tactics_completed: list[dict[str, Any]]
+    # Phase walker / kill-chain / offensive runtime — DECLARADOS de propósito:
+    # chaves ausentes no TypedDict eram descartadas no merge entre nós do grafo,
+    # então o walker decidia sobre state que nunca chegava ao pipeline (scan #39:
+    # fases travadas em P02, ledger vazio, kill-chain parado em RECONNAISSANCE).
+    pentest_phase_index: int                    # Índice do walker P01→P22
+    current_pentest_phase_id: str               # Fase técnica atual (P01..P22)
+    phase_ledger: dict[str, Any]                # Ledger de evidências por fase
+    last_routed_phase_id: str                   # Fase no último roteamento (anti-loop)
+    kill_chain_stage: str                       # Estágio atual da Cyber Kill Chain
+    current_activity_demand: dict[str, Any]     # Demanda de atividade p/ o agente
+    noise_profile: str                          # Perfil de ruído da campanha
+    campaign: dict[str, Any]                    # Estado da campanha ofensiva
+    active_hypotheses: list[dict[str, Any]]     # Hipóteses adversariais ativas
+    validated_chains: list[dict[str, Any]]      # Cadeias de exploit validadas
+    offensive_priority_queue: list[dict[str, Any]]  # Fases promovidas por sinal ofensivo
+    strategy_runtime_timeline: list[dict[str, Any]] # Eventos da estratégia operacional
+    # Segundo passe — chaves top-level usadas pelo grafo mas ausentes do schema
+    # (mesma classe de bug: silenciosamente descartadas entre nós).
+    max_iterations: int                     # Orçamento de iterações do supervisor
+    scan_profile: dict[str, Any]            # Perfil ativo (asm/full/aggressive/api)
+    detected_tech_stack: list[str]          # Tags de stack detectadas (httpx/whatweb)
+    tech_stack_signature: str               # Assinatura de stack p/ invalidação de skill
+    authorization_gate: dict[str, Any]      # Resultado do gate de autorização
+    auth_summary: dict[str, Any]            # Resumo de preparação de auth
+    agent_report: dict[str, Any]            # Último relatório do agente ao supervisor
+    attack_paths: list[dict[str, Any]]      # Caminhos de ataque correlacionados
+    chaining_candidates: list[dict[str, Any]]  # Candidatos a cadeia de exploit
+    completed_activity_types: list[str]     # Tipos de atividade já exercidos
+    current_activity_log_id: Any            # ID do log de atividade corrente
+    current_node: str                       # Nó corrente (métricas de fluxo)
+    kill_chain_progress: dict[str, Any]     # Progresso da kill chain
+    llm_reasoning_feedback: list[dict[str, Any]]  # Feedback do raciocínio LLM
+    offensive_observations: list[Any]       # Observações ofensivas do workflow
+    pending_skill_refresh: bool             # Skill stale p/ refresh de stack
+    pentest_hypotheses: list[dict[str, Any]]     # Hipóteses do motor de hipóteses
+    post_exploitation_queue: list[dict[str, Any]]  # Fila pós-exploração
+    rag_enriched: bool                      # RAG de enriquecimento executado
+    rag_patterns: list[Any]                 # Padrões recuperados via RAG
+    recon_coverage: dict[str, Any]          # Cobertura de recon
+    recon_coverage_gaps: list[Any]          # Gaps de cobertura de recon
+    recon_graph: dict[str, Any]             # Grafo de recon (recomendações)
+    recon_reanalyze_queue: list[Any]        # Itens de reanálise de recon
+    recon_skill_recommendations: list[dict[str, Any]]  # Recomendações de skill de recon
+    risk_targets_resolvable: list[str]      # Alvos de risco resolvíveis
+    risk_targets_unresolved: list[str]      # Alvos de risco não resolvidos
+    skill_library_context: dict[str, Any]   # Contexto da biblioteca de skills
+    subdomain_coverage: dict[str, Any]      # Cobertura de subdomínios
+    supervisor_evaluations: list[dict[str, Any]]  # Avaliações do supervisor
+    loop_guard_runs_at_route: int                 # Contador de runs no último roteamento (anti-loop honesto)
+    envelope_findings: list[dict[str, Any]]       # Achados brutos do envelope v1 (MCP), com cap
     delegated_tasks: list[dict[str, Any]]
     delegation_log: list[dict[str, Any]]
     autonomy_notes: list[dict[str, Any]]

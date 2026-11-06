@@ -1528,6 +1528,31 @@ def _run_tools_and_collect(
             )
         _register_tool_result_metric(state, str(result.get("status") or ""))
         _update_tool_runtime_metrics(state, tool=tool, status=str(result.get("status") or ""))
+        # Fase 2 — consume o envelope v1 do MCP (findings_raw extraídos na
+        # borda, conservadores). Vai para um acumulador dedicado no state,
+        # com cap (state slim), para o evidence gate / findings_extractor
+        # usarem sem re-varrer stdout.
+        envelope = result.get("envelope") if isinstance(result.get("envelope"), dict) else None
+        if envelope:
+            findings_raw = list(envelope.get("findings_raw") or [])
+            if findings_raw:
+                bucket = list(state.get("envelope_findings") or [])
+                bucket.append({
+                    "tool": tool,
+                    "target": scan_target,
+                    "phase_id": _phase_id,
+                    "job_id": envelope.get("job_id") or "",
+                    "findings_raw": findings_raw[:20],
+                    "findings_raw_count": len(findings_raw),
+                    "quality_flags": list(envelope.get("quality_flags") or []),
+                })
+                state["envelope_findings"] = bucket[-200:]
+                metrics = dict(state.get("mission_metrics") or {})
+                metrics["envelope_findings_total"] = int(metrics.get("envelope_findings_total") or 0) + len(findings_raw)
+                state["mission_metrics"] = metrics
+                state["logs_terminais"].append(
+                    f"{log_prefix}: tool={tool} envelope_findings={len(findings_raw)} flags={','.join(envelope.get('quality_flags') or []) or '-'}"
+                )
         if result.get("status") == "executed":
             step_success = True
             _append_observation(
@@ -2332,6 +2357,56 @@ def initial_state(
         "pentest_strategy": {},
         "pending_pentest_tactic": {},
         "pentest_tactics_completed": [],
+        "pentest_phase_index": 0,
+        "current_pentest_phase_id": "",
+        "phase_ledger": _init_phase_ledger(),
+        "last_routed_phase_id": "",
+        "kill_chain_stage": "RECONNAISSANCE",
+        "current_activity_demand": {},
+        "noise_profile": "balanced",
+        "campaign": {},
+        "active_hypotheses": [],
+        "validated_chains": [],
+        "offensive_priority_queue": [],
+        # Chaves antes não declaradas (Fase 1) — inicialização explícita.
+        "max_iterations": {
+            # Orçamento de iterações do supervisor por profundidade do perfil:
+            # standard/agressivo é o default do sponsor (decisão 2026-11-04) —
+            # profundidade de referência: sqlmap mapeando tabelas.
+            "low": 10,
+            "medium": 24,
+            "high": 48,
+        }.get(str((profile or {}).get("depth") or "medium"), 24),
+        "detected_tech_stack": [],
+        "tech_stack_signature": "",
+        "authorization_gate": {},
+        "auth_summary": {},
+        "agent_report": {},
+        "attack_paths": [],
+        "chaining_candidates": [],
+        "completed_activity_types": [],
+        "current_activity_log_id": None,
+        "current_node": "",
+        "kill_chain_progress": {},
+        "llm_reasoning_feedback": [],
+        "offensive_observations": [],
+        "pending_skill_refresh": False,
+        "pentest_hypotheses": [],
+        "post_exploitation_queue": [],
+        "rag_enriched": False,
+        "rag_patterns": [],
+        "recon_coverage": {},
+        "recon_coverage_gaps": [],
+        "recon_graph": {},
+        "recon_reanalyze_queue": [],
+        "recon_skill_recommendations": [],
+        "risk_targets_resolvable": [],
+        "risk_targets_unresolved": [],
+        "skill_library_context": {},
+        "subdomain_coverage": {},
+        "supervisor_evaluations": [],
+        "loop_guard_runs_at_route": 0,
+        "envelope_findings": [],
         "delegated_tasks": [],
         "delegation_log": [],
         "autonomy_notes": [],
@@ -2367,6 +2442,8 @@ def initial_state(
         "completed_activity_types": [],
         "agent_report": {},
         "supervisor_evaluations": [],
+        "loop_guard_runs_at_route": 0,
+        "envelope_findings": [],
         "kill_chain_progress": {},
         "current_activity_log_id": None,
         # ── Phased pentest execution (P01–P22) ──────────────────────────────

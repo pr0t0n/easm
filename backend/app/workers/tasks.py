@@ -2459,6 +2459,24 @@ def list_scheduled_worker_groups():
 # Nucleo de execucao — compartilhado pelos dois modos
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _resolve_scan_engine(job: "ScanJob") -> str:
+    """Motor de decisão do scan: "operator" (fila de work items) ou "langgraph"
+    (grafo supervisor). Precedência: override por scan em state_data →
+    settings.scan_engine → flag legada offensive_operator_enabled.
+
+    Fase 0 do docs/LANGGRAPH_BRAIN_PLAN.md: uma única fonte de verdade para o
+    motor, sempre registrada em log/auditoria no início do scan.
+    """
+    state_data = job.state_data if isinstance(job.state_data, dict) else {}
+    override = str(state_data.get("scan_engine") or "").strip().lower()
+    if override in {"operator", "langgraph"}:
+        return override
+    configured = str(getattr(settings, "scan_engine", "") or "").strip().lower()
+    if configured in {"operator", "langgraph"}:
+        return configured
+    return "operator" if settings.offensive_operator_enabled else "langgraph"
+
+
 def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
     """Logica central de execucao do scan, usada por ambas as tasks."""
     db: Session = SessionLocal()
@@ -2535,7 +2553,23 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
         )
         db.commit()
 
-        if settings.offensive_operator_enabled:
+        scan_engine = _resolve_scan_engine(job)
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="worker",
+            level="INFO",
+            message=f"scan_engine={scan_engine} (motor de decisão do scan)",
+        ))
+        log_audit(
+            db,
+            event_type="scan.engine_selected",
+            message=f"Motor de decisão selecionado: {scan_engine}",
+            scan_job_id=job.id,
+            metadata={"scan_engine": scan_engine, "scan_mode": scan_mode},
+        )
+        db.commit()
+
+        if scan_engine == "operator":
             from app.services.offensive_operator_runner import run_offensive_operator_scan
 
             result = run_offensive_operator_scan(
@@ -2641,6 +2675,27 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
                 "parallelize",
                 "parallel_target_batch_size",
                 "parallel_wait_seconds",
+                # Fase 1 — checkpoint incremental: o progresso do grafo SOBREVIVE
+                # a retry/re-enfileiramento. Sem isso, cada resume reiniciava o
+                # walk em P01 com dedup vazio → re-dispatch infinito das mesmas
+                # ferramentas (scan 1/www.example.com: 414 jobs, 2 fases, 2026-11-05).
+                "executed_tool_runs",
+                "phase_ledger",
+                "pentest_phase_index",
+                "current_pentest_phase_id",
+                "tool_runtime",
+                "mission_metrics",
+                "kill_chain_stage",
+                "envelope_findings",
+                "pentest_tactics_completed",
+                "detected_tech_stack",
+                "tech_stack_signature",
+                "lista_ativos",
+                "discovered_ports",
+                "vulnerabilidades_encontradas",
+                "recon_graph",
+                "recon_skill_recommendations",
+                "agent_report",
             ):
                 if _runtime_key in existing_state:
                     state[_runtime_key] = existing_state[_runtime_key]
@@ -2664,7 +2719,13 @@ def _execute_scan(scan_id: int, scan_mode: ScanMode) -> dict:
                 state["lista_ativos"] = list(final_state.get("lista_ativos", []))
                 state["discovered_ports"] = list(final_state.get("discovered_ports", []))
 
-            recursion_limit = max(160, len(state.get("mission_items", [])) * 20)
+            # O orçamento de recursão deve cobrir o PIOR caso do orçamento de
+            # iterações do supervisor: cada iteração gasta ~6-7 nós (supervisor
+            # + pipeline de 5 + governance/executive). Com max_iterations=48
+            # (perfil aggressive/Normal), 180 estourava no meio da EXPLORAÇÃO
+            # (scan 1, www.example.com, 2026-11-05) antes do kill switch.
+            max_iters = int(state.get("max_iterations") or 12)
+            recursion_limit = max(200, (max_iters + 6) * 8, len(state.get("mission_items", [])) * 20)
             batch_result = app.invoke(
                 state,
                 config={

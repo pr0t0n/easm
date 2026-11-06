@@ -87,6 +87,56 @@ def latest_tool_health(db: Session, limit: int = 500) -> dict[str, Any]:
     return {"total": len(serialized), "counts": counts, "tools": serialized}
 
 
+# Ferramentas SAST/SCA que só são aplicáveis quando o scan traz um artefato de
+# código-fonte montado (source_config.source_path / repository_url). Sem
+# artefato, exigi-las no precheck bloqueava TODO scan full da plataforma —
+# visto em produção em 2026-11 (bandit/retire/trivy ausentes no Kali
+# bloqueavam scans web que jamais as usariam).
+SOURCE_ARTIFACT_ONLY_TOOLS = frozenset({"bandit", "retire", "trivy", "semgrep"})
+
+_BROKEN_PRECHECK_STATUSES = {"missing_profile", "missing_binary"}
+
+
+def partition_broken_required_tools(
+    tools: list[dict],
+    *,
+    has_source_artifact: bool,
+) -> tuple[list[str], list[str]]:
+    """Separa ferramentas required quebradas em (aplicáveis, excluídas).
+
+    Pura — recebe a lista serializada de latest_tool_health para ser testável
+    sem banco. Sem artefato de fonte, as SAST/SCA de SOURCE_ARTIFACT_ONLY_TOOLS
+    voltam em `excluded` (visibilidade no precheck, sem bloquear o scan).
+    """
+    all_broken_required = sorted({
+        str(t.get("tool_name") or "").strip().lower()
+        for t in tools or []
+        if str(t.get("status") or "") in _BROKEN_PRECHECK_STATUSES
+        and str((t.get("detail") or {}).get("requiredness") or "required") == "required"
+    })
+    if has_source_artifact:
+        return all_broken_required, []
+    applicable = [t for t in all_broken_required if t not in SOURCE_ARTIFACT_ONLY_TOOLS]
+    excluded = [t for t in all_broken_required if t in SOURCE_ARTIFACT_ONLY_TOOLS]
+    return applicable, excluded
+
+
+def applicable_broken_required_tools(
+    db: Session,
+    *,
+    has_source_artifact: bool,
+) -> tuple[list[str], list[str]]:
+    """Ferramentas required quebradas que REALMENTE se aplicam a este scan.
+
+    Com artefato de fonte, tudo se aplica e `excluded` fica vazio.
+    """
+    health = latest_tool_health(db)
+    return partition_broken_required_tools(
+        list(health.get("tools") or []),
+        has_source_artifact=has_source_artifact,
+    )
+
+
 def _health_from_catalog_row(row: dict[str, Any]) -> ToolHealthContract:
     available = bool(row.get("available"))
     catalog_status = str(row.get("status") or "unknown")

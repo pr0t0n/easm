@@ -1,12 +1,13 @@
 """Scan profile policy: phase coverage plus depth/intensity knobs.
 
-Platform contract for the 3 user-facing depths (locked in by
+Platform contract for the user-facing profiles (locked in by
 test_active_exploit_authorization.py::test_platform_profile_contract):
-  - Recon (asm):        no active exploitation, ever.
-  - Padrao (full):      no active exploitation, ever.
-  - Agressivo:           active exploitation runs once authorization is
+  - Superficial (asm):  no active exploitation, ever. ASM-only phases.
+  - Normal (aggressive): active exploitation runs once authorization is
                          approved (see resolve_active_exploit_authorization
-                         in strategy_runtime.py).
+                         in strategy_runtime.py). This is the platform
+                         STANDARD — P01-P22 completo, profundidade alta
+                         (sponsor decision 2026-11-04).
 `post_exploitation` is the single switch this contract reads — do not add a
 second, independently-settable "active exploitation" input; changing which
 profile enables it IS the platform's intended control surface.
@@ -29,7 +30,7 @@ API_PHASES = {"P03", "P04", "P08", "P16"}
 SCAN_PROFILES: dict[str, dict[str, Any]] = {
     "asm": {
         "id": "asm",
-        "label": "Recon",
+        "label": "Superficial",
         "coverage": "surface_recon",
         "depth": "low",
         "phase_ids": sorted(ASM_PHASES),
@@ -53,7 +54,7 @@ SCAN_PROFILES: dict[str, dict[str, Any]] = {
     },
     "aggressive": {
         "id": "aggressive",
-        "label": "Agressivo",
+        "label": "Normal",
         "coverage": "p01_p22",
         "depth": "high",
         "phase_ids": None,
@@ -61,7 +62,7 @@ SCAN_PROFILES: dict[str, dict[str, Any]] = {
         "max_risk_allowed": "high",
         "noise_profile": "aggressive",
         "post_exploitation": True,
-        "description": "P01-P22 com mais budget, mais ferramentas por skill e validacao profunda controlada.",
+        "description": "P01-P22 completo, profundidade alta — perfil Normal (padrao) da plataforma.",
     },
     "api": {
         "id": "api",

@@ -369,6 +369,12 @@ def decide_next_technique(
     the LLM is unreachable or returns malformed output. The returned dict
     matches the schema in `agents/supervisor_prompt.py`.
     """
+    # Fase 4 (LANGGRAPH_BRAIN_PLAN): raciocínio LLM no caminho quente só roda
+    # quando explicitamente habilitado. Com o llama3.2:3b em CPU cada chamada
+    # soma ~60s e, sob pressão de memória no host 8GB, o llama-server cai e
+    # toda iteração perde um minuto em timeout antes do fallback determinístico.
+    if not bool(getattr(settings, "llm_reasoning_enabled", True)):
+        return _deterministic_fallback(playbook, execution_context)
     user_prompt = build_supervisor_orchestration_prompt(
         playbook=playbook,
         execution_context=execution_context,

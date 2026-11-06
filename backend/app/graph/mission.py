@@ -1,6 +1,70 @@
 from __future__ import annotations
 
+import math
+
 from typing import Any
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Montagem dinâmica de fases (Fase 1, decisão do sponsor 2026-11-04): o plano de
+# fases segue o raciocínio de um pentest humano — núcleo sempre roda; as demais
+# entram quando o sinal de evidência as justifica, com motivo registrado no
+# ledger/trace. Fase sem regra = sempre aplicável.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _sig_domain(state: dict) -> tuple[bool, str]:
+    ok = str(state.get("target_type") or "").lower() in {"dominio", "domain"}
+    return ok, "alvo é domínio registrável" if ok else "alvo não é domínio (IP/hostname)"
+
+
+def _sig_subdomains(state: dict) -> tuple[bool, str]:
+    ativos = [a for a in (state.get("lista_ativos") or []) if str(a).strip()]
+    ok = len(ativos) > 1
+    return ok, f"{len(ativos)} ativos descobertos" if ok else "nenhum subdomínio adicional descoberto"
+
+
+def _sig_web_alive(state: dict) -> tuple[bool, str]:
+    ports = list(state.get("discovered_ports") or [])
+    runs = [str(r) for r in (state.get("executed_tool_runs") or [])]
+    web_probe = any(r.endswith("|httpx") or r.endswith("|whatweb") for r in runs)
+    ok = bool(ports) or web_probe
+    return ok, "serviço web confirmado" if ok else "nenhum serviço web confirmado ainda"
+
+
+def _sig_https(state: dict) -> tuple[bool, str]:
+    target = str(state.get("target") or "").lower()
+    ports = {int(p) for p in (state.get("discovered_ports") or []) if str(p).isdigit()}
+    ok = target.startswith("https://") or bool(ports & {443, 8443})
+    return ok, "superfície HTTPS presente" if ok else "alvo é HTTP puro (sem TLS)"
+
+
+PHASE_ENTRY_RULES: dict[str, str] = {
+    # OSINT/email/takeover/cloud só fazem sentido com domínio público
+    "P01": "domain", "P07": "domain", "P08": "domain", "P09": "subdomains", "P10": "domain",
+    # Fases web profundas exigem serviço web confirmado
+    "P06": "web_alive", "P12": "web_alive", "P13": "web_alive", "P14": "web_alive",
+    "P15": "web_alive", "P16": "web_alive", "P17": "web_alive", "P19": "web_alive",
+    # TLS só onde há HTTPS
+    "P18": "https",
+}
+
+_ENTRY_SIGNALS = {
+    "domain": _sig_domain,
+    "subdomains": _sig_subdomains,
+    "web_alive": _sig_web_alive,
+    "https": _sig_https,
+}
+
+
+def phase_entry_applicable(phase_id: str, state: dict) -> tuple[bool, str]:
+    """Uma fase entra no plano? (aplicável, justificativa). Sem regra = entra."""
+    rule = PHASE_ENTRY_RULES.get(str(phase_id))
+    if not rule:
+        return True, "sempre aplicável (núcleo)"
+    signal = _ENTRY_SIGNALS.get(rule)
+    if signal is None:
+        return True, f"regra {rule} desconhecida — tratada como núcleo"
+    return signal(dict(state or {}))
 
 
 # Pipeline phases exposed to the frontend for progress tracking
@@ -394,12 +458,21 @@ def _build_mission_phase_contracts() -> "dict[str, dict[str, Any]]":
 
     result: dict[str, dict[str, Any]] = {}
     for phase_id, contract in _OC.items():
+        required = list(contract.get("required_tools") or [])
+        n_required = len(required)
         result[phase_id] = {
             **contract,
-            # Normalized exit_criteria keys for workflow.validate_phase_exit_criteria
+            # Normalized exit_criteria keys for workflow.validate_phase_exit_criteria.
+            # Fase 0 (definition-of-done): preserva os campos ricos do core
+            # (allow_partial, evidence_required, minimum_evidence_strength...) que
+            # a normalização anterior descartava, e sobe os mínimos: tentativa
+            # cobre >=75% das required (listas típicas de 1-3 tools => quase todas);
+            # sucesso >=50% com piso 1 — 75% aqui travaria fases com falha parcial
+            # mista, pois o escape "all required failed" não cobre sucesso+falha.
             "exit_criteria": {
-                "min_required_tools_attempted": 1,
-                "min_required_tools_succeeded": 1,
+                **dict(contract.get("exit_criteria") or {}),
+                "min_required_tools_attempted": max(1, math.ceil(0.75 * n_required)),
+                "min_required_tools_succeeded": max(1, math.ceil(0.5 * n_required)),
                 "evidence_persisted": True,
                 # False: auto-registered by _update_phase_ledger_for_tool;
                 # never use this as a hard blocking gate.

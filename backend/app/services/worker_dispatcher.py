@@ -337,25 +337,68 @@ def execute_tool_with_workers(
                 "open_ports": [],
             }
         else:
-            result = mcp_client.execute_kali_tool_sync(
-                tool_name=tool_name,
-                target=target,
-                targets=targets or None,
-                scan_id=scan_id,
-                skill_context={
-                    "skill_id": dispatch_skill_id,
-                    "skill_contract": skill_contract or {},
-                    "technique": technique or {},
-                    "evidence_required": evidence_required or [],
-                    "constraints": constraints or [],
-                    "playbook": playbook or "",
-                    "auth_context": auth_context,
-                    "mcp_adapter_contract": adapter_contract,
-                    "agent_contract": dict((skill_contract or {}).get("agent_contract") or {}),
-                    "multi_agent": bool((skill_contract or {}).get("multi_agent")),
-                    "llm_reasoning": dict((skill_contract or {}).get("llm_reasoning") or {}),
-                },
-            )
+            skill_ctx = {
+                "skill_id": dispatch_skill_id,
+                "skill_contract": skill_contract or {},
+                "technique": technique or {},
+                "evidence_required": evidence_required or [],
+                "constraints": constraints or [],
+                "playbook": playbook or "",
+                "auth_context": auth_context,
+                "mcp_adapter_contract": adapter_contract,
+                "agent_contract": dict((skill_contract or {}).get("agent_contract") or {}),
+                "multi_agent": bool((skill_contract or {}).get("multi_agent")),
+                "llm_reasoning": dict((skill_contract or {}).get("llm_reasoning") or {}),
+            }
+            if bool(getattr(settings, "mcp_async_dispatch", True)):
+                # Fase 4: submit+poll com progresso — o nó não congela em
+                # ferramentas de 15 min; cada tick grava ScanLog para o state
+                # não parecer morto (watchdog/operador enxergam vida).
+                def _tick(elapsed_s: int, _tool: str = str(tool_name), _scan_id: Any = scan_id) -> None:
+                    if elapsed_s > 0 and elapsed_s % 60 == 0:
+                        try:
+                            from app.db.session import SessionLocal
+                            from app.models.models import ScanLog
+
+                            _db = SessionLocal()
+                            try:
+                                _db.add(ScanLog(
+                                    scan_job_id=_scan_id if isinstance(_scan_id, int) else None,
+                                    source="worker.progress_detail",
+                                    level="INFO",
+                                    message=f"tool={_tool} aguardando runner há {elapsed_s}s (dispatch async)",
+                                ))
+                                _db.commit()
+                            finally:
+                                _db.close()
+                        except Exception:
+                            pass
+
+                result = mcp_client.execute_kali_tool_async(
+                    tool_name=tool_name,
+                    target=target,
+                    targets=targets or None,
+                    scan_id=scan_id,
+                    # Sem override de timeout: o profile YAML da ferramenta é o
+                    # contrato (wfuzz=600s). Passar skill_contract.timeout
+                    # (até 1800s) sobrepujava o teto do profile e ferramentas
+                    # contra alvos lentos consumiam o dobro do orçamento
+                    # (www.example.com 2026-11-05: wfuzz 20+ min vs 600s).
+                    timeout=None,
+                    extra_args=extra_args,
+                    expected_evidence=list(evidence_required or []) or ["stdout"],
+                    skill_context=skill_ctx,
+                    poll_interval=5.0,
+                    on_tick=_tick,
+                )
+            else:
+                result = mcp_client.execute_kali_tool_sync(
+                    tool_name=tool_name,
+                    target=target,
+                    targets=targets or None,
+                    scan_id=scan_id,
+                    skill_context=skill_ctx,
+                )
     else:
         result = execute_via_kali(
             tool_name=tool_name,

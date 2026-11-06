@@ -537,6 +537,8 @@ def _mark_capability_runtime(state: AgentState, capability: str, source: str, ev
 
 def _update_execution_guardrails(state: AgentState) -> None:
     ctrl = dict(state.get("execution_control") or {})
+    max_iterations = int(state.get("max_iterations") or 12)
+    iteration = int(state.get("loop_iteration", 0))
     findings_total = len(state.get("vulnerabilidades_encontradas") or [])
     last_total = int(ctrl.get("last_findings_total", 0))
     no_progress = int(ctrl.get("no_progress_iterations", 0))
@@ -548,10 +550,16 @@ def _update_execution_guardrails(state: AgentState) -> None:
 
     ctrl["last_findings_total"] = findings_total
     ctrl["no_progress_iterations"] = no_progress
-    ctrl["approaching_limit"] = False
-    ctrl["remaining_iterations"] = None
+    ctrl["approaching_limit"] = iteration >= max(1, int(max_iterations * 0.85))
+    ctrl["remaining_iterations"] = max(0, max_iterations - iteration)
     ctrl["paused"] = bool(ctrl.get("paused", False))
 
+    if ctrl["approaching_limit"]:
+        _append_note(
+            state,
+            f"Orçamento de iterações próximo do limite ({iteration}/{max_iterations}).",
+            phase="execution-control",
+        )
     if no_progress >= 3:
         _append_todo(state, "Pivotar estratégia por estagnação de evidências", priority="high")
         ctrl["paused"] = True
@@ -1059,6 +1067,48 @@ def _phase_walker_tactic(state: AgentState) -> dict[str, Any] | None:
         ph_id = str(phase.get("id") or f"P{idx + 1:02d}")
         node = str(phase.get("node") or "asset_discovery")
         all_tools = [str(t) for t in (phase.get("tools") or [])]
+
+        # Montagem dinâmica (Fase 1): a fase entra só quando o sinal de
+        # evidência a justifica (estilo pentest humano). Skip vai para o
+        # ledger com motivo — nunca some do contrato.
+        from app.graph.mission import phase_entry_applicable
+        # Perfis com phase_ids explícitos (asm/api) restringem o contrato de
+        # cobertura — sem isso o asm executava fases de exploração e a
+        # cobertura por perfil não era previsível (scan #41).
+        profile_phase_ids = (state.get("scan_profile") or {}).get("phase_ids")
+        if isinstance(profile_phase_ids, list) and profile_phase_ids and ph_id not in set(profile_phase_ids):
+            ledger = dict(state.get("phase_ledger") or {})
+            entry = dict(ledger.get(ph_id) or {})
+            reason = f"fora do contrato do perfil ({state.get('scan_profile', {}).get('id') or 'perfil'})"
+            entry.update({
+                "phase_id": ph_id,
+                "status": "skipped",
+                "skip_reason": reason,
+                "completed_at": entry.get("completed_at") or datetime.now().isoformat(),
+            })
+            ledger[ph_id] = entry
+            state["phase_ledger"] = ledger
+            idx += 1
+            continue
+        applicable, entry_reason = phase_entry_applicable(ph_id, state)
+        if not applicable:
+            ledger = dict(state.get("phase_ledger") or {})
+            entry = dict(ledger.get(ph_id) or {})
+            reason = f"sem sinal de entrada: {entry_reason}"
+            entry.update({
+                "phase_id": ph_id,
+                "status": "skipped",
+                "skip_reason": reason,
+                "completed_at": entry.get("completed_at") or datetime.now().isoformat(),
+            })
+            ledger[ph_id] = entry
+            state["phase_ledger"] = ledger
+            state.setdefault("logs_terminais", []).append(
+                f"[phase-walker] {ph_id} {phase.get('title')}: {reason} — fase não aplicável ainda."
+            )
+            idx += 1
+            continue
+
         agent_contract: dict[str, Any] = {}
         if bool(getattr(settings, "agent_orchestrator_enabled", True)):
             try:
@@ -1080,10 +1130,22 @@ def _phase_walker_tactic(state: AgentState) -> dict[str, Any] | None:
         pending = [t for t in installed if not _phase_tool_done(ph_id, t)]
 
         if not installed:
+            reason = f"nenhuma ferramenta com profile Kali ({all_tools})"
             state.setdefault("logs_terminais", []).append(
-                f"[phase-walker] {ph_id} {phase.get('title')}: nenhuma ferramenta com "
-                f"profile Kali ({all_tools}) — fase pulada."
+                f"[phase-walker] {ph_id} {phase.get('title')}: {reason} — fase pulada."
             )
+            # Registrar no ledger para o definition-of-done e o Phase Monitor:
+            # sem isso a fase sumia do contrato mesmo tendo sido decidida.
+            ledger = dict(state.get("phase_ledger") or {})
+            entry = dict(ledger.get(ph_id) or {})
+            entry.update({
+                "phase_id": ph_id,
+                "status": "skipped",
+                "skip_reason": reason,
+                "completed_at": entry.get("completed_at") or datetime.now().isoformat(),
+            })
+            ledger[ph_id] = entry
+            state["phase_ledger"] = ledger
             idx += 1
             continue
         if not pending:
@@ -1091,6 +1153,19 @@ def _phase_walker_tactic(state: AgentState) -> dict[str, Any] | None:
                 f"[phase-walker] {ph_id} {phase.get('title')}: COMPLETA "
                 f"({len(installed)} ferramentas tentadas)."
             )
+            # Mesmo: a conclusão do walker deve refletir no ledger, senão
+            # _validate_and_advance_phase revalida uma fase que o walker já
+            # encerrou e o Phase Monitor subreporta a cobertura.
+            ledger = dict(state.get("phase_ledger") or {})
+            entry = dict(ledger.get(ph_id) or {})
+            entry.update({
+                "phase_id": ph_id,
+                "status": "completed",
+                "exit_criteria_met": True,
+                "completed_at": entry.get("completed_at") or datetime.now().isoformat(),
+            })
+            ledger[ph_id] = entry
+            state["phase_ledger"] = ledger
             idx += 1
             continue
 
@@ -1543,6 +1618,16 @@ def supervisor_node(state: AgentState) -> AgentState:
 
     state["loop_iteration"] = int(state.get("loop_iteration", 0)) + 1
 
+    # Kill switch: proteção contra loops infinitos (perdida no split e1c3d65,
+    # restaurada — sem ela o supervisor só para pelo recursion_limit do grafo).
+    # `or 12`: initial_state materializa a chave com None — get(..., 12) não basta.
+    max_iterations = int(state.get("max_iterations") or 12)
+    if state["loop_iteration"] > max_iterations:
+        state["routing_next_node"] = END
+        state["termination_reason"] = "max_iterations_reached"
+        state["objective_met"] = True
+        return state
+
     _update_execution_guardrails(state)
     # Advance kill-chain BEFORE refreshing skills so the stage gate is current.
     _maybe_advance_kill_chain_stage(state)
@@ -1645,7 +1730,7 @@ def supervisor_node(state: AgentState) -> AgentState:
             if coverage_mode_active
             else None
         )
-        if coverage_gap_node:
+        if coverage_gap_node and int(state.get("loop_iteration", 0)) < max_iterations - 2:
             _append_note(
                 state,
                 f"Segunda passada (coverage_mode=true): {coverage_gap_node} ainda tem profiles sem rodar.",
@@ -1711,6 +1796,9 @@ def supervisor_node(state: AgentState) -> AgentState:
         except Exception:
             pass
 
+    ctrl = dict(state.get("execution_control") or {})
+    remaining_raw = ctrl.get("remaining_iterations")
+    remaining = int(remaining_raw) if remaining_raw is not None else max_iterations
     if bool(ctrl.get("paused", False)) and next_node == "risk_assessment":
         _append_note(state, "Execução pausada por estagnação; aplicando pivô para coleta de novo contexto.", phase="execution-control")
         next_node = "threat_intel"
@@ -1737,12 +1825,41 @@ def supervisor_node(state: AgentState) -> AgentState:
     if next_node == current_phase and next_node not in {"END", ""}:
         pending_tactic = dict(state.get("pending_pentest_tactic") or {})
         pending_id = str(pending_tactic.get("tactic_id") or "")
-        if not pending_id or pending_id in _completed_pentest_tactic_ids(state):
-            state["routing_next_node"] = END
-            state["termination_reason"] = "loop_on_same_phase"
-            state["completed_capabilities"] = completed
-            state["current_phase"] = next_node
-            return state
+        # Mesma capability não é loop quando o phase walker avançou a fase
+        # técnica (P01→P02→...) dentro dela — visto em produção (scan #38):
+        # asset_discovery cobria P01→P02, mas o guard comparava só capability
+        # e abortava o scan no meio do recon com loop_on_same_phase.
+        last_routed_phase_id = str(state.get("last_routed_phase_id") or "")
+        current_phase_id = str(state.get("current_pentest_phase_id") or "")
+        phase_advanced = bool(current_phase_id) and current_phase_id != last_routed_phase_id
+        if phase_advanced:
+            state["last_routed_phase_id"] = current_phase_id
+            _append_note(
+                state,
+                f"Mesma capability {next_node}, mas fase avançou {last_routed_phase_id or '-'}→{current_phase_id}: progresso, não loop.",
+                phase="execution-control",
+            )
+        elif not pending_id or pending_id in _completed_pentest_tactic_ids(state):
+            # Loop só é loop se a iteração anterior não executou NENHUMA
+            # ferramenta nova — trabalhar a mesma fase por várias iterações
+            # (o pipeline seleciona 1 tool por vez) é progresso, não loop.
+            # Sem isso o guard abortava scans agressivos na iter ~10 de 48
+            # (scan #43): fase profunda + dispatch incremental = "loop" falso.
+            runs_now = len(state.get("executed_tool_runs") or [])
+            runs_at_last_route = int(state.get("loop_guard_runs_at_route") or 0)
+            if runs_now > runs_at_last_route:
+                state["loop_guard_runs_at_route"] = runs_now
+                _append_note(
+                    state,
+                    f"Mesma fase/capability, mas {runs_now - runs_at_last_route} ferramenta(s) executaram desde o último roteamento: progresso, não loop.",
+                    phase="execution-control",
+                )
+            else:
+                state["routing_next_node"] = END
+                state["termination_reason"] = "loop_on_same_phase"
+                state["completed_capabilities"] = completed
+                state["current_phase"] = next_node
+                return state
 
     route_node = "skill_selector" if next_node in TOOL_CAPABILITY_NODES else next_node
 

@@ -6,8 +6,8 @@ import secrets
 import sys
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import EmailStr, TypeAdapter, ValidationError
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from pydantic import BaseModel, EmailStr, TypeAdapter, ValidationError
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -3122,3 +3122,35 @@ def reject_vulnerability_learning(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Aprendizado nao encontrado")
     row = update_learning_review(db, row, current_user, "rejected", notes=(payload or {}).get("review_notes"))
     return {"ok": True, "item": serialize_vulnerability_learning(row)}
+
+
+# ── Fase 4: push de resultado do Kali runner ─────────────────────────────────
+
+class KaliResultCallback(BaseModel):
+    job_id: str
+    status: str
+    scan_id: int | None = None
+
+
+@router.post("/internal/kali-result-callback")
+def kali_result_callback(
+    payload: KaliResultCallback,
+    request: Request,
+) -> dict:
+    """Wake-up push do runner: grava o status terminal em Redis para o poll
+    loop do executor short-circuitar (docs/LANGGRAPH_BRAIN_PLAN.md Fase 4).
+
+    Só aceita com o token interno compartilhado; nunca toca o banco — apenas
+    Redis com TTL, então um spam de callbacks não tem superfície de dano.
+    """
+    from app.core.config import settings as _settings
+    from app.services.kali_executor import store_pushed_terminal_status
+
+    token = str(request.headers.get("X-Internal-Token") or "")
+    expected = str(getattr(_settings, "mcp_internal_token", "") or "")
+    if not expected or token != expected:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid internal token")
+    if str(payload.status) not in {"done", "failed", "timeout", "skipped"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="non-terminal status")
+    stored = store_pushed_terminal_status(payload.job_id, payload.status, payload.scan_id)
+    return {"ok": stored}

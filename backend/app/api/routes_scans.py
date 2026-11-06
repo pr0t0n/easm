@@ -2779,6 +2779,14 @@ def create_scan(
         ],
     }
     initial_state = merge_api_scan_state(initial_state, api_scan_config)
+    scan_engine = str(getattr(payload, "scan_engine", "") or "").strip().lower()
+    if scan_engine:
+        if scan_engine not in {"operator", "langgraph"}:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="scan_engine deve ser 'operator' ou 'langgraph'",
+            )
+        initial_state["scan_engine"] = scan_engine
     if auth_config:
         initial_state["auth_config"] = auth_config
     if source_config:
@@ -2888,17 +2896,33 @@ def create_scan(
             job.state_data = state
     try:
         if scan_level == "full" and settings.enforce_tool_health_precheck:
-            from app.services.tool_health_service import latest_tool_health
+            from app.services.tool_health_service import (
+                applicable_broken_required_tools,
+                latest_tool_health,
+            )
 
+            has_source_artifact = bool(
+                source_config
+                and (
+                    str(source_config.get("source_path") or "").strip()
+                    or str(source_config.get("repository_url") or "").strip()
+                )
+            )
             health = latest_tool_health(db)
             counts = dict(health.get("counts") or {})
-            broken = int(counts.get("missing_profile") or 0) + int(counts.get("missing_binary") or 0)
+            broken_tools, excluded_tools = applicable_broken_required_tools(
+                db, has_source_artifact=has_source_artifact
+            )
+            broken = len(broken_tools)
             state = dict(job.state_data or {})
             state["tool_health_precheck"] = {
                 "enforced": True,
                 "snapshot_available": bool(health.get("total")),
                 "counts": counts,
                 "broken_required": broken,
+                "broken_tools": broken_tools,
+                "excluded_not_applicable": excluded_tools,
+                "has_source_artifact": has_source_artifact,
             }
             job.state_data = state
             if health.get("total") and broken > 0:

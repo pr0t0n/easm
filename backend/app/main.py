@@ -158,8 +158,16 @@ def start_platform_guard():
         while True:
             try:
                 from app.db.session import SessionLocal
-                from app.services.platform_health import run_platform_self_heal, record_guard_heartbeat
+                from app.services.platform_health import run_platform_self_heal, record_guard_heartbeat, record_watchdog_heartbeat
                 record_guard_heartbeat()  # prova de vida do PRÓPRIO guardião
+                # O heartbeat do watchdog é escrito pela task do beat — que pode
+                # atrasar atrás de inundações de worker.heartbeat nas filas e
+                # disparar detecção falsa de "watchdog stale" → restarts em
+                # loop de celery_beat/worker_scope (incidente 2026-11-04). O
+                # guard (sempre de pé) também o grava: latência de fila não
+                # pode matar containers. A recuperação real de scans órfãos é
+                # a seção 3 do self-heal (baseada em DB, independente do beat).
+                record_watchdog_heartbeat()
                 db = SessionLocal()
                 try:
                     run_platform_self_heal(db, source="backend_thread", force=True)

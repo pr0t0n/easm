@@ -12,6 +12,7 @@ mapped profile, the workflow receives a structured error.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -24,6 +25,64 @@ from app.services.guardrail_policy import sanitize_tool_args
 
 
 logger = logging.getLogger(__name__)
+
+
+# ── Fase 4: push de resultado no lugar de poll ───────────────────────────────
+# O runner empurra o status terminal para um callback do backend, que grava em
+# Redis; o poll loop consulta Redis antes do GET e, quando o push chegou, faz
+# ZERO requests de polling — vai direto à busca do resultado rico.
+_RESULT_PUSH_PREFIX = "kali:result:"
+_RESULT_PUSH_TTL_SECONDS = int(os.getenv("KALI_RESULT_PUSH_TTL", "3600"))
+_result_push_client: Any = None
+_result_push_client_loaded = False
+
+
+def _result_push_redis() -> Any:
+    global _result_push_client, _result_push_client_loaded
+    if not _result_push_client_loaded:
+        _result_push_client_loaded = True
+        try:
+            import redis as redis_lib
+
+            _result_push_client = redis_lib.from_url(
+                os.getenv("REDIS_URL", "redis://redis:6379/3")
+            )
+        except Exception:
+            _result_push_client = None
+    return _result_push_client
+
+
+def pushed_terminal_status(job_id: str) -> Optional[str]:
+    """Status terminal empurrado pelo runner via callback (Redis)."""
+    client = _result_push_redis()
+    if client is None:
+        return None
+    try:
+        raw = client.get(f"{_RESULT_PUSH_PREFIX}{job_id}")
+        if not raw:
+            return None
+        payload = json.loads(raw)
+        status = str(payload.get("status") or "")
+        return status if status in TERMINAL_STATES else None
+    except Exception:
+        return None
+
+
+def store_pushed_terminal_status(job_id: str, status: str, scan_id: Any = None) -> bool:
+    """Grava o push do runner (chamado pelo endpoint de callback)."""
+    client = _result_push_redis()
+    if client is None:
+        return False
+    try:
+        client.setex(
+            f"{_RESULT_PUSH_PREFIX}{job_id}",
+            _RESULT_PUSH_TTL_SECONDS,
+            json.dumps({"status": status, "scan_id": scan_id, "pushed_at": time.time()}),
+        )
+        return True
+    except Exception:
+        return False
+
 
 
 # ── Configuration ────────────────────────────────────────────────────────────
@@ -466,6 +525,15 @@ def execute_via_kali(
             "extra_args": _clean_extra,
             "authorized_scope": resolve_authorized_scope_for_dispatch(scan_id),
         }
+        # Fase 4 — push de resultado: pede ao runner que empurre o status
+        # terminal para o callback interno em vez de o poller descobrir só
+        # na próxima rodada de polling.
+        if str(os.getenv("KALI_RESULT_PUSH_ENABLED", "true")).lower() not in {"0", "false", "no"}:
+            payload["callback_url"] = (
+                f"{os.getenv('BACKEND_INTERNAL_URL', 'http://backend:8000')}"
+                "/api/internal/kali-result-callback"
+            )
+            payload["callback_token"] = os.getenv("MCP_INTERNAL_TOKEN", "")
         _env_vars = dict(env_vars or {})
         _auth_headers = _auth_headers_from_skill_context(skill_context)
         if norm_tool == "jwt_tool" and not _env_vars.get("SCAN_JWT_TOKEN"):
@@ -521,6 +589,13 @@ def execute_via_kali(
                 f"client_timeout after {int(elapsed)}s",
                 dispatch_task_id=job_id,
             )
+        # Fase 4 — push no lugar de poll: se o runner já empurrou o status
+        # terminal (callback → Redis), pula o GET de polling e vai direto à
+        # busca do resultado rico (1 request em vez de N polls).
+        pushed = pushed_terminal_status(job_id)
+        if pushed:
+            status = pushed
+            break
         try:
             r = requests.get(f"{base}/jobs/{job_id}", timeout=10)
             r.raise_for_status()

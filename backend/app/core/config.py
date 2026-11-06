@@ -124,11 +124,21 @@ class Settings(BaseSettings):
     mcp_internal_token: str = "scriptkiddo-mcp-internal"
     mcp_rag_enabled: bool = True
     mcp_execute_tools_via_mcp: bool = True
+    # Despacho async via MCP (submit+poll no worker): evita o congelamento de
+    # nó do grafo em ferramentas lentas (sync segurava HTTP por até 15 min —
+    # diagnóstico via faulthandler, scan 1/www.example.com 2026-11-05).
+    mcp_async_dispatch: bool = True
     mcp_default_top_k: int = 5
     mcp_request_timeout_seconds: int = 1800
     offensive_operator_enabled: bool = True
     offensive_operator_phase_queue_enabled: bool = True
     offensive_operator_phase_task_budget: int = 4
+    # Engine única de decisão do scan: "operator" = fila de work items (default
+    # seguro durante a transição) | "langgraph" = grafo supervisor (Fase 1 do
+    # docs/LANGGRAPH_BRAIN_PLAN.md o torna o cérebro). Override por scan via
+    # ScanJob.state_data["scan_engine"]. Se vazio, cai na flag legada
+    # offensive_operator_enabled.
+    scan_engine: str = "operator"
     scan_parallelize_default: bool = True
     scan_parallel_target_batch_size: int = 1024
     scan_explicit_inventory_batch_size: int = 10
