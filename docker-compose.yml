@@ -5,6 +5,12 @@ x-optional-env-file: &optional_env_file
 x-vulnerability-catalog-env: &vulnerability_catalog_env
   VULNERABILITY_CATALOG_ENABLED: "${VULNERABILITY_CATALOG_ENABLED:-true}"
   VULNERABILITY_CATALOG_DIR: "${VULNERABILITY_CATALOG_DIR:-/app/skills/vulnerability_testing}"
+  # Raciocínio LLM no caminho quente do scan: desligado por padrão. O
+  # llama3.2:3b em CPU soma 30-60s por iteração e, sob pressão de memória no
+  # host 8GB, o llama-server cai (500 em toda chamada) — dead time que não
+  # muda decisões (sempre "proceed 0.4"). LLM segue disponível para tarefas
+  # offline (triagem H1). Determinismo de execução: docs/LANGGRAPH_BRAIN_PLAN.
+  LLM_REASONING_ENABLED: "${LLM_REASONING_ENABLED:-false}"
   VULNERABILITY_CATALOG_SKILLS: "${VULNERABILITY_CATALOG_SKILLS:-account_takeover,api_security,auth_bypass,bola_bfla,business_logic,clickjacking,command_injection,component_memory_corruption,cors_misconfiguration,crypto_storage,csrf,deserialization,graphql,host_header_injection,http_request_smuggling,idor_object_authorization,information_disclosure,jwt_oauth,open_redirect,path_traversal,race_condition,resource_consumption,rbac_role_self_escalation,sqli,sqli_testing,ssrf,ssti,stored_xss_testing,subdomain_takeover,web_cache,xss,xxe,vulnerable_components,prompt_injection}"
   # Caido traffic/replay engine for the API module (opt-in). Empty by default =
   # OFF (runner uses direct requests). To enable, set these in ./.env pointing at
@@ -82,12 +88,18 @@ services:
     deploy:
       resources:
         limits:
-          memory: 10g
+          # Realista para o host de 8GB: o llama3.2:3b (Q4_K_M) usa ~1.9GiB
+          # de buffer + 448MiB de KV cache + overhead do llama-server — precisa
+          # de ~2.8GiB no load. Limite 10g era fantasia; 2.5g era apertado e
+          # o cgroup OOM-killava o llama-server ("signal: killed").
+          memory: 3.2g
         reservations:
-          memory: 8g
+          memory: 512m
     environment:
       OLLAMA_NUM_PARALLEL: "1"
       OLLAMA_NUM_GPU: "0"
+      # Um modelo residente por vez — troca de modelo descarrega o anterior.
+      OLLAMA_MAX_LOADED_MODELS: "1"
       TZ: America/Sao_Paulo
 
   # ─────────────────────────────────────────────────────────────────
@@ -210,6 +222,9 @@ services:
       SCAN_FUZZ_PARAM: "${SCAN_FUZZ_PARAM:-}"
       SCAN_FUZZ_POST_DATA: "${SCAN_FUZZ_POST_DATA:-}"
       SCAN_FUZZ_CONTENT_TYPE: "${SCAN_FUZZ_CONTENT_TYPE:-application/x-www-form-urlencoded}"
+      # Fase 4 push: token compartilhado p/ o runner autenticar o callback de
+      # resultado no backend (X-Internal-Token).
+      MCP_INTERNAL_TOKEN: "${MCP_INTERNAL_TOKEN:-scriptkiddo-mcp-internal}"
       # Docker Desktop/VPN: httpx can need the host-side Docker proxy even when
       # direct bridge egress is flaky. Keep the Docker Desktop proxy as a
       # candidate for the httpx wrapper, but the wrapper health-checks it and
@@ -222,6 +237,7 @@ services:
       TZ: America/Sao_Paulo
     ports:
       - "${KALI_RUNNER_HOST_PORT:-8088}:8088"
+    mem_limit: "${KALI_RUNNER_MEMORY_LIMIT:-4.5g}"
     volumes:
       - kali_workspace:/workspace
       - evidence_storage:/evidence
@@ -270,6 +286,58 @@ services:
       timeout: 12s
       retries: 4
       start_period: 60s
+
+  kali_rag:
+    build:
+      context: ./kali-rag
+      dockerfile: Dockerfile
+    container_name: scriptkiddo_kali_rag
+    restart: unless-stopped
+    profiles: ["dev", "prod"]
+    environment:
+      RAG_PORT: "8099"
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-scriptkiddo}:${POSTGRES_PASSWORD:-scriptkiddo}@postgres:5432/${POSTGRES_DB:-scriptkiddo}"
+      RAG_RETRIEVE_BUDGET_MS: "100"
+      TZ: America/Sao_Paulo
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Sem portas no host: só kali_runner/backend (rede do compose) consomem.
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://127.0.0.1:8099/healthz',timeout=4)\""]
+      interval: 30s
+      timeout: 8s
+      retries: 3
+      start_period: 15s
+
+  # Motor de decisão tipada local (Jev-compatible). Implementa o contrato
+  # POST /v1/systemone (noul/choice/score com probabilidade) descrito em
+  # docs/ANALISE_JEV_FLUXO_DECISAO_2026-11-05.md, com backend semântico =
+  # Ollama local (sampling determinístico) e fallback rule que nunca bloqueia.
+  jev_local:
+    build:
+      context: ./jev-local
+      dockerfile: Dockerfile
+    image: jev-local:0.1.0
+    container_name: scriptkiddo_jev_local
+    restart: unless-stopped
+    profiles: ["dev", "prod"]
+    environment:
+      JEV_PORT: "8097"
+      OLLAMA_URL: "${JEV_OLLAMA_URL:-http://ollama:11434}"
+      JEV_MODEL: "${JEV_MODEL:-llama3.2:3b}"
+      JEV_OLLAMA_TIMEOUT_SECONDS: "${JEV_OLLAMA_TIMEOUT_SECONDS:-20}"
+      TZ: America/Sao_Paulo
+    depends_on:
+      ollama:
+        condition: service_started
+    # Sem portas no host: só o backend (decision_port) consome na rede interna.
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://127.0.0.1:8097/health',timeout=4)\""]
+      interval: 30s
+      timeout: 8s
+      retries: 3
+      start_period: 15s
 
   evidence_init:
     image: busybox:1.36
@@ -333,6 +401,7 @@ services:
       ENABLE_OOB_VALIDATION: "${ENABLE_OOB_VALIDATION:-false}"
       MCP_RAG_ENABLED: "${MCP_RAG_ENABLED:-true}"
       MCP_EXECUTE_TOOLS_VIA_MCP: "${MCP_EXECUTE_TOOLS_VIA_MCP:-true}"
+      JEV_BASE_URL: "${JEV_BASE_URL:-http://jev_local:8097}"
       ENABLE_OBSERVABILITY: "${ENABLE_OBSERVABILITY:-false}"
       ENABLE_AUTO_EVALUATION: "${ENABLE_AUTO_EVALUATION:-false}"
       # Extra SANs for the BAS mTLS server cert (bas_ca.py) -- add the LAN
@@ -415,7 +484,7 @@ services:
     # concurrency orchestration worker and Kali has its own global semaphore.
     command: celery -A app.workers.celery_app.celery worker -l info -Q scan.unit,scan.scheduled,worker.unit.scope_validation,worker.scheduled.scope_validation -n scope@%h --pool=threads --concurrency=${PHASE_WORKER_CONCURRENCY:-1}
     env_file: *optional_env_file
-    environment: { <<: *vulnerability_catalog_env, APP_ENV: development, WORKER_MODE: unit, KALI_RUNNER_URL: "${KALI_RUNNER_URL:-http://kali_runner:8088}", MCP_SERVER_URL: "${MCP_SERVER_URL:-http://mcp_server:3000}", MCP_RAG_ENABLED: "${MCP_RAG_ENABLED:-true}", MCP_EXECUTE_TOOLS_VIA_MCP: "${MCP_EXECUTE_TOOLS_VIA_MCP:-true}", TZ: America/Sao_Paulo }
+    environment: { <<: *vulnerability_catalog_env, APP_ENV: development, WORKER_MODE: unit, KALI_RUNNER_URL: "${KALI_RUNNER_URL:-http://kali_runner:8088}", MCP_SERVER_URL: "${MCP_SERVER_URL:-http://mcp_server:3000}", MCP_RAG_ENABLED: "${MCP_RAG_ENABLED:-true}", MCP_EXECUTE_TOOLS_VIA_MCP: "${MCP_EXECUTE_TOOLS_VIA_MCP:-true}", TZ: America/Sao_Paulo, PYTHONFAULTHANDLER: "1" }
     profiles: ["dev"]
     # socket Docker (rw) + group root: mantido para compatibilidade operacional.
     # O watchdog agora roda no worker_control para não disputar scan.unit.
@@ -696,9 +765,9 @@ services:
     deploy:
       resources:
         limits:
-          memory: ${ZAP_MEMORY_LIMIT:-6g}
+          memory: ${ZAP_MEMORY_LIMIT:-3g}
         reservations:
-          memory: ${ZAP_MEMORY_RESERVATION:-1g}
+          memory: ${ZAP_MEMORY_RESERVATION:-512m}
 
   # ─────────────────────────────────────────────────────────────────
   # Pentest Automation Lab — optional controlled targets for E2E validation.
