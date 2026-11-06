@@ -29,8 +29,8 @@ const FASE_NOMES = {
 const LEVEL_MAP = {
   recon: "Superficial", asm: "Superficial",
   standard: "Normal", full: "Normal",
-  aggressive: "Agressivo",
-  Recon: "Superficial", Superficial: "Superficial", Standard: "Normal", Normal: "Normal", Aggressive: "Agressivo",
+  aggressive: "Normal",
+  Recon: "Superficial", Superficial: "Superficial", Standard: "Normal", Normal: "Normal", Aggressive: "Normal",
 };
 
 const ACTIVE_STATUS    = ["queued", "running", "retrying", "waiting_for_auth"];
@@ -38,9 +38,8 @@ const STOPPABLE_STATUS = [...ACTIVE_STATUS, "paused"];
 const TERMINAL_STATUS  = new Set(["completed", "completed_with_gaps", "failed", "cancelled", "stopped"]);
 
 const SCAN_PERFIL = {
-  Superficial: { c: "var(--sev-info-text)", bg: "var(--sev-info-bg)", bd: "var(--sev-info-border)", d: "P01-P08 + P18/P21/P22, profundidade baixa" },
-  Normal:    { c: "var(--ink-soft)",        bg: "var(--surface-soft)", bd: "var(--line)",              d: "P01-P22, profundidade média" },
-  Agressivo: { c: "var(--sev-high-text)",  bg: "var(--sev-high-bg)",  bd: "var(--sev-high-border)",  d: "P01-P22, profundidade alta" },
+  Superficial: { c: "var(--sev-info-text)", bg: "var(--sev-info-bg)", bd: "var(--sev-info-border)", d: "ASM — P01-P08 + P18/P21/P22, profundidade baixa" },
+  Normal:    { c: "var(--sev-high-text)",  bg: "var(--sev-high-bg)",  bd: "var(--sev-high-border)",  d: "P01-P22 completo, profundidade alta — PADRÃO da plataforma (decisão 2026-11-04)" },
 };
 const SCAN_COMPLETO_ATIVIDADES = [
   "Inventário de ativos",
@@ -483,7 +482,7 @@ function NovoScanComposer({ groups, onClose, onCreate, onSchedule, statusMsg }) 
   const [sourceConfig, setSourceConfig] = useState({ sourcePath: "", repositoryUrl: "" });
   const [scheduleForm, setScheduleForm] = useState({ frequency: "daily", run_time: "00:00", day_of_week: "monday", day_of_month: 1 });
   const [submitting, setSubmitting] = useState(false);
-  const LEVEL_REVERSE = { Superficial: "asm", Normal: "full", Agressivo: "aggressive" };
+  const LEVEL_REVERSE = { Superficial: "asm", Normal: "aggressive" };
 
   useEffect(() => {
     if (!accessGroupId && groups.length === 1) {
@@ -579,7 +578,7 @@ function NovoScanComposer({ groups, onClose, onCreate, onSchedule, statusMsg }) 
         <div>
           <label style={{ fontSize: 11, fontWeight: 600, color: "var(--ink-soft)", display: "block", marginBottom: 5 }}>Perfil Pentest</label>
           <div style={{ display: "flex", gap: 4 }}>
-            {["Superficial","Normal","Agressivo"].map((p) => (
+            {["Normal","Superficial"].map((p) => (
               <button key={p} type="button" onClick={() => setPerfil(p)} style={{
                 flex: 1, fontSize: 10, fontWeight: perfil === p ? 700 : 500, padding: "8px 3px", borderRadius: 8, cursor: "pointer",
                 border: `1px solid ${perfil === p ? SCAN_PERFIL[p].bd : "var(--line)"}`,
@@ -1349,7 +1348,7 @@ function DetailPanel({ scan, logs, onClose, autoOpenCapture = false, onAutoOpenC
 function EditScheduleModal({ schedule, groups, onSave, onClose }) {
   const [form, setForm] = useState({
     targets_text:    schedule.targets_text || schedule.target_query || "",
-    scan_type:       schedule.scan_type   || schedule.level        || "full",
+    scan_type:       schedule.scan_type   || schedule.level        || "aggressive",
     access_group_id: schedule.access_group_id ?? "",
     frequency:       schedule.frequency   || "daily",
     run_time:        schedule.run_time    || "00:00",
@@ -1424,9 +1423,8 @@ function EditScheduleModal({ schedule, groups, onSave, onClose }) {
             <div>
               <label style={labelStyle}>Perfil</label>
               <select value={form.scan_type} onChange={(e) => set("scan_type", e.target.value)} style={inputStyle}>
-                <option value="asm">Superficial</option>
-                <option value="full">Normal</option>
-                <option value="aggressive">Agressivo</option>
+                <option value="aggressive">Normal (padrão)</option>
+                <option value="asm">Superficial (ASM)</option>
               </select>
             </div>
 
