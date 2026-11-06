@@ -51,13 +51,13 @@ export default function AdminLogsPage() {
       <div style={{ display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap", marginBottom: 6 }}>
         <h1 style={{ fontSize: 20, fontWeight: 700, margin: 0 }}>Logs do ambiente</h1>
         <span style={{ fontSize: 12.5, color: "var(--ink-muted)" }}>
-          últimas {tail} linhas · {kind === "workers" ? "execução dos workers" : "comunicações (MCP interno · Kali externo · API)"}
+          últimas {tail} linhas · {kind === "workers" ? "execução dos workers" : kind === "jev" ? "decisões JEV (motor tipado · backend semântico)" : "comunicações (MCP interno · Kali externo · API)"}
         </span>
       </div>
 
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", margin: "14px 0 18px" }}>
         <div style={{ display: "inline-flex", background: "var(--surface-soft)", border: "1px solid var(--border)", borderRadius: 9, padding: 3 }}>
-          {[["workers", "Workers"], ["comms", "Comunicações"]].map(([k, l]) => (
+          {[["workers", "Workers"], ["comms", "Comunicações"], ["jev", "JEV"]].map(([k, l]) => (
             <button key={k} onClick={() => setKind(k)} style={{
               fontSize: 12.5, padding: "6px 14px", borderRadius: 6, cursor: "pointer", border: "none",
               background: kind === k ? "var(--brand-500)" : "transparent",

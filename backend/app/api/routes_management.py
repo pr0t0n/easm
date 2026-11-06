@@ -2396,14 +2396,15 @@ def admin_change_user_password(user_id: int, payload: dict, db: Session = Depend
 
 @router.get("/admin/logs")
 def admin_environment_logs(
-    kind: str = Query(default="workers", pattern="^(workers|comms)$"),
+    kind: str = Query(default="workers", pattern="^(workers|comms|jev)$"),
     tail: int = Query(default=50, ge=1, le=500),
     current_user: User = Depends(require_admin),
 ):
-    """Admin · Logs — últimas linhas dos Workers e das comunicações do ambiente.
+    """Admin · Logs — últimas linhas dos Workers, comunicações e do JEV.
 
     kind=workers → containers dos workers (+ agendador). kind=comms → gateway MCP
-    (interno), Kali (requisições externas aos alvos) e API. Tail padrão = 50."""
+    (interno), Kali (requisições externas aos alvos) e API. kind=jev → motor de
+    decisão tipada (jev_local) e seu backend semântico (ollama). Tail padrão = 50."""
     from app.services.platform_health import get_environment_logs
     return get_environment_logs(kind=kind, tail=tail)
 

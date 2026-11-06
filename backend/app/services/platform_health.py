@@ -446,6 +446,7 @@ def get_environment_logs(kind: str = "workers", tail: int = 50) -> dict:
     kind="workers" → todos os containers scriptkiddo_worker_* (execução dos scans).
     kind="comms"   → mcp_server (gateway interno de ferramentas) + kali_runner
                      (requisições externas aos alvos) + backend (API/requisições).
+    kind="jev"     → jev_local (motor de decisão tipada) + ollama (backend semântico).
     Lê via Docker socket; falha graciosamente por container."""
     tail = max(1, min(int(tail or 50), 500))
     try:
@@ -459,6 +460,10 @@ def get_environment_logs(kind: str = "workers", tail: int = 50) -> dict:
     if kind == "comms":
         wanted = ["mcp_server", "kali_runner", "backend"]
         roles = {"mcp_server": "Gateway MCP (interno)", "kali_runner": "Arsenal Kali (externo)", "backend": "API / requisições"}
+        names = [f"{_PROJECT_PREFIX}{w}" for w in wanted]
+    elif kind == "jev":
+        wanted = ["jev_local", "ollama"]
+        roles = {"jev_local": "Motor de decisão tipada (noul/choice/score)", "ollama": "Backend semântico do JEV"}
         names = [f"{_PROJECT_PREFIX}{w}" for w in wanted]
     else:
         kind = "workers"

@@ -313,6 +313,11 @@ def systemone(request: SystemOneRequest) -> SystemOneResponse:
                            question.id, question.kind, reason)
             answers.append(_rule_answer(question, state_text, reason))
 
+    summary = ", ".join(
+        f"{a.id}={a.value!r}({a.source},p={a.probability:.2f})" for a in answers
+    )
+    logger.info("systemone questions=%d model=%s %s", len(answers), model, summary)
+
     return SystemOneResponse(
         engine="jev-local/0.1.0",
         model=model,
