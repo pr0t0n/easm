@@ -41,6 +41,16 @@ WORKSPACE = Path(os.getenv("KALI_WORKSPACE", "/workspace"))
 JOBS_DIR = WORKSPACE / ".runner_jobs"
 PROFILES_DIR = Path(__file__).parent / "profiles"
 MAX_PARALLEL = int(os.getenv("KALI_MAX_PARALLEL", "8"))
+# Fase 4 (LANGGRAPH_BRAIN_PLAN): lanes de concorrência por classe de recurso.
+# Ferramentas lentas (sqlmap/nuclei/nmap, timeout >240s) esgotavam os 16 slots
+# e travavam as rápidas (httpx/dnsx) em fila — head-of-line blocking. Dois
+# pools físicos: a lane rápida NUNCA espera pela lenta. O total respeita
+# MAX_PARALLEL (fast+slow <= MAX_PARALLEL).
+_SLOW_LANE_THRESHOLD_SECONDS = int(os.getenv("KALI_SLOW_LANE_THRESHOLD", "240"))
+LANE_FAST_MAX = int(os.getenv("KALI_LANE_FAST", str(max(2, round(MAX_PARALLEL * 0.6)))))
+LANE_SLOW_MAX = int(os.getenv("KALI_LANE_SLOW", str(max(1, MAX_PARALLEL - LANE_FAST_MAX))))
+if LANE_FAST_MAX + LANE_SLOW_MAX > MAX_PARALLEL:
+    LANE_SLOW_MAX = max(1, MAX_PARALLEL - LANE_FAST_MAX)
 DEFAULT_TIMEOUT = int(os.getenv("KALI_DEFAULT_TIMEOUT", "300"))
 DEFAULT_HEARTBEAT_INTERVAL = int(os.getenv("KALI_HEARTBEAT_INTERVAL", "15"))
 WORKSPACE_TTL_HOURS = int(os.getenv("KALI_WORKSPACE_TTL_HOURS", "24"))
@@ -307,6 +317,8 @@ class JobRequest(BaseModel):
     auth_headers: dict[str, str] = Field(default_factory=dict, description="Authentication headers injected into tool command")
     env_vars: dict[str, str] = Field(default_factory=dict, description="Per-job env vars injected into the subprocess (e.g. SHODAN_API_KEY)")
     authorized_scope: list[str] = Field(default_factory=list, description="Roots (domains/IPs/CIDRs) the scan is authorized to touch; validated in addition to the upstream ScanAuthorization gate")
+    callback_url: Optional[str] = Field(None, description="Fase 4 push: URL que recebe o status terminal ao final do job (wake-up; sem payload pesado)")
+    callback_token: Optional[str] = Field(None, description="Token compartilhado p/ autenticar o callback no backend")
 
 
 class JobStatus(BaseModel):
@@ -344,8 +356,26 @@ class JobResult(JobStatus):
 
 
 _JOBS_LOCK = threading.Lock()
+# Lanes fast/slow (Fase 4): ver comentário em MAX_PARALLEL acima.
 _EXECUTOR = ThreadPoolExecutor(max_workers=MAX_PARALLEL, thread_name_prefix="kali-job")
+_FAST_EXECUTOR = ThreadPoolExecutor(max_workers=LANE_FAST_MAX, thread_name_prefix="kali-fast")
+_SLOW_EXECUTOR = ThreadPoolExecutor(max_workers=LANE_SLOW_MAX, thread_name_prefix="kali-slow")
 _FUTURES: dict[str, Future] = {}
+
+
+def lane_for_profile(profile: dict[str, Any]) -> str:
+    """Classifica o job na lane 'fast' ou 'slow' pelo timeout do profile.
+
+    Perfis sem timeout herdam DEFAULT_TIMEOUT (300s) → slow, a classe certa
+    para a maioria das ferramentas de análise; os perfis rápidos definem
+    timeout explícito baixo (httpx 60s, dnsx 120s etc).
+    """
+    timeout = int((profile or {}).get("timeout") or DEFAULT_TIMEOUT)
+    return "slow" if timeout > _SLOW_LANE_THRESHOLD_SECONDS else "fast"
+
+
+def executor_for_lane(lane: str) -> ThreadPoolExecutor:
+    return _SLOW_EXECUTOR if lane == "slow" else _FAST_EXECUTOR
 
 
 def _job_path(job_id: str) -> Path:
@@ -610,6 +640,35 @@ def _get_job_record(job_id: str) -> dict[str, Any] | None:
     with _JOBS_LOCK:
         _JOBS[str(job["job_id"])] = job
     return _mark_stale_job_if_needed(job)
+
+
+def _attach_operational_context(job_id: str, tool: str, target: str) -> None:
+    """Retrieve-and-operate (Fase 3): consulta o sidecar kali_rag e grava o
+    contexto operacional no job. Best-effort por design: sidecar fora do ar =
+    job segue sem contexto (mesma filosofia do proxy do httpx)."""
+    rag_url = str(os.getenv("KALI_RAG_URL", "http://kali_rag:8099")).rstrip("/")
+    timeout = float(os.getenv("KALI_RAG_RETRIEVE_TIMEOUT", "2.5"))
+    try:
+        import urllib.request
+
+        payload = json.dumps({"tool": tool, "target": target, "limit": 5}).encode()
+        request = urllib.request.Request(
+            f"{rag_url}/retrieve",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            data = json.loads(response.read().decode())
+        context = dict(data.get("operational_context") or {})
+        context["_meta"] = {
+            "latency_ms": data.get("latency_ms"),
+            "mode": data.get("mode"),
+            "within_budget": data.get("within_budget"),
+        }
+        _set_job_fields(job_id, operational_context=context)
+    except Exception:
+        # Indisponível/timeout: executar sem contexto é o comportamento padrão.
+        pass
 
 
 def _new_job_record(req: JobRequest, profile: dict[str, Any]) -> dict[str, Any]:
@@ -1103,6 +1162,17 @@ def _run_job(job_id: str, profile: dict[str, Any], req: JobRequest) -> None:
         return
     # Refresh tool_name from stored job record in case it differs from profile
     tool_name = str(job.get("tool") or tool_name)
+    # Retrieve-and-operate (Fase 3): se o kali_rag respondeu antes do job
+    # iniciar, materializa o contexto operacional no workdir para os wrappers
+    # da ferramenta consumirem.
+    op_context = job.get("operational_context")
+    if isinstance(op_context, dict) and op_context:
+        try:
+            (workdir / "context.json").write_text(
+                json.dumps(op_context, ensure_ascii=False)[:8192], encoding="utf-8"
+            )
+        except Exception:
+            pass
 
     try:
         _set_job_fields(job_id, stage="checking_env")
@@ -1544,6 +1614,43 @@ def _run_job_safely(job_id: str, profile: dict[str, Any], req: JobRequest) -> No
             error=f"uncaught runner error {type(exc).__name__}: {exc}",
             finished_at=_utc_now_iso(),
         )
+    finally:
+        # Fase 4 — push de resultado: empurra o status terminal para o callback
+        # do backend (wake-up leve em Redis), eliminando janelas de polling.
+        if req.callback_url:
+            threading.Thread(
+                target=_push_terminal_status,
+                args=(job_id, req.callback_url, req.callback_token, req.scan_id),
+                name=f"push-{job_id[:8]}",
+                daemon=True,
+            ).start()
+
+
+def _push_terminal_status(
+    job_id: str, callback_url: str, callback_token: Optional[str], scan_id: Optional[int]
+) -> None:
+    """POST leve com o status terminal do job. Fire-and-forget: falha no push
+    só significa que o poller descobre pelo caminho antigo (polling)."""
+    import urllib.request
+
+    job = _get_job_record(job_id)
+    status = str((job or {}).get("status") or "")
+    if status not in TERMINAL_STATES:
+        return
+    try:
+        payload = json.dumps({"job_id": job_id, "status": status, "scan_id": scan_id}).encode()
+        request = urllib.request.Request(
+            callback_url,
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "X-Internal-Token": str(callback_token or ""),
+            },
+        )
+        with urllib.request.urlopen(request, timeout=5):
+            pass
+    except Exception:
+        pass
 
 
 def _cleanup_old_workspace(ttl_hours: int = WORKSPACE_TTL_HOURS) -> dict[str, int]:
@@ -2181,9 +2288,18 @@ def enqueue_job(req: JobRequest) -> dict[str, Any]:
         _JOBS[job_id] = job
     _persist_job_record(job)
 
-    future = _EXECUTOR.submit(_run_job_safely, job_id, profile, req)
+    # Fase 4: lane fast/slow — ferramenta rápida nunca fica atrás de sqlmap.
+    future = executor_for_lane(lane_for_profile(profile)).submit(_run_job_safely, job_id, profile, req)
     with _JOBS_LOCK:
         _FUTURES[job_id] = future
+    # Retrieve-and-operate (Fase 3): consulta o kali_rag em background e anexa
+    # o contexto ao job. Nunca bloqueia a fila — indisponível = sem contexto.
+    threading.Thread(
+        target=_attach_operational_context,
+        args=(job_id, job["tool"], req.target),
+        name=f"rag-{job_id[:8]}",
+        daemon=True,
+    ).start()
     return {
         "job_id": job_id,
         "status": "queued",

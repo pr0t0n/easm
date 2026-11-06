@@ -35,6 +35,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from result_envelope import build_envelope, compare_evidence
+
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -716,7 +718,99 @@ async def mcp_job_result(job_id: str) -> dict[str, Any]:
     result.setdefault("dispatch_task_id", job_id)
     result.setdefault("kali_job_id", job_id)
     result.setdefault("execution_path", "mcp_to_kali_async")
+    # Envelope v1 (Fase 2): contrato padronizado de resultado com
+    # findings_raw conservador + quality_flags. Campos legados preservados.
+    result["envelope"] = build_envelope(
+        tool=result.get("tool") or "",
+        target=result.get("target") or "",
+        status=result.get("status") or "unknown",
+        return_code=result.get("return_code"),
+        stdout=str(result.get("stdout") or ""),
+        stderr=str(result.get("stderr") or ""),
+        parsed=result.get("parsed"),
+        command=str(result.get("command") or ""),
+        workdir=str(result.get("workdir") or ""),
+        duration_seconds=result.get("duration_seconds"),
+        job_id=job_id,
+    )
     return result
+
+
+class MCPRetestRequest(BaseModel):
+    tool: str
+    target: str
+    scan_id: int | None = None
+    evidence_expected: list[str] = Field(default_factory=list)
+    timeout: int | None = None
+    profile: str | None = None
+    # Escopo autorizado do scan (mesmo contrato do dispatch: o runner fecha
+    # o job com 400 se authorized_scope vier vazio — SEC-001).
+    authorized_scope: list[str] = Field(default_factory=list)
+
+
+@app.post("/mcp/retest")
+async def retest_evidence(request: MCPRetestRequest) -> dict[str, Any]:
+    """Protocolo de re-teste (Fase 2): re-executa a ferramenta e compara os
+    sinais de evidência esperados com o novo resultado.
+
+    Vereditos: confirmed | not_reproducible | inconclusive. O guardrail de
+    deny-list vale igual — re-teste não é caminho de escape de policy.
+    """
+    if not request.evidence_expected:
+        raise HTTPException(status_code=400, detail="evidence_expected_required")
+    if kali_client is None:
+        raise HTTPException(status_code=503, detail="kali_runner_not_available")
+    profile_name = str(request.profile or "").strip()
+    tool_key = str(request.tool or "").strip().lower()
+    if profile_name not in kali_profiles:
+        profile_name = tool_aliases.get(tool_key, tool_key)
+    if profile_name not in kali_profiles:
+        await _refresh_kali_catalog()
+        profile_name = tool_aliases.get(tool_key, tool_key)
+    if profile_name not in kali_profiles:
+        raise HTTPException(status_code=404, detail=f"tool_or_profile_not_found:{request.tool}")
+
+    started = time.monotonic()
+    raw = await _run_kali_profile(
+        profile_name,
+        {
+            "target": request.target,
+            "scan_id": request.scan_id,
+            "timeout": request.timeout,
+            "authorized_scope": list(request.authorized_scope or []),
+        },
+    )
+    envelope = build_envelope(
+        tool=tool_key,
+        target=request.target,
+        status=raw.get("status") or "unknown",
+        return_code=raw.get("return_code", raw.get("exit_code")),
+        stdout=str(raw.get("stdout") or ""),
+        stderr=str(raw.get("stderr") or ""),
+        parsed=raw.get("parsed"),
+        command=str(raw.get("command") or ""),
+        workdir=str(raw.get("workdir") or ""),
+        duration_seconds=raw.get("duration_seconds"),
+    )
+    comparison = compare_evidence(
+        evidence_expected=list(request.evidence_expected),
+        status=envelope["status"],
+        stdout=str(raw.get("stdout") or ""),
+        parsed=raw.get("parsed"),
+    )
+    return {
+        "retest_version": "retest/v1",
+        "tool": tool_key,
+        "target": request.target,
+        "profile": profile_name,
+        "scan_id": request.scan_id,
+        "verdict": comparison["verdict"],
+        "matched": comparison["matched"],
+        "missing": comparison["missing"],
+        "reason": comparison["reason"],
+        "duration_seconds": round(time.monotonic() - started, 3),
+        "envelope": envelope,
+    }
 
 
 @app.post("/mcp/execute")
@@ -795,6 +889,18 @@ async def execute_mcp_contract(request: MCPExecutionRequest) -> dict[str, Any]:
             stdout=stdout_raw[:10_000],
             parsed_result=raw.get("parsed"),
             command=raw.get("command") or "",
+            duration_seconds=raw.get("duration_seconds"),
+        )
+        contract["envelope"] = build_envelope(
+            tool=str(request.tool_name or ""),
+            target=request.target,
+            status=raw_status or "unknown",
+            return_code=exit_code if isinstance(exit_code, int) else None,
+            stdout=stdout_raw,
+            stderr=str(raw.get("stderr") or ""),
+            parsed=raw.get("parsed"),
+            command=str(raw.get("command") or ""),
+            workdir=str(raw.get("workdir") or ""),
             duration_seconds=raw.get("duration_seconds"),
         )
         return contract
