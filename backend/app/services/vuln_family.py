@@ -136,8 +136,16 @@ def classify_family(
 
     hay = f"{title or ''} {owasp or ''}".lower()
     for needles, fam in _KEYWORD_RULES:
-        if any(n in hay for n in needles):
-            return fam
+        for needle in needles:
+            # Needles curtas alfanuméricas ("rce", "sqli", "xss", "cors"...)
+            # exigem word-boundary: como substring, "rce" casa com
+            # "cross-origin-RESource-policy" e classificava um finding de
+            # header como família rce → floor critical + CVSS 9.8 (scan #3).
+            if len(needle) <= 4 and needle.isalnum():
+                if _re_title.search(rf"\b{_re_title.escape(needle)}\b", hay):
+                    return fam
+            elif needle in hay:
+                return fam
 
     if cve and str(cve).upper().startswith("CVE-"):
         return "vulnerable_dependency"
