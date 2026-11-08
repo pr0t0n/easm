@@ -155,6 +155,9 @@ def evaluate_finding_promotion(db: Session, finding: Finding) -> ValidationDecis
     if family == "lfri":
         family = "lfi"
 
+    missing: list[str] = []
+    required: list[str] = []
+
     # ── Contrato passivo (PLANO_CANDIDATE_VALIDATION LA-1) ───────────────────
     # Observações passivas (porta aberta, header ausente, fingerprint, OSINT)
     # confirmam via positive_reproduction = re-probe concordante — sem exigir
@@ -204,8 +207,6 @@ def evaluate_finding_promotion(db: Session, finding: Finding) -> ValidationDecis
         for part in str(artifact.identity_key or "").split(",")
         if part.strip()
     }
-    missing: list[str] = []
-    required: list[str] = []
 
     if severity in HIGH_IMPACT_SEVERITIES or status == "confirmed":
         required.append("proof_pack")
