@@ -537,6 +537,64 @@ class FindingAdjudication(Base):
     finding = relationship("Finding")
 
 
+class ScanValidationMetrics(Base):
+    """Métricas de eficácia da validação de candidates por scan (Fase 4).
+
+    Computadas ao final do scan (sweep pós-scan). Rastreiam a evolução:
+    candidate residual, conversão confirmed/refuted, órfãos, wires, JEV.
+    """
+
+    __tablename__ = "scan_validation_metrics"
+
+    scan_job_id: Mapped[int] = mapped_column(ForeignKey("scan_jobs.id"), primary_key=True)
+    findings_total: Mapped[int] = mapped_column(Integer, default=0)
+    candidates: Mapped[int] = mapped_column(Integer, default=0)
+    confirmed: Mapped[int] = mapped_column(Integer, default=0)
+    refuted: Mapped[int] = mapped_column(Integer, default=0)
+    not_applicable: Mapped[int] = mapped_column(Integer, default=0)
+    needs_human_review: Mapped[int] = mapped_column(Integer, default=0)
+    blocked: Mapped[int] = mapped_column(Integer, default=0)
+    inconclusive: Mapped[int] = mapped_column(Integer, default=0)
+    hypothesis: Mapped[int] = mapped_column(Integer, default=0)
+    orphans_total: Mapped[int] = mapped_column(Integer, default=0)
+    orphans_adjudicated: Mapped[int] = mapped_column(Integer, default=0)
+    wires_total: Mapped[int] = mapped_column(Integer, default=0)
+    wires_completed: Mapped[int] = mapped_column(Integer, default=0)
+    wires_failed: Mapped[int] = mapped_column(Integer, default=0)
+    jev_decisions: Mapped[int] = mapped_column(Integer, default=0)
+    candidate_residual_pct: Mapped[float] = mapped_column(Float, default=0.0)
+    quality_gate_grade: Mapped[str | None] = mapped_column(String(4), nullable=True)
+    computed_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+    scan_job = relationship("ScanJob")
+
+
+class JevDecision(Base):
+    """Decisão tipada registrada pela porta de decisão (decision_port).
+
+    Toda decisão JEV/rule fica auditável: question_id, pergunta, resposta,
+    probabilidade, limiar e fonte. Em modo shadow, 'shadow' guarda a resposta
+    JEV paralela para calibração.
+    """
+
+    __tablename__ = "jev_decisions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    scan_job_id: Mapped[int | None] = mapped_column(ForeignKey("scan_jobs.id"), nullable=True, index=True)
+    question_id: Mapped[str] = mapped_column(String(120), index=True)
+    kind: Mapped[str] = mapped_column(String(10), default="noul", index=True)  # noul | choice | score
+    question: Mapped[str] = mapped_column(Text, default="")
+    answer: Mapped[dict] = mapped_column(JSONB, default=dict)
+    probability: Mapped[float] = mapped_column(Float, default=0.0)
+    threshold: Mapped[float] = mapped_column(Float, default=0.0)
+    source: Mapped[str] = mapped_column(String(10), default="rule", index=True)  # jev | rule
+    shadow: Mapped[dict] = mapped_column(JSONB, default=dict)
+    context: Mapped[dict] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
+
+    scan_job = relationship("ScanJob")
+
+
 class ValidationWire(Base):
     """Persistent return path from an evidence gap to one specific re-test.
 

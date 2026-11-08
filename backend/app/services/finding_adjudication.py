@@ -56,6 +56,8 @@ ALLOWED_ACTIONS = {
     "lookup_cve_intelligence",
     "lookup_public_exploit",
     "rebuild_attack_path",
+    "passive_reprobe",
+    "osint_corroboration",
     "request_human_input",
 }
 NON_EXECUTABLE_ACTIONS = {
@@ -477,11 +479,68 @@ def review_with_llm(dossier: dict[str, Any]) -> tuple[dict[str, Any], dict[str, 
         return {}, {"model": model, "prompt_hash": prompt_hash, "reason": f"{type(exc).__name__}:{exc}"[:300]}
 
 
+def _corroborate_osint(db: Session, job: Any, finding: Any) -> tuple[bool, str]:
+    """Confirma achado OSINT cruzando com fonte ativa JÁ coletada no mesmo scan.
+
+    Sem novas chamadas externas (rate limit/custo): só compara com findings de
+    tools ativas (nmap/naabu/httpx/whatweb). Porta shodan × porta ativa =
+    corroborado; claim sem par ativo = refuted uncorroborated_osint.
+    """
+    import re as _re
+
+    from app.models.models import Finding as _F
+    title_l = str(finding.title or "").lower()
+    siblings = (
+        db.query(_F)
+        .filter(
+            _F.scan_job_id == job.id,
+            _F.id != finding.id,
+            _F.is_false_positive.is_(False),
+        )
+        .all()
+    )
+    active_tools = {"nmap", "naabu", "masscan", "httpx", "whatweb", "curl-headers"}
+    port_match = _re.search(r"\b(\d{1,5})/tcp\b", title_l) or _re.search(r":(\d{1,5})\b", title_l)
+    if port_match and str(finding.tool or "").lower() in {"shodan-cli", "theharvester", "h8mail"}:
+        port = port_match.group(1)
+        for sib in siblings:
+            if str(sib.tool or "").lower() not in active_tools:
+                continue
+            if _re.search(rf"\b{port}/tcp\b", str(sib.title or "").lower() + " " + str((sib.details or {}).get("evidence") or "").lower()):
+                return True, f"osint_corroborated_by_active_source:{sib.tool}:{port}"
+        return False, "uncorroborated_osint_no_active_source"
+    # Claims de e-mail/exposição sem par ativo: conservador — não corrobora.
+    return False, "uncorroborated_osint_unverifiable_claim"
+
+
 def _default_action(dossier: dict[str, Any], decision: dict[str, Any]) -> dict[str, Any]:
     missing = list((dossier.get("quality") or {}).get("missing_artifacts") or [])
     family = str((dossier.get("finding") or {}).get("family") or "")
     identities = list((dossier.get("context") or {}).get("available_identities") or [])
     details = dict((dossier.get("context") or {}).get("details") or {})
+    # Achado passivo: a ação certa é a re-probe da mesma observação, não
+    # baseline/exploit (semântica de exploit ativo). Ferramenta e sinal vêm
+    # do catálogo FAMILY_VALIDATORS (PLANO_CANDIDATE_VALIDATION LA-2).
+    if missing == ["positive_reproduction"]:
+        from app.services.candidate_validators import classify_candidate_family, FAMILY_VALIDATORS
+        cand_family = classify_candidate_family(
+            str((dossier.get("finding") or {}).get("title") or ""),
+            str((dossier.get("finding") or {}).get("tool") or ""),
+            details,
+        )
+        spec = FAMILY_VALIDATORS.get(cand_family or "")
+        if spec and spec.get("validator") == "passive_reprobe":
+            return {
+                "action_id": "passive_reprobe",
+                "target_ref": str((dossier.get("target") or {}).get("target_ref") or ""),
+                "input_bindings": {"candidate_family": cand_family},
+            }
+        if spec and spec.get("validator") == "osint_corroboration":
+            return {
+                "action_id": "osint_corroboration",
+                "target_ref": str((dossier.get("target") or {}).get("target_ref") or ""),
+                "input_bindings": {"candidate_family": cand_family},
+            }
     if "second_authenticated_identity" in missing or (family in {"idor_bola", "bfla_authz"} and len(identities) < 2):
         action_id = "request_human_input" if len(identities) < 2 else "compare_two_identities"
     elif "object_pair" in missing:
@@ -520,6 +579,17 @@ def _wire_tool(action_id: str, finding: Any, parent_wire: Any = None) -> tuple[s
         return "httpx", "httpx"
     if action_id == "verify_configuration_state":
         return "nuclei", "nuclei"
+    if action_id == "passive_reprobe":
+        # Ferramenta vem do catálogo por família do candidate (LA-2).
+        from app.services.candidate_validators import classify_candidate_family, FAMILY_VALIDATORS
+        cand_family = classify_candidate_family(
+            str(getattr(finding, "title", "") or ""),
+            str(getattr(finding, "tool", "") or ""),
+            dict(getattr(finding, "details", None) or {}),
+        )
+        spec = FAMILY_VALIDATORS.get(cand_family or "") or {}
+        tool = str(spec.get("reprobe_tool") or "")
+        return (tool or None), str(spec.get("reprobe_profile") or tool or "")
     if action_id in {"repeat_same_validator", "collect_full_artifact"} and parent_wire is not None:
         tool = str(parent_wire.tool_name or "")
         return (tool or None), str(parent_wire.profile or tool)
@@ -735,7 +805,9 @@ def materialize_validation_wire(db: Session, job: Any, finding: Any, wire: Any) 
         tool_name=str(wire.tool_name),
         profile=str(wire.profile or wire.tool_name),
         resource_class="heavy" if wire.tool_name in {"sqlmap", "dalfox", "bl-test", "jwt_tool"} else "medium",
-        priority=25,
+        # Fase 3: prioridade JEV (1-10) reduz o valor do work item (menor =
+        # mais prioritário). Sem escore, mantém o padrão 25.
+        priority=max(1, 25 - 2 * int((dict(wire.input_bindings or {}).get("jev_priority") or 0))),
         status="queued",
         max_attempts=max(1, int(wire.max_attempts or 2)),
         item_metadata=apply_phase_tool_metadata(meta, "P21", str(wire.tool_name), source="validation_wire"),
@@ -986,6 +1058,20 @@ def adjudicate_finding(db: Session, job: Any, finding: Any, *, force: bool = Fal
                 getattr(settings, "finding_adjudication_shadow_mode", True)
             ) else None
             action = dict(model_action or _default_action(dossier, decision))
+            # OSINT sem chamada externa: corrobora com fontes JÁ COLETADAS no
+            # mesmo scan (porta shodan vs nmap/naabu; termos de fingerprint).
+            if action.get("action_id") == "osint_corroboration":
+                corroborated, corr_reason = _corroborate_osint(db, job, finding)
+                adjudication.status = "completed"
+                adjudication.final_verdict = "confirmed" if corroborated else "refuted"
+                adjudication.reason_code = corr_reason
+                adjudication.completed_at = datetime.now()
+                db.add(adjudication)
+                db.flush()
+                project_adjudication_to_finding(db, finding, adjudication)
+                record_adjudication_feedback(db, job, finding, adjudication)
+                persist_attack_paths(db, job)
+                return adjudication_to_dict(adjudication, wires=[])
             # Família sem validator automático: sem ferramenta, o wire seria
             # criado condenado (wire_not_materializable → "blocked" em massa,
             # scan #2: 19/22 findings bloqueados por gap de tooling, não por
@@ -1002,6 +1088,16 @@ def adjudicate_finding(db: Session, job: Any, finding: Any, *, force: bool = Fal
                 record_adjudication_feedback(db, job, finding, adjudication)
                 persist_attack_paths(db, job)
                 return adjudication_to_dict(adjudication, wires=[])
+            # Fase 3: JEV prioriza a validação (framework + skills). O escore
+            # só afeta a prioridade do work item P21 — guardrails (allowlist,
+            # budget, escopo) continuam decididos pelo código.
+            try:
+                from app.services.jev_wire_priority import jev_validation_priority
+                _prio = jev_validation_priority(db, job, finding, dossier, action)
+                if _prio:
+                    action.setdefault("input_bindings", {})["jev_priority"] = int(_prio)
+            except Exception:
+                pass
             wire = create_validation_wire(db, job, finding, adjudication, dossier, action)
             wires.append(wire)
             if wire.action_id == "request_human_input" or wire.status == "blocked":

@@ -100,6 +100,13 @@ class Settings(BaseSettings):
     finding_adjudication_enabled: bool = True
     finding_adjudication_use_ollama: bool = True
     finding_adjudication_timeout_seconds: int = 60
+    # Porta de decisão (decision_port) — Fase 3 do plano de candidates.
+    # "jev" = JEV decide acima do limiar (cai no rule abaixo/indisponível);
+    # "rule" = determinístico puro (default seguro para dev/offline).
+    jev_decision_backend: str = "jev"
+    jev_decision_threshold: float = 0.6
+    jev_decision_thresholds: dict = {}
+    jev_shadow_mode: bool = False
     finding_adjudication_shadow_mode: bool = True
     frontend_origin: str = "http://localhost:5173"
     frontend_origins: str = "http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174"

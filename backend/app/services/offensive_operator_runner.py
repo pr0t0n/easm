@@ -5653,6 +5653,11 @@ def run_offensive_operator_scan(
         except Exception:
             pass
         db.commit()
+        try:
+            from app.workers.tasks import sweep_orphan_candidates
+            sweep_orphan_candidates.apply_async(args=[job.id], countdown=30)
+        except Exception:
+            pass
         return campaign
 
     job.status = str(_quality_gate.get("completion_status") or "completed_with_gaps")
@@ -5664,6 +5669,11 @@ def run_offensive_operator_scan(
         pass
 
     db.commit()
+    try:
+        from app.workers.tasks import sweep_orphan_candidates
+        sweep_orphan_candidates.apply_async(args=[job.id], countdown=30)
+    except Exception:
+        pass
     return campaign
 
 

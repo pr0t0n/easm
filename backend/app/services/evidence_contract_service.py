@@ -154,6 +154,38 @@ def evaluate_finding_promotion(db: Session, finding: Finding) -> ValidationDecis
     family = classify_family(title=finding.title, tool=finding.tool, cve=finding.cve)
     if family == "lfri":
         family = "lfi"
+
+    # ── Contrato passivo (PLANO_CANDIDATE_VALIDATION LA-1) ───────────────────
+    # Observações passivas (porta aberta, header ausente, fingerprint, OSINT)
+    # confirmam via positive_reproduction = re-probe concordante — sem exigir
+    # proof pack/baseline_vs_exploit, que é semântica de exploit ativo.
+    from app.services.candidate_validators import is_passive_observation
+    if is_passive_observation(str(finding.title or ""), str(finding.tool or ""), details):
+        required.append("positive_reproduction")
+        has_repro = any(str(a.validation_status or "") == "confirmed" for a in artifacts)
+        # Corroboração barata: dois artefatos de tool runs independentes do
+        # mesmo scan (ex.: naabu + nmap viram a mesma porta) já reproduzem.
+        if not has_repro and len(artifacts) >= 2:
+            has_repro = True
+        if not has_repro:
+            missing.append("positive_reproduction")
+        if status == "hypothesis":
+            return ValidationDecision(
+                status="hypothesis", can_promote=False, severity_cap="medium",
+                reason="passive_source_requires_reprobe",
+                required_artifacts=required, missing_artifacts=missing,
+            )
+        if missing:
+            return ValidationDecision(
+                status="candidate", can_promote=False, severity_cap="",
+                reason="passive_requires_reprobe",
+                required_artifacts=required, missing_artifacts=missing,
+            )
+        return ValidationDecision(
+            status="confirmed", can_promote=True,
+            reason="passive_observation_reproduced",
+            required_artifacts=required, missing_artifacts=[],
+        )
     differential_families = {
         "sqli", "xss", "ssrf", "rce", "lfi", "path_traversal", "xxe",
         "idor_bola", "bola_bfla", "broken_access_control", "auth_bypass",

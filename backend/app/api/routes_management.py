@@ -2394,6 +2394,54 @@ def admin_change_user_password(user_id: int, payload: dict, db: Session = Depend
     return {"ok": True}
 
 
+@router.get("/admin/scan-validation-metrics/{scan_id}")
+def admin_scan_validation_metrics(
+    scan_id: int,
+    current_user: User = Depends(require_admin),
+):
+    """Fase 4 — métricas de eficácia da validação de candidates de um scan.
+
+    Persistidas pelo sweep pós-scan; se ainda não existirem, computa on-demand.
+    """
+    from app.db.session import SessionLocal
+    from app.models.models import ScanValidationMetrics
+    from app.services.scan_validation_metrics import compute_scan_validation_metrics
+
+    db = SessionLocal()
+    try:
+        row = db.query(ScanValidationMetrics).filter(ScanValidationMetrics.scan_job_id == int(scan_id)).first()
+        if row is None:
+            computed = compute_scan_validation_metrics(db, int(scan_id))
+            db.commit()
+            if computed.get("error"):
+                raise HTTPException(status_code=404, detail=f"scan {scan_id} não encontrado")
+            row = db.query(ScanValidationMetrics).filter(ScanValidationMetrics.scan_job_id == int(scan_id)).first()
+        if row is None:
+            raise HTTPException(status_code=404, detail="métricas indisponíveis")
+        return {
+            "scan_id": row.scan_job_id,
+            "findings_total": row.findings_total,
+            "candidates": row.candidates,
+            "confirmed": row.confirmed,
+            "refuted": row.refuted,
+            "not_applicable": row.not_applicable,
+            "needs_human_review": row.needs_human_review,
+            "blocked": row.blocked,
+            "inconclusive": row.inconclusive,
+            "hypothesis": row.hypothesis,
+            "orphans_total": row.orphans_total,
+            "wires_total": row.wires_total,
+            "wires_completed": row.wires_completed,
+            "wires_failed": row.wires_failed,
+            "jev_decisions": row.jev_decisions,
+            "candidate_residual_pct": row.candidate_residual_pct,
+            "quality_gate_grade": row.quality_gate_grade,
+            "computed_at": row.computed_at.isoformat() if row.computed_at else None,
+        }
+    finally:
+        db.close()
+
+
 @router.get("/admin/logs")
 def admin_environment_logs(
     kind: str = Query(default="workers", pattern="^(workers|comms|jev)$"),

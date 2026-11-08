@@ -8220,7 +8220,23 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
                     if _orig:
                         from app.services.poc_outcome import classify_poc_work_item
 
-                        _poc_decision = classify_poc_work_item(item)
+                        # passive_reprobe (LA-2/LA-3): o veredito vem da
+                        # comparação do sinal essencial (porta/header/banner),
+                        # não do classificador genérico de PoC. A comparação É
+                        # o grounding — o bloco de grounding abaixo é pulado.
+                        _is_passive_reprobe = str(_meta.get("adjudication_action_id") or "") == "passive_reprobe"
+                        if _is_passive_reprobe:
+                            from app.services.candidate_validators import extract_passive_signal, signals_match
+                            _verify_result0 = dict(item.result or {}) if isinstance(item.result, dict) else {}
+                            _stdout0 = str(_verify_result0.get("stdout_full") or _verify_result0.get("stdout_preview") or "")
+                            _sig = extract_passive_signal(_orig.title, _orig.tool, dict(_orig.details or {}))
+                            if item.status in ("completed", "done"):
+                                _ok, _reason = signals_match(_sig, _stdout0)
+                                _poc_decision = {"result": "confirmed" if _ok else "refuted", "reason": f"passive_reprobe:{_reason}"}
+                            else:
+                                _poc_decision = {"result": "candidate", "reason": f"passive_reprobe_item_{item.status}"}
+                        else:
+                            _poc_decision = classify_poc_work_item(item)
                         _poc_result = str(_poc_decision.get("result") or "candidate")
                         _orig_details = dict(_orig.details or {})
                         _orig_details["poc_outcome"] = {
@@ -8235,7 +8251,9 @@ def poll_scan_work_item(item_id: int, _poll_token: str | None = None):
                         # creation-time check), so a mis-classified PoC result
                         # must be re-checked against what the verification
                         # tool actually printed before it can stand.
-                        if _poc_result == "confirmed":
+                        # (passive_reprobe já faz grounding por comparação de
+                        # sinal — não re-checar por âncora de URL/CVE.)
+                        if _poc_result == "confirmed" and not _is_passive_reprobe:
                             from app.services.evidence_gate import validate_finding_grounding
                             _verify_result = dict(item.result or {}) if isinstance(item.result, dict) else {}
                             _verify_raw = str(_verify_result.get("stdout_full") or _verify_result.get("stdout_preview") or "")
@@ -8754,5 +8772,87 @@ def create_github_hackerone_learning_task(
         }
     except Exception as exc:  # noqa: BLE001
         return {"error": f"Falha no crawler GitHub/HackerOne: {exc}"}
+    finally:
+        db.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Sweep pós-scan — adjudica candidates/hypothesis órfãos (PLANO LA-4 / Fase 1b)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@celery.task(name="quality.sweep_orphan_candidates", bind=True, max_retries=1)
+def sweep_orphan_candidates(self, scan_id: int) -> dict[str, Any]:
+    """Adjudica todo finding candidate/hypothesis sem adjudicação no ciclo atual.
+
+    Fecha o gap de findings que nunca entraram no gate (scan #5: 10/44 órfãos).
+    Reusa adjudicate_finding (idempotente por dossier_hash) e
+    retry_blocked_post_scan_wire para wires pendentes pós-scan.
+    """
+    from app.db.session import SessionLocal
+    from app.models.models import Finding, FindingAdjudication, ScanJob, ScanLog
+
+    db = SessionLocal()
+    try:
+        job = db.query(ScanJob).filter(ScanJob.id == int(scan_id)).first()
+        if not job:
+            return {"scan_id": scan_id, "swept": 0, "reason": "scan_missing"}
+        orphans = (
+            db.query(Finding)
+            .filter(
+                Finding.scan_job_id == job.id,
+                Finding.verification_status.in_(["candidate", "hypothesis"]),
+                Finding.is_false_positive.is_(False),
+            )
+            .all()
+        )
+        adjudicated = wires = errors = 0
+        for finding in orphans:
+            try:
+                has_adjudication = (
+                    db.query(FindingAdjudication.id)
+                    .filter(FindingAdjudication.finding_id == finding.id)
+                    .first()
+                )
+                if has_adjudication:
+                    # Tem adjudicação antiga mas ainda candidate: retry de wire
+                    # bloqueado pós-scan antes de re-adjudicar.
+                    try:
+                        from app.services.finding_adjudication import retry_blocked_post_scan_wire
+                        if retry_blocked_post_scan_wire(db, job, finding):
+                            wires += 1
+                    except Exception:
+                        pass
+                    continue
+                from app.services.finding_adjudication import adjudicate_finding
+                result = adjudicate_finding(db, job, finding)
+                adjudicated += 1
+                if result.get("wires"):
+                    wires += len(result["wires"])
+            except Exception as exc:  # noqa: BLE001 — sweep não derruba o scan
+                errors += 1
+                logger.debug("sweep orphan finding=%s failed: %s", finding.id, exc)
+        db.add(ScanLog(
+            scan_job_id=job.id,
+            source="quality-gate",
+            level="INFO",
+            message=(
+                f"sweep_orphan_candidates scan={job.id} orphans={len(orphans)} "
+                f"adjudicated={adjudicated} wires={wires} errors={errors}"
+            )[:500],
+        ))
+        # Fase 4: métricas de eficácia persistidas no final do scan.
+        try:
+            from app.services.scan_validation_metrics import compute_scan_validation_metrics
+            metrics = compute_scan_validation_metrics(db, job.id)
+        except Exception as exc:  # noqa: BLE001
+            metrics = {"error": str(exc)[:120]}
+        db.commit()
+        return {"scan_id": job.id, "orphans": len(orphans), "adjudicated": adjudicated, "wires": wires, "errors": errors, "metrics": metrics}
+    except Exception as exc:  # noqa: BLE001
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return {"scan_id": scan_id, "swept": 0, "error": f"{type(exc).__name__}: {exc}"[:300]}
     finally:
         db.close()
