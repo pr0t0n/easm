@@ -127,3 +127,33 @@ def test_nc_probe_markers():
     assert not ok and "refused" in reason
     ok, reason = signals_match(sig, "EASM_TCP_TIMEOUT")
     assert not ok and "not negative proof" in reason
+
+
+# ─────────────────────────────────────────────────────────────
+# Guardrail humano — needs_human_review apenas para categorias bloqueadas
+# ─────────────────────────────────────────────────────────────
+
+def test_guardrail_category_dos():
+    from app.services.candidate_validators import guardrail_category
+    assert guardrail_category("Potential denial of service via expensive query") == "dos"
+    assert guardrail_category("DDoS amplification vector detected") == "ddos"
+
+
+def test_guardrail_category_defacement_and_lfi():
+    from app.services.candidate_validators import guardrail_category
+    assert guardrail_category("Defacement possible via content injection") == "defacement"
+    assert guardrail_category("Local file inclusion in download parameter") in {"lfi", "lfri"}
+    assert guardrail_category("Arquivo /etc/passwd exposto via LFI") in {"lfi", "lfri"}
+
+
+def test_non_guardrail_finding_returns_none():
+    from app.services.candidate_validators import guardrail_category
+    assert guardrail_category("Header de seguranca ausente: hsts") is None
+    assert guardrail_category("SQL injection in login parameter") is None
+    assert guardrail_category("Portas abertas detectadas: host (1 porta)") is None
+
+
+def test_human_test_command_includes_url_and_policy():
+    from app.services.candidate_validators import build_human_test_command
+    cmd = build_human_test_command("Defacement possible", "zap-baseline", {"url": "https://x.example.com/admin"})
+    assert "GUARDRAIL" in cmd and "https://x.example.com/admin" in cmd and "curl -sk" in cmd

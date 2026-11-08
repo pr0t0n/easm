@@ -126,6 +126,61 @@ def needs_nc_probe(finding_title: str, details: dict[str, Any] | None = None) ->
     return "tcpwrapped" in text or ("inconclusiv" in text and "porta" in text)
 
 
+# ─────────────────────────────────────────────────────────────
+# Guardrail humano — ÚNICO destino legítimo de needs_human_review
+# ─────────────────────────────────────────────────────────────
+
+# Categorias cuja EXECUÇÃO automatizada é bloqueada por política (impacto
+# destrutivo/availability). São as únicas que vão a needs_human_review — e
+# sempre com o comando de teste anexado para o operador. Tudo o mais
+# (candidates, hipóteses, inconclusivos) tem caminho determinístico.
+GUARDRAIL_FAMILIES: dict[str, str] = {
+    "dos": "denial of service / resource exhaustion",
+    "ddos": "distributed denial of service",
+    "resource_consumption": "resource consumption / rate exhaustion",
+    "defacement": "defacement / content destruction",
+    "data_destruction": "data destruction / wipe",
+    "lfi": "local file inclusion (leitura de arquivos do servidor — política)",
+    "lfri": "local/remote file inclusion (leitura de arquivos do servidor — política)",
+}
+
+_HINT_TO_FAMILY: list[tuple[tuple[str, ...], str]] = [
+    (("denial of service", "resource exhaustion", "rate limit bypass", "depletion"), "dos"),
+    (("ddos",), "ddos"),
+    (("defacement",), "defacement"),
+    (("destroy", "wipe", "delete all", "data destruction"), "data_destruction"),
+    (("local file inclusion", "file inclusion", "/etc/passwd", "win.ini", "proc/self"), "lfi"),
+]
+
+
+def guardrail_category(title: str, details: dict[str, Any] | None = None) -> str | None:
+    """Retorna a categoria guardrail do finding, ou None se executável.
+    Hints de título primeiro (mais precisos), família canônica como fallback."""
+    text = f"{title} {str((details or {}).get('evidence') or '')}".lower()
+    for hints, fam_key in _HINT_TO_FAMILY:
+        if any(h in text for h in hints):
+            return fam_key
+    from app.services.vuln_family import classify_family
+    fam = classify_family(title=title, tool=str((details or {}).get("tool") or ""))
+    if fam in GUARDRAIL_FAMILIES:
+        return fam
+    return None
+
+
+def build_human_test_command(title: str, tool: str, details: dict[str, Any] | None = None) -> str:
+    """Comando seguro de verificação manual para categorias guardrail."""
+    details = dict(details or {})
+    url = str(details.get("matched_at") or details.get("url") or details.get("asset") or "<alvo>")
+    family = guardrail_category(title, details) or "unknown"
+    return (
+        f"# GUARDRAIL: {GUARDRAIL_FAMILIES.get(family, family)} — execução automatizada bloqueada\n"
+        f"# Verificação manual autorizada (read-only, sem exploração):\n"
+        f"curl -sk --max-time 10 -o /dev/null -w '%{{http_code}} %{{size_download}}' '{url}'\n"
+        f"# Comparar resposta com baseline; evidenciar sem executar a ação destrutiva.\n"
+        f"# Ferramenta original do achado: {tool or '-'}"
+    )
+
+
 def extract_passive_signal(finding_title: str, tool: str, details: dict[str, Any] | None = None) -> dict[str, Any]:
     """Sinal essencial que a re-probe precisa reproduzir para confirmar."""
     details = dict(details or {})

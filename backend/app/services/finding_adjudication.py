@@ -58,6 +58,7 @@ ALLOWED_ACTIONS = {
     "rebuild_attack_path",
     "passive_reprobe",
     "osint_corroboration",
+    "repeat_original_probe",
     "request_human_input",
 }
 NON_EXECUTABLE_ACTIONS = {
@@ -597,6 +598,16 @@ def _wire_tool(action_id: str, finding: Any, parent_wire: Any = None) -> tuple[s
         spec = FAMILY_VALIDATORS.get(cand_family or "") or {}
         tool = str(spec.get("reprobe_tool") or "")
         return (tool or None), str(spec.get("reprobe_profile") or tool or "")
+    if action_id == "repeat_original_probe":
+        # Sem validator específico: re-executar a MESMA ferramenta no alvo
+        # exato do achado — determinístico, read-only, resolve candidate/
+        # hypothesis/inconclusive sem cair em needs_human_review.
+        from app.services.kali_executor import TOOL_TO_PROFILE
+        original = str(getattr(finding, "tool", "") or "").strip().lower()
+        if not original or original in {"shodan-cli", "theharvester", "h8mail"}:
+            return None, ""  # OSINT: não re-executa (corroboration cobre)
+        profile = TOOL_TO_PROFILE.get(original)
+        return (original if profile else None), str(profile or "")
     if action_id in {"repeat_same_validator", "collect_full_artifact"} and parent_wire is not None:
         tool = str(parent_wire.tool_name or "")
         return (tool or None), str(parent_wire.profile or tool)
@@ -985,6 +996,27 @@ def adjudicate_finding(db: Session, job: Any, finding: Any, *, force: bool = Fal
         persist_attack_paths(db, job)
         return adjudication_to_dict(informational, wires=[])
     cycle = int(getattr(latest, "cycle", 0) or 0) + 1
+
+    # Estágio 6 do fluxo: interpretação ternária advisory do JEV (limiar 0.85).
+    # Só altera o veredito em "encerrar"+contradições; caso contrário o caminho
+    # determinístico é preservado. Falha/baixo limiar → decision inalterado.
+    jev_interpretation_meta: dict[str, Any] = {}
+    try:
+        from app.services.jev_interpretation import interpret_with_jev, merge_interpretation
+
+        _proposal = interpret_with_jev(dossier, decision, scan_id=job_id, finding_id=finding_id)
+        if _proposal:
+            _applied = merge_interpretation(_proposal, decision, dossier)
+            jev_interpretation_meta = {"proposal": _proposal["proposal"], "probability": _proposal["probability"], **_applied}
+            if _applied.get("applied"):
+                decision = {
+                    **decision,
+                    "verdict": str(_applied.get("final_verdict") or decision["verdict"]),
+                    "reason_code": str(_applied.get("reason_code") or decision["reason_code"]),
+                }
+    except Exception:
+        pass
+
     if cycle > MAX_CYCLES_PER_FINDING:
         if latest is not None:
             terminal_after_wire = decision["verdict"] in {"confirmed", "refuted", "not_applicable"} or (
@@ -1052,6 +1084,7 @@ def adjudicate_finding(db: Session, job: Any, finding: Any, *, force: bool = Fal
             "llm": model_meta,
             "single_judge": "deterministic_evidence_gate",
             "shadow_mode": bool(getattr(settings, "finding_adjudication_shadow_mode", True)),
+            "jev_interpretation": jev_interpretation_meta or None,
         },
     )
     db.add(adjudication)
@@ -1092,22 +1125,58 @@ def adjudicate_finding(db: Session, job: Any, finding: Any, *, force: bool = Fal
                 record_adjudication_feedback(db, job, finding, adjudication)
                 persist_attack_paths(db, job)
                 return adjudication_to_dict(adjudication, wires=[])
-            # Família sem validator automático: sem ferramenta, o wire seria
-            # criado condenado (wire_not_materializable → "blocked" em massa,
-            # scan #2: 19/22 findings bloqueados por gap de tooling, não por
-            # evidência). O veredito honesto é needs_human_review.
+            # Família sem validator específico. Semântica correta:
+            # 1) Categoria guardrail (DoS/DDoS/defacement/LFI/destrutiva) →
+            #    needs_human_review É AQUI — sempre com o comando de teste
+            #    anexado para o operador.
+            # 2) Todo o resto (candidates, hipóteses, inconclusivos) tem
+            #    caminho determinístico: repetir a probe original no alvo
+            #    exato (read-only). Só cai em humano se nem isso for possível.
             _tool, _profile = _wire_tool(str(action.get("action_id") or ""), finding)
             if not _tool:
-                adjudication.status = "completed"
-                adjudication.final_verdict = "needs_human_review"
-                adjudication.reason_code = "no_validator_for_family"
-                adjudication.completed_at = datetime.now()
-                db.add(adjudication)
-                db.flush()
-                project_adjudication_to_finding(db, finding, adjudication)
-                record_adjudication_feedback(db, job, finding, adjudication)
-                persist_attack_paths(db, job)
-                return adjudication_to_dict(adjudication, wires=[])
+                from app.services.candidate_validators import build_human_test_command, guardrail_category
+
+                _det = dict(getattr(finding, "details", None) or {})
+                _cat = guardrail_category(str(getattr(finding, "title", "") or ""), _det)
+                if _cat:
+                    adjudication.status = "completed"
+                    adjudication.final_verdict = "needs_human_review"
+                    adjudication.reason_code = f"guardrail_blocked_category:{_cat}"
+                    adjudication.completed_at = datetime.now()
+                    adjudication.decision_metadata = {
+                        "human_test_command": build_human_test_command(
+                            str(getattr(finding, "title", "") or ""),
+                            str(getattr(finding, "tool", "") or ""),
+                            _det,
+                        ),
+                        "guardrail_category": _cat,
+                        "single_judge": "deterministic_evidence_gate",
+                    }
+                    db.add(adjudication)
+                    db.flush()
+                    project_adjudication_to_finding(db, finding, adjudication)
+                    record_adjudication_feedback(db, job, finding, adjudication)
+                    persist_attack_paths(db, job)
+                    return adjudication_to_dict(adjudication, wires=[])
+                _orig_tool, _orig_profile = _wire_tool("repeat_original_probe", finding)
+                if _orig_tool:
+                    action = {
+                        "action_id": "repeat_original_probe",
+                        "target_ref": str((dossier.get("target") or {}).get("target_ref") or ""),
+                        "input_bindings": {"original_tool": _orig_tool},
+                    }
+                    _tool, _profile = _orig_tool, _orig_profile
+                else:
+                    adjudication.status = "completed"
+                    adjudication.final_verdict = "needs_human_review"
+                    adjudication.reason_code = "no_validator_for_family"
+                    adjudication.completed_at = datetime.now()
+                    db.add(adjudication)
+                    db.flush()
+                    project_adjudication_to_finding(db, finding, adjudication)
+                    record_adjudication_feedback(db, job, finding, adjudication)
+                    persist_attack_paths(db, job)
+                    return adjudication_to_dict(adjudication, wires=[])
             # Fase 3: JEV prioriza a validação (framework + skills). O escore
             # só afeta a prioridade do work item P21 — guardrails (allowlist,
             # budget, escopo) continuam decididos pelo código.
