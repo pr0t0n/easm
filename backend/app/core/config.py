@@ -105,7 +105,13 @@ class Settings(BaseSettings):
     # "rule" = determinístico puro (default seguro para dev/offline).
     jev_decision_backend: str = "jev"
     jev_decision_threshold: float = 0.6
-    jev_decision_thresholds: dict = {}
+    # Limiares por question_id (calibrados ao vivo no Skill Factory, scan #7):
+    # Choice sobre muitas opções (24 famílias) nunca concentra P>0.6 — limiar
+    # de pluralidade calibrada; score binário de qualidade fica no global.
+    jev_decision_thresholds: dict = {
+        "h1_family": 0.35,
+        "h1_quality": 0.5,
+    }
     jev_shadow_mode: bool = False
     finding_adjudication_shadow_mode: bool = True
     frontend_origin: str = "http://localhost:5173"
