@@ -5703,6 +5703,11 @@ def dispatch_scan_work_items(
                     except Exception:
                         pass
                     db.commit()
+                    try:
+                        from app.workers.tasks import sweep_orphan_candidates
+                        sweep_orphan_candidates.apply_async(args=[int(scan_id)], countdown=30)
+                    except Exception:
+                        pass
                     return {"claimed": len(item_ids), "counts": counts, "quality_gate": _quality_gate}
 
                 _final_state = dict(job.state_data or {})
@@ -5750,6 +5755,13 @@ def dispatch_scan_work_items(
                     db.commit()
                 except Exception:
                     db.rollback()
+                    pass
+                # Sweep pós-scan: adjudica candidates/hypothesis órfãos e
+                # persiste as métricas de eficácia (Fase 1b/4 do plano).
+                try:
+                    from app.workers.tasks import sweep_orphan_candidates
+                    sweep_orphan_candidates.apply_async(args=[int(scan_id)], countdown=30)
+                except Exception:
                     pass
                 # Feature 5 — diff contínuo de superfície: alerta novos
                 # subdomínios vs o scan anterior do mesmo alvo.
