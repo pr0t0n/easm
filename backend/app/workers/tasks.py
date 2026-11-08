@@ -8792,7 +8792,7 @@ def create_github_hackerone_learning_task(
 # Sweep pós-scan — adjudica candidates/hypothesis órfãos (PLANO LA-4 / Fase 1b)
 # ─────────────────────────────────────────────────────────────────────────────
 
-@celery.task(name="quality.sweep_orphan_candidates", bind=True, max_retries=1)
+@celery.task(name="quality.sweep_orphan_candidates", bind=True, max_retries=1, queue="worker.unit.reporting")
 def sweep_orphan_candidates(self, scan_id: int) -> dict[str, Any]:
     """Adjudica todo finding candidate/hypothesis sem adjudicação no ciclo atual.
 
@@ -8866,5 +8866,80 @@ def sweep_orphan_candidates(self, scan_id: int) -> dict[str, Any]:
         except Exception:
             pass
         return {"scan_id": scan_id, "swept": 0, "error": f"{type(exc).__name__}: {exc}"[:300]}
+    finally:
+        db.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Skill Factory — triagem H1 em lote (Estágio 7)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@celery.task(name="skill_factory.triage_h1_batch", bind=True, max_retries=0, queue="worker.unit.reporting")
+def skill_factory_triage_h1_batch(self, limit: int = 0) -> dict[str, Any]:
+    """Triagem JEV do lote H1 completo. Idempotente: itens já triados
+    (raw_extraction.factory) são pulados; reexecutável após restart de worker.
+    """
+    import time as _time
+
+    from app.db.session import SessionLocal
+    from app.models.models import VulnerabilityLearning
+    from app.services.candidate_skill_factory import apply_triage, triage_learning
+
+    db = SessionLocal()
+    processed = accepted = rejected = queued = skipped = errors = 0
+    t0 = _time.time()
+    try:
+        query = (
+            db.query(VulnerabilityLearning)
+            .filter(VulnerabilityLearning.status == "pending_review")
+            .order_by(VulnerabilityLearning.id.asc())
+        )
+        if int(limit or 0) > 0:
+            query = query.limit(int(limit))
+        CHUNK = 50
+        last_id = 0
+        while True:
+            rows = (
+                query.filter(VulnerabilityLearning.id > last_id)
+                .limit(CHUNK)
+                .all()
+            )
+            if not rows:
+                break
+            for row in rows:
+                last_id = int(row.id)
+                if dict((row.raw_extraction or {}).get("factory") or {}):
+                    skipped += 1
+                    continue
+                try:
+                    verdict = triage_learning(db, row)
+                    action = apply_triage(db, row, verdict)
+                    processed += 1
+                    accepted += int(action == "auto_accepted")
+                    rejected += int(action == "rejected_duplicate")
+                    queued += int(action == "queued_ranked")
+                except Exception as exc:  # noqa: BLE001
+                    errors += 1
+                    logger.warning("skill_factory learning=%s failed: %s", row.id, exc)
+            db.commit()
+            elapsed = round(_time.time() - t0, 1)
+            logger.info(
+                "skill_factory progress: processed=%d accepted=%d rejected=%d queued=%d "
+                "skipped=%d errors=%d elapsed=%ss last_id=%d",
+                processed, accepted, rejected, queued, skipped, errors, elapsed, last_id,
+            )
+            if int(limit or 0) > 0 and processed >= int(limit):
+                break
+        return {
+            "processed": processed, "auto_accepted": accepted, "rejected_duplicate": rejected,
+            "queued_ranked": queued, "skipped": skipped, "errors": errors,
+            "elapsed_seconds": round(_time.time() - t0, 1),
+        }
+    except Exception as exc:  # noqa: BLE001
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return {"processed": processed, "error": f"{type(exc).__name__}: {exc}"[:300]}
     finally:
         db.close()
