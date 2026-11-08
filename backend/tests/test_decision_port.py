@@ -104,9 +104,16 @@ def test_decide_jev_backend_above_threshold(monkeypatch):
     from app.models.models import JevDecision
     db = SessionLocal()
     try:
-        row = db.query(JevDecision).filter(JevDecision.question_id == "wire_validation_priority").first()
+        row = (
+            db.query(JevDecision)
+            .filter(JevDecision.question_id == "wire_validation_priority", JevDecision.scan_job_id.is_(None))
+            .order_by(JevDecision.id.desc())
+            .first()
+        )
         assert row is not None and row.source == "jev"
-        db.query(JevDecision).filter(JevDecision.question_id == "wire_validation_priority").delete()
+        db.query(JevDecision).filter(
+            JevDecision.question_id == "wire_validation_priority", JevDecision.scan_job_id.is_(None)
+        ).delete()
         db.commit()
     finally:
         db.close()
