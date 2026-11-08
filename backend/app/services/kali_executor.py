@@ -272,6 +272,7 @@ TOOL_TO_PROFILE: dict[str, str] = {
     "nuclei-cloud": "nuclei_cloud",
     "nuclei-cors": "nuclei_cors",
     "nuclei-headers": "nuclei_headers",
+    "nc-probe": "nc_probe",
     "nuclei-race": "nuclei_race",
     "nuclei-takeover": "nuclei_takeover",
     "nmap-vulscan": "nmap_vuln_scripts",

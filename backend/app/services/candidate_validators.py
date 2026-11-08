@@ -119,6 +119,13 @@ def is_passive_observation(title: str, tool: str, details: dict[str, Any] | None
 # Re-probe — extração do sinal essencial para comparação
 # ─────────────────────────────────────────────────────────────
 
+def needs_nc_probe(finding_title: str, details: dict[str, Any] | None = None) -> bool:
+    """True se a evidência sugere tcpwrapped/inconcluso — o re-probe nmap
+    reproduz o mesmo resultado vago; o nc -z é o teste mínimo que refuta."""
+    text = f"{finding_title} {str((details or {}).get('evidence') or '')} {str((details or {}).get('version') or '')}".lower()
+    return "tcpwrapped" in text or ("inconclusiv" in text and "porta" in text)
+
+
 def extract_passive_signal(finding_title: str, tool: str, details: dict[str, Any] | None = None) -> dict[str, Any]:
     """Sinal essencial que a re-probe precisa reproduzir para confirmar."""
     details = dict(details or {})
@@ -153,6 +160,19 @@ def signals_match(original: dict[str, Any], reprobe_stdout: str) -> tuple[bool, 
     if family == "exposed_service":
         port = original.get("port")
         if port:
+            # Marcadores do nc_probe (bash /dev/tcp): sem ambiguidade de parse
+            if "easm_tcp_open" in stdout_l:
+                return True, f"port {port} open (tcp connect succeeded)"
+            if "easm_tcp_refused" in stdout_l:
+                return False, f"port {port} refused on tcp probe"
+            if "easm_tcp_timeout" in stdout_l:
+                return False, f"port {port} probe timed out — not negative proof"
+            # nc -z clássico (caso o binário exista)
+            if re.search(rf"\b{int(port)}\b[^\n]*(succeeded|open)", stdout_l):
+                return True, f"port {port} open (nc connect succeeded)"
+            if re.search(rf"\b{int(port)}\b[^\n]*(refused|failed)", stdout_l):
+                return False, f"port {port} refused on nc probe"
+            # timeout NÃO é prova negativa (rede lenta/filtrada ≠ fechada)
             if re.search(rf"\b{int(port)}/tcp\s+open\b", stdout_l) or re.search(rf":{int(port)}\b", stdout_l):
                 return True, f"port {port} still open"
             if re.search(rf"\b{int(port)}/tcp\s+(closed|filtered)", stdout_l):

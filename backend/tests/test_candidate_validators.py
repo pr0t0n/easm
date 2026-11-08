@@ -88,3 +88,42 @@ def test_fingerprint_signal_match():
 def test_unknown_family_no_match():
     ok, reason = signals_match({"family": ""}, "anything")
     assert not ok and reason == "unknown family"
+
+
+# ─────────────────────────────────────────────────────────────
+# nc_probe — teste mínimo para tcpwrapped/inconclusivo
+# ─────────────────────────────────────────────────────────────
+
+def test_needs_nc_probe_for_tcpwrapped():
+    from app.services.candidate_validators import needs_nc_probe
+    assert needs_nc_probe("Versão de serviço exposta: tcpwrapped 8080/tcp open", {"evidence": "8080/tcp open tcpwrapped"})
+    assert not needs_nc_probe("Portas abertas detectadas: www.example.com (1 porta)", {"evidence": "80/tcp open http"})
+
+
+def test_nc_probe_open_refutes_tcpwrapped():
+    sig = {"family": "exposed_service", "port": 8080}
+    ok, reason = signals_match(sig, "Connection to www.example.com (104.20.23.154) 8080 [tcp/http] succeeded!")
+    assert ok and "nc connect succeeded" in reason
+
+
+def test_nc_probe_refused():
+    sig = {"family": "exposed_service", "port": 8080}
+    ok, reason = signals_match(sig, "nc: connect to www.example.com port 8080 (tcp) failed: Connection refused")
+    assert not ok and "refused" in reason
+
+
+def test_nc_probe_timeout_is_not_negative_proof():
+    # timeout não é refutação — fica como não-observado (candidate)
+    sig = {"family": "exposed_service", "port": 8080}
+    ok, reason = signals_match(sig, "nc: connect to www.example.com port 8080 (tcp) timed out")
+    assert not ok and "not observed" in reason
+
+
+def test_nc_probe_markers():
+    sig = {"family": "exposed_service", "port": 8080}
+    ok, reason = signals_match(sig, "EASM_TCP_OPEN")
+    assert ok and "tcp connect succeeded" in reason
+    ok, reason = signals_match(sig, "EASM_TCP_REFUSED")
+    assert not ok and "refused" in reason
+    ok, reason = signals_match(sig, "EASM_TCP_TIMEOUT")
+    assert not ok and "not negative proof" in reason

@@ -580,13 +580,20 @@ def _wire_tool(action_id: str, finding: Any, parent_wire: Any = None) -> tuple[s
     if action_id == "verify_configuration_state":
         return "nuclei", "nuclei"
     if action_id == "passive_reprobe":
-        # Ferramenta vem do catálogo por família do candidate (LA-2).
-        from app.services.candidate_validators import classify_candidate_family, FAMILY_VALIDATORS
+        # Ferramenta vem do catálogo por família do candidate (LA-2). Achado de
+        # porta tcpwrapped/inconcluso vai de nc -z: teste mínimo que refuta o
+        # que o nmap não consegue distinguir.
+        from app.services.candidate_validators import classify_candidate_family, FAMILY_VALIDATORS, needs_nc_probe
         cand_family = classify_candidate_family(
             str(getattr(finding, "title", "") or ""),
             str(getattr(finding, "tool", "") or ""),
             dict(getattr(finding, "details", None) or {}),
         )
+        if cand_family == "exposed_service" and needs_nc_probe(
+            str(getattr(finding, "title", "") or ""),
+            dict(getattr(finding, "details", None) or {}),
+        ):
+            return "nc-probe", "nc_probe"
         spec = FAMILY_VALIDATORS.get(cand_family or "") or {}
         tool = str(spec.get("reprobe_tool") or "")
         return (tool or None), str(spec.get("reprobe_profile") or tool or "")
@@ -763,6 +770,19 @@ def materialize_validation_wire(db: Session, job: Any, finding: Any, wire: Any) 
         db.flush()
         return False
     storage_target = str(wire.target_ref)[:500]
+    # nc_probe precisa do alvo no formato host:port para o {port} do template.
+    if str(wire.profile or "") == "nc_probe":
+        try:
+            from app.services.candidate_validators import extract_passive_signal
+            _sig = extract_passive_signal(
+                str(finding.title or ""), str(finding.tool or ""), dict(finding.details or {})
+            )
+            _port = _sig.get("port")
+            if _port:
+                _host = storage_target.split("#easm-wire-", 1)[0].split(":")[0]
+                storage_target = f"{_host}:{int(_port)}"
+        except Exception:
+            pass
     suffix = f"#easm-wire-{wire.id}"
     if len(storage_target) + len(suffix) <= 500:
         storage_target += suffix

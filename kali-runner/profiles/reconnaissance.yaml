@@ -398,6 +398,18 @@ linkfinder_js:
   timeout: 180
   parser: lines
 
+nc_probe:
+  tool: nc-probe
+  category: recon
+  phase: RECONNAISSANCE
+  description: "Minimal TCP connect probe (nc -z) for a single host:port — refutes tcpwrapped/inconclusive port findings cheaply. Read-only, no payload."
+  # nc -z -v escreve o veredito no STDERR — redireciona para stdout para o
+  # comparador de sinal (consome stdout_full/stdout_preview).
+  cmd: ["sh", "-c", "nc -z -v -w3 {host} {port} 2>&1"]
+  timeout: 30
+  allowed_return_codes: [0, 1]
+  parser: lines
+
 curl_headers:
   tool: curl-headers
   category: recon
