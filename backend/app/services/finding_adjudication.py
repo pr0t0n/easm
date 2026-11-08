@@ -1506,6 +1506,20 @@ def consume_validation_wire_result(
         from app.services.poc_outcome import classify_poc_work_item
 
         decision = classify_poc_work_item(item)
+    elif str(wire.action_id or "") == "passive_reprobe":
+        # LA-2/LA-3: veredito por comparação do sinal essencial (porta/header/
+        # banner) entre o finding e a stdout da re-probe — não pelo classificador
+        # genérico de PoC (que não entende semântica passiva).
+        from app.services.candidate_validators import extract_passive_signal, signals_match
+
+        raw_result0 = dict(item.result or {}) if isinstance(item.result, dict) else {}
+        reprobe_stdout = str(raw_result0.get("stdout_full") or raw_result0.get("stdout_preview") or "")
+        sig = extract_passive_signal(finding.title, finding.tool, dict(finding.details or {}))
+        if status in {"completed", "done"}:
+            _ok, _reason = signals_match(sig, reprobe_stdout)
+            decision = {"result": "confirmed" if _ok else "refuted", "reason": f"passive_reprobe:{_reason}"}
+        else:
+            decision = {"result": "candidate", "reason": f"passive_reprobe_item_{status}"}
     else:
         decision = classify_validation_wire_result(wire, item, finding)
     wire.status = "completed" if status in {"completed", "done"} else "failed"
