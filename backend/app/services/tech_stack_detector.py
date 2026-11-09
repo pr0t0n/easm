@@ -220,4 +220,34 @@ TECH_STACK_TACTIC_LOCKS: dict[str, dict[str, Any]] = {
         "extra_args": {},
         "hypothesis": "IIS detectado → nikto + nuclei templates IIS para misconfig.",
     },
+    "cloudflare": {
+        # Quando o alvo está atrás do Cloudflare CDN/WAF, testes diretos de
+        # vulnerabilidade atingem o edge, não o servidor de origem.
+        # Prioridade: descobrir o IP real antes de qualquer exploit.
+        "skill_id": "recon.origin_discovery",
+        "capability": "asset_discovery",
+        "allowed_tools": ["crtsh-lookup", "dnsx", "curl-headers", "shodan-query"],
+        "preferred_tool": "crtsh-lookup",
+        "extra_args": {
+            "crtsh-lookup": ["--json", "--expired", "--wildcard"],
+            "dnsx": ["-resp", "-a", "-aaaa", "-mx", "-txt", "-ptr"],
+            "curl-headers": ["-sk", "-D", "-", "-o", "/dev/null"],
+        },
+        "hypothesis": (
+            "Cloudflare CDN/WAF detectado → origem real oculta. "
+            "Executar origin discovery: crt.sh (subdomains), dnsx (MX/TXT/SPF podem vazar IP), "
+            "curl-headers (headers X-Real-IP, X-Forwarded-For). "
+            "Focar testes de exploit no IP de origem, não no edge."
+        ),
+        "skip_exploit_phases": True,
+    },
+    "akamai": {
+        "skill_id": "recon.origin_discovery",
+        "capability": "asset_discovery",
+        "allowed_tools": ["crtsh-lookup", "dnsx", "curl-headers"],
+        "preferred_tool": "crtsh-lookup",
+        "extra_args": {},
+        "hypothesis": "Akamai CDN detectado → descobrir IP de origem antes de exploit.",
+        "skip_exploit_phases": True,
+    },
 }

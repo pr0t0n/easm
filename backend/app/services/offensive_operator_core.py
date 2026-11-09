@@ -265,7 +265,10 @@ def default_phase_contracts(skills_root: Path | str | None = None) -> dict[str, 
           # validate_skill_applicability (scan_work_queue.py) since it attempts real logins.
           "nmap-db-creds"]),
         ("P10", "Injection Testing", "Test injection hypotheses with controls",
-         ["skill.sqli_testing"], ["wapiti"],
+         ["skill.sqli_testing"], ["nuclei-sqli", "wapiti"],
+         # sqlmap-discovery: se parâmetros foram descobertos (known_parameters no state),
+         # deve rodar com --dbs --tables para enumerar bases/tabelas quando SQLi confirmado.
+         # nuclei-sqli como fb_required secundário: template-based detection antes do sqlmap ativo.
          ["sqlmap", "dalfox", "nikto",
           "nuclei-sqli",   # HackerOne: 46 SQL injection reports — template-based detection
           "nuclei-ssti",   # HackerOne: injection class (135 reports) — SSTI patterns
@@ -323,8 +326,11 @@ def default_phase_contracts(skills_root: Path | str | None = None) -> dict[str, 
           "api-skill-top20",
           "zap-api"]),              # Swagger/OpenAPI exposure → API schema dump for auth bypass
         ("P17", "Exploit Validation", "Reproduce validated exploit paths safely via nuclei + manual",
-         ["skill.vuln.sqli"], ["nuclei"],
-         ["sqlmap", "wapiti", "nikto", "wpscan",
+         ["skill.vuln.sqli"], ["nuclei", "sqlmap"],
+         # sqlmap como fb_required em P17: quando SQLi é validado pelo nuclei-sqli,
+         # sqlmap --dbs --tables enumera bases/tabelas para confirmar o impacto real.
+         # Sempre rodar com --batch --level=2 --risk=1 --random-agent (sem brute-force).
+         ["wapiti", "nikto", "wpscan",
           "nuclei-rce",    # HackerOne: critical RCE validation
           "nuclei-lfi",    # HackerOne: path traversal exploit confirmation
           "nuclei-sqli",   # HackerOne: SQL injection exploit confirmation
@@ -1897,6 +1903,18 @@ class OffensiveSkillRuntime:
             ledger = create_phase_ledger(contract)
             ledger.update(status="blocked", blocking_reason="no_approved_skill_resolved", retrieved_rag_context=retrieved["retrieved_skills"])
             return {"phase_ledger": ledger, "offensive_state": state, "validator_decision": {"status": "blocked", "can_advance": False}}
+
+        # Estágio 3 do fluxo: JEV re-ordena as skills aprovadas para a fase
+        # com base no ambiente (Estágio 2). Abaixo do limiar/indisponível →
+        # ordem do engine inalterada (fallback rule).
+        try:
+            from app.services.jev_hypothesis_selection import rerank_sids_with_jev
+
+            ordered_sids, _jev_chosen = rerank_sids_with_jev(
+                ordered_sids, phase_id=phase_id, offensive_state=state,
+            )
+        except Exception:
+            pass
 
         mcp_results: list[dict[str, Any]] = []
         executed_tool_keys: set[str] = set()

@@ -8799,6 +8799,85 @@ def create_github_hackerone_learning_task(
 # Sweep pós-scan — adjudica candidates/hypothesis órfãos (PLANO LA-4 / Fase 1b)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _build_manual_next_steps(finding: Any, dossier: dict) -> list[str]:
+    """Gera passos manuais específicos para findings que esgotaram o orçamento.
+
+    Baseado na vuln_family/owasp_category do finding e no dossier, produz uma
+    lista de ações concretas que um analista deve executar para reproduzir ou
+    descartar a hipótese. Nunca retorna lista vazia.
+    """
+    details = dict(finding.details or {})
+    vuln_family = str(details.get("vuln_family") or "").lower()
+    owasp = str(details.get("owasp_category") or "").lower()
+    asset = str(details.get("asset") or details.get("matched_at") or finding.domain or "")
+    tool = str(details.get("tool") or "")
+
+    # Passos por família de vulnerabilidade
+    _STEPS_BY_FAMILY: dict[str, list[str]] = {
+        "sqli": [
+            f"sqlmap -u '{asset}' --dbs --batch --level=2 --risk=1 --random-agent",
+            "Testar manualmente: adicionar '  OR 1=1-- ao param suspeito",
+            "Verificar mensagens de erro SQL na resposta (MySQL/MSSQL/ORA)",
+            "Usar burp scanner com módulo SQLi ativo",
+        ],
+        "xss": [
+            f"dalfox url '{asset}' --skip-bav --silence",
+            "Testar payload: <img src=x onerror=alert(1)> em campos de entrada",
+            "Verificar se Content-Security-Policy bloqueia execução",
+            "Usar DOM Invader (Burp) para detectar sinks via browser",
+        ],
+        "open_redirect": [
+            f"curl -sk -D - '{asset}?redirect=https://evil.com' | grep -i location",
+            "Testar variações: //evil.com, /\\evil.com, %2F%2Fevil.com",
+        ],
+        "ssrf": [
+            "Usar Burp Collaborator / interactsh para confirmar callback",
+            f"curl '{asset}' -d 'url=http://169.254.169.254/latest/meta-data/'",
+            "Testar headers: X-Forwarded-For, X-Real-IP, Referer",
+        ],
+        "idor": [
+            "Trocar ID/UUID na URL por outro valor numérico sequencial",
+            "Verificar se recurso de outro usuário é retornado",
+            "Testar com dois usuários diferentes e comparar respostas",
+        ],
+        "lfi": [
+            f"curl '{asset}?file=../../etc/passwd'",
+            "Testar path traversal: ../, %2e%2e%2f, ..%2f",
+        ],
+        "secrets": [
+            "Rotacionar o segredo imediatamente",
+            "Verificar se chave/token ainda está válido",
+            "Buscar o segredo em outros arquivos do repositório",
+        ],
+        "prototype_pollution": [
+            "Testar: ?__proto__[test]=xss na URL",
+            "Usar PPscan/ppmap para identificar gadget chains",
+        ],
+    }
+
+    steps: list[str] = []
+    for family, family_steps in _STEPS_BY_FAMILY.items():
+        if family in vuln_family or family in owasp:
+            steps.extend(family_steps)
+            break
+
+    # Passos genéricos quando família não identificada
+    if not steps:
+        steps = [
+            f"Reproduzir manualmente: curl -sk '{asset}' | grep -i erro",
+            "Verificar se a resposta HTTP muda ao alterar parâmetros",
+            f"Revisar output da ferramenta '{tool}' nos logs do scan",
+            "Escalar para analista sênior se comportamento suspeito confirmado",
+        ]
+
+    # Adicionar passos de existing findings do dossier se disponíveis
+    _existing_evidence = dossier.get("evidence") or {}
+    if isinstance(_existing_evidence, dict) and _existing_evidence.get("http_status"):
+        steps.append(f"Status HTTP observado: {_existing_evidence['http_status']} — verificar diferença em contexto autenticado")
+
+    return steps[:6]
+
+
 @celery.task(name="quality.sweep_orphan_candidates", bind=True, max_retries=1, queue="worker.unit.reporting")
 def sweep_orphan_candidates(self, scan_id: int) -> dict[str, Any]:
     """Adjudica todo finding candidate/hypothesis sem adjudicação no ciclo atual.
@@ -8865,6 +8944,7 @@ def sweep_orphan_candidates(self, scan_id: int) -> dict[str, Any]:
                     from datetime import datetime as _dt
                     _dossier = build_adjudication_dossier(db, job, finding)
                     _decision = deterministic_verdict(_dossier)
+                    _manual_steps = _build_manual_next_steps(finding, _dossier)
                     _final = FindingAdjudication(
                         scan_job_id=job.id,
                         finding_id=finding.id,
@@ -8875,7 +8955,11 @@ def sweep_orphan_candidates(self, scan_id: int) -> dict[str, Any]:
                         reason_code=f"validation_exhausted:{_decision.get('reason_code')}",
                         confidence=float(_decision.get("confidence") or 0.5),
                         completed_at=_dt.now(),
-                        decision_metadata={"single_judge": "deterministic_evidence_gate", "terminal": "budget_exhausted"},
+                        decision_metadata={
+                            "single_judge": "deterministic_evidence_gate",
+                            "terminal": "budget_exhausted",
+                            "manual_next_steps": _manual_steps,
+                        },
                     )
                     db.add(_final)
                     db.flush()
@@ -8899,8 +8983,71 @@ def sweep_orphan_candidates(self, scan_id: int) -> dict[str, Any]:
             metrics = compute_scan_validation_metrics(db, job.id)
         except Exception as exc:  # noqa: BLE001
             metrics = {"error": str(exc)[:120]}
+
+        # Fase 5: seed sqlmap enumeration para findings SQLi confirmed.
+        # Quando existe SQLi validated/confirmed e active_exploit_authorized=True,
+        # enfileira work item sqlmap --dbs --tables para enumerar bases e tabelas.
+        # Gate: explícito por flag de autorização — sem esse flag, não toca dados.
+        sqli_seeded = 0
+        try:
+            _state = dict(job.state_data or {})
+            _exploit_ok = bool(_state.get("active_exploit_authorized"))
+            if _exploit_ok:
+                from app.models.models import Finding as _Finding
+                _sqli_findings = (
+                    db.query(_Finding)
+                    .filter(
+                        _Finding.scan_job_id == job.id,
+                        _Finding.status.in_(["validated", "confirmed"]),
+                        _Finding.vuln_family == "sqli",
+                    )
+                    .all()
+                )
+                for _sf in _sqli_findings:
+                    _asset = str((_sf.details or {}).get("asset") or _sf.domain or "")
+                    if not _asset:
+                        continue
+                    # Verifica se já existe work item sqlmap-discovery para este asset
+                    from app.models.models import ScanWorkItem as _SWI
+                    _existing_sqlmap = (
+                        db.query(_SWI)
+                        .filter(
+                            _SWI.scan_job_id == job.id,
+                            _SWI.tool_name == "sqlmap",
+                            _SWI.target == _asset,
+                        )
+                        .filter(_SWI.status.in_(["pending", "queued", "running", "success"]))
+                        .first()
+                    )
+                    if _existing_sqlmap:
+                        continue
+                    _sqlmap_item = _SWI(
+                        scan_job_id=job.id,
+                        tool_name="sqlmap",
+                        target=_asset,
+                        phase_id="P17",
+                        status="pending",
+                        item_metadata={
+                            "source": "sqli_confirmed_enumeration",
+                            "finding_id": _sf.id,
+                            "args": ["--batch", "--level=2", "--risk=1", "--random-agent", "--dbs", "--tables"],
+                            "purpose": "enumerate databases and tables after SQLi confirmed",
+                        },
+                    )
+                    db.add(_sqlmap_item)
+                    sqli_seeded += 1
+                if sqli_seeded:
+                    db.add(ScanLog(
+                        scan_job_id=job.id,
+                        source="quality-gate",
+                        level="INFO",
+                        message=f"sqli_enumeration_seeded scan={job.id} items={sqli_seeded}",
+                    ))
+        except Exception as exc_sqli:  # noqa: BLE001
+            logger.debug("sweep: sqlmap-discovery seed failed: %s", exc_sqli)
+
         db.commit()
-        return {"scan_id": job.id, "orphans": len(orphans), "adjudicated": adjudicated, "wires": wires, "errors": errors, "metrics": metrics}
+        return {"scan_id": job.id, "orphans": len(orphans), "adjudicated": adjudicated, "wires": wires, "errors": errors, "metrics": metrics, "sqli_seeded": sqli_seeded}
     except Exception as exc:  # noqa: BLE001
         try:
             db.rollback()

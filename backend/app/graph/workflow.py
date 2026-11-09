@@ -1604,6 +1604,37 @@ def _run_tools_and_collect(
             )
             for asset in _extract_assets_from_findings(tool_specific_findings, root_domain=root_domain):
                 discovered_assets.add(asset)
+            # Propaga inject_to_state do WhatWeb para o state global do scan.
+            # O parser WhatWeb rico emite allowed_http_methods, edge_control_detected,
+            # site_classes, low_priority_targets e trigger_origin_discovery.
+            if tool == "whatweb":
+                for finding in tool_specific_findings:
+                    _inject = (finding.get("details") or {}).get("inject_to_state") or {}
+                    if _inject.get("allowed_http_methods"):
+                        existing = list(state.get("allowed_http_methods") or [])
+                        for v in _inject["allowed_http_methods"]:
+                            if v not in existing:
+                                existing.append(v)
+                        state["allowed_http_methods"] = existing
+                    if _inject.get("edge_control_detected"):
+                        state["edge_control_detected"] = True
+                    if _inject.get("site_classes"):
+                        existing_cls = list(state.get("site_classes") or [])
+                        for cls in _inject["site_classes"]:
+                            if cls not in existing_cls:
+                                existing_cls.append(cls)
+                        state["site_classes"] = existing_cls
+                    if _inject.get("low_priority_targets"):
+                        lp = list(state.get("low_priority_targets") or [])
+                        for t in _inject["low_priority_targets"]:
+                            if t not in lp:
+                                lp.append(t)
+                        state["low_priority_targets"] = lp
+                    if _inject.get("trigger_origin_discovery"):
+                        state["trigger_origin_discovery"] = True
+                        state["logs_terminais"].append(
+                            f"{log_prefix}: whatweb detectou CDN — agendando origin discovery"
+                        )
         extracted_ports = _extract_open_ports(result, step_name=step_name, tool_name=tool)
         for port in extracted_ports:
             discovered_ports.add(port)

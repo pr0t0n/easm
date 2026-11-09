@@ -48,6 +48,17 @@ _PROTO_SINKS = [
     ("jQuery.extend(true)", re.compile(r"\$\.extend\s*\(\s*true")),
     ("recursive merge", re.compile(r"\b(?:deep[_]?merge|_\.merge|merge)\s*\(")),
 ]
+# Fontes DOM XSS controláveis pelo atacante via URL/referrer/postMessage
+_XSS_SOURCES = [
+    ("location.hash", re.compile(r"location\.hash\b")),
+    ("location.search", re.compile(r"location\.search\b")),
+    ("location.href", re.compile(r"location\.href\b")),
+    ("document.URL", re.compile(r"document\.URL\b")),
+    ("document.referrer", re.compile(r"document\.referrer\b")),
+    ("URLSearchParams", re.compile(r"\bURLSearchParams\b")),
+    ("window.name", re.compile(r"\bwindow\.name\b")),
+    ("postMessage", re.compile(r"\bpostMessage\b|\bmessage\b.*\bevent\.data\b", re.S)),
+]
 _PARAM_RE = re.compile(r"""['"]([a-zA-Z_][\w\-]{1,40})['"]\s*:""")  # chaves de objeto (params/config)
 _FUNC_RE = re.compile(r"\bfunction\s+([a-zA-Z_]\w{2,40})\s*\(|\b([a-zA-Z_]\w{2,40})\s*[:=]\s*(?:async\s*)?\(")
 
@@ -100,6 +111,12 @@ def analyze_js(
     for name, pat in _PROTO_SINKS:
         if pat.search(body):
             out["proto_sinks"].append(name)
+    # Source analysis: se há sinks E fontes controláveis → XSS provavelmente triggerable
+    xss_sources_found: list[str] = []
+    for name, pat in _XSS_SOURCES:
+        if pat.search(body):
+            xss_sources_found.append(name)
+    out["xss_sources"] = xss_sources_found
 
     seen = set()
     for label, pat in _SECRET_PATTERNS:
@@ -261,14 +278,70 @@ def run_js_analysis_for_scan(db, job, *, execution_context: str = "external") ->
                             "discovery_method": "análise estática de JS (regex de segredo)"},
             })
         if a["eval_sinks"]:
+            _sinks = a["eval_sinks"]
+            _sources = list(a.get("xss_sources") or [])
+            _triggerable = bool(_sinks and _sources)
+            # Escolhe vetor de trigger mais provável
+            _trigger_via = ""
+            _trigger_payload = ""
+            if _triggerable:
+                if "location.hash" in _sources:
+                    _trigger_via = "URL hash"
+                    _trigger_payload = f"{ju.split('?')[0]}#<img src=x onerror=alert(1)>"
+                elif "location.search" in _sources or "URLSearchParams" in _sources:
+                    _trigger_via = "query string"
+                    _trigger_payload = f"{ju.split('?')[0]}?q=<img+src=x+onerror=alert(1)>"
+                elif "document.referrer" in _sources:
+                    _trigger_via = "Referer header"
+                    _trigger_payload = "Enviar request com Referer: javascript:alert(1)"
+                elif "postMessage" in _sources:
+                    _trigger_via = "postMessage"
+                    _trigger_payload = "window.postMessage('<img src=x onerror=alert(1)>', '*')"
+                else:
+                    _trigger_via = str(_sources[0])
+                    _trigger_payload = "Verificar fonte manualmente"
+
+            _next_steps = []
+            if _triggerable and _trigger_payload:
+                _next_steps = [
+                    f"Testar payload: {_trigger_payload}",
+                    f"Abrir no browser e verificar execução JS via {_trigger_via}",
+                    "Usar dalfox para fuzzing automatizado do sink",
+                    "Verificar se Content-Security-Policy bloqueia o payload",
+                ]
+            else:
+                _next_steps = [
+                    "Revisar código-fonte: verificar se fonte controlável alimenta o sink",
+                    "Buscar manualmente por: location.hash, URLSearchParams, document.referrer",
+                    "Usar dalfox/DOM Invader para confirmar exploitability",
+                ]
+
             findings.append({
-                "title": f"Sink perigoso de JS ({', '.join(a['eval_sinks'][:3])}) — risco DOM XSS/eval",
-                "severity": "medium", "risk_score": 5,
-                "details": {"tool": "js_analyzer", "asset": ju, "matched_at": ju,
-                            "evidence": f"Sinks detectados: {', '.join(a['eval_sinks'])}. Funções suspeitas: {', '.join(a['functions'][:6])}",
-                            "vuln_family": "xss", "owasp_category": "A03:2021 Injection",
-                            "verification_status": "candidate",
-                            "discovery_method": "análise estática de JS (sinks de execução)"},
+                "title": (
+                    f"DOM XSS triggerable ({', '.join(_sinks[:2])}) via {_trigger_via}" if _triggerable
+                    else f"Sink perigoso de JS ({', '.join(_sinks[:3])}) — risco DOM XSS/eval"
+                ),
+                "severity": "high" if _triggerable else "medium",
+                "risk_score": 7 if _triggerable else 5,
+                "details": {
+                    "tool": "js_analyzer", "asset": ju, "matched_at": ju,
+                    "evidence": (
+                        f"Sinks: {', '.join(_sinks)}. "
+                        f"Fontes controláveis: {', '.join(_sources[:4]) or 'nenhuma detectada'}. "
+                        f"Funções: {', '.join(a['functions'][:6])}"
+                    ),
+                    "vuln_family": "xss",
+                    "owasp_category": "A03:2021 Injection",
+                    "verification_status": "likely_exploitable" if _triggerable else "candidate",
+                    "discovery_method": "análise estática de JS (sinks + source analysis)",
+                    "xss_sinks": _sinks,
+                    "xss_sources": _sources,
+                    "triggerable": _triggerable,
+                    "trigger_via": _trigger_via,
+                    "trigger_payload": _trigger_payload,
+                    "manual_next_steps": _next_steps,
+                    "seed_xss_probe": _triggerable,
+                },
             })
         if a["proto_sinks"]:
             findings.append({

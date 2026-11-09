@@ -280,6 +280,9 @@ def build_adjudication_dossier(db: Session, job: Any, finding: Any) -> dict[str,
             "configuration", "identity_key", "secondary_identity_key", "object_id", "secondary_object_id", "object_id_source",
             "parser_error", "stdout_truncated_for_parser", "grounding", "poc_outcome",
             "cve_applicability", "cve_applicability_reason", "cve_applicability_checked_at",
+            # CDN/WAF inventory context — necessário para deterministic_verdict distinguir
+            # inventário passivo de edge de findings que requerem identidade autenticada.
+            "inventory_only", "edge_control_detected", "is_edge_proxy",
         )
         if details.get(key) not in (None, "", [], {})
     }
@@ -375,6 +378,21 @@ def deterministic_verdict(dossier: dict[str, Any]) -> dict[str, Any]:
         return {"verdict": "refuted", "reason_code": "explicit_negative_observation", "confidence": 0.95}
     if status == "confirmed" and bool(promotion.get("can_promote")) and not contradictions:
         return {"verdict": "confirmed", "reason_code": "positive_reproduction", "confidence": 0.98}
+    # Inventário passivo de CDN/WAF (Shodan, Censys) não requer identidade autenticada
+    # para validar — os dados de porta/banner já são a evidência. Bloquear aqui geraria
+    # um falso "blocked" em findings como "portas Cloudflare" que são informacionais.
+    # O veredito correto é needs_human_review: um analista decide se vale buscar a origem.
+    if (
+        any(item in AUTH_REQUIREMENTS for item in missing)
+        and not (dossier.get("context") or {}).get("available_identities")
+        and details.get("inventory_only")
+        and details.get("edge_control_detected")
+    ):
+        return {
+            "verdict": "needs_human_review",
+            "reason_code": "cdn_inventory_requires_origin_verification",
+            "confidence": 0.9,
+        }
     if any(item in AUTH_REQUIREMENTS for item in missing) and not (dossier.get("context") or {}).get("available_identities"):
         return {"verdict": "blocked", "reason_code": "missing_authenticated_identity", "confidence": 1.0}
     if missing:

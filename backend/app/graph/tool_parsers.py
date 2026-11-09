@@ -1540,25 +1540,93 @@ def _extract_cloudenum_findings(stdout: str, step_name: str, default_target: str
     return findings
 
 
+def _classify_site(technologies: list[str], title: str, allowed_methods: list[str]) -> dict[str, Any]:
+    """Classifica o tipo de site a partir das evidências do WhatWeb.
+
+    Retorna flags que alimentam a estratégia de ataque:
+      - is_static_demo: site demo/placeholder (Ex: 'Example Domain'), sem app real
+      - is_cdn_proxied: o request passou por CDN edge (Cloudflare / Akamai / Fastly)
+      - is_read_only: apenas GET/HEAD permitidos — baixa superfície de ataque
+      - low_priority: combinação de estático + CDN — chance de falso positivo alta
+    """
+    tech_lower = {t.lower() for t in technologies}
+    is_cdn = any(
+        cdn in t for t in tech_lower
+        for cdn in ("cloudflare", "akamai", "fastly", "cloudfront", "cdn")
+    )
+    is_static = title.lower() in {"example domain", "test page", "default page", "welcome to nginx", "it works"}
+    allowed_upper = {m.upper() for m in allowed_methods}
+    is_read_only = bool(allowed_upper) and not ({"POST", "PUT", "PATCH", "DELETE"} & allowed_upper)
+    return {
+        "is_static_demo": is_static,
+        "is_cdn_proxied": is_cdn,
+        "is_read_only": is_read_only,
+        "low_priority": is_static or (is_cdn and is_read_only),
+    }
+
+
 def _extract_whatweb_findings(stdout: str, step_name: str, default_target: str) -> list[dict[str, Any]]:
-    """Extrai tecnologias fingerprinted pelo whatweb."""
+    """Extrai tecnologias fingerprinted pelo whatweb com análise ambiental.
+
+    Além do fingerprint de tecnologias, captura:
+      - Allow methods (verbos HTTP permitidos)
+      - Title da página (detecta sites placeholder/demo)
+      - Headers CDN: cf-ray, cloudflare, akamai, etc.
+      - Classifica o site (is_static_demo, is_cdn_proxied, is_read_only)
+      - Produz inject_to_state para alimentar a estratégia de ataque no workflow.py
+    """
     findings: list[dict[str, Any]] = []
     technologies: list[str] = []
     server_header = ""
     powered_by = ""
+    allowed_methods: list[str] = []
+    page_title = ""
+    is_cdn_detected = False
+    cdn_headers_found: list[str] = []
+
+    _CDN_HEADER_PATTERNS = {"cf-ray", "cf-cache-status", "x-cache", "x-amz-cf-id",
+                             "x-akamai", "x-fastly", "via", "x-cdn"}
+    _CDN_TECH_NAMES = {"cloudflare", "akamai", "fastly", "cloudfront", "imperva",
+                        "sucuri", "incapsula"}
+
     for raw_line in (stdout or "").splitlines():
         line = raw_line.strip()
         if not line:
             continue
-        # whatweb: http://target [200 OK] Apache[2.4], PHP[7.4], ...
+
+        # whatweb text format: http://target [200 OK] Plugin1[val1], Plugin2[val2]
         for m in re.finditer(r"\b([A-Za-z][A-Za-z0-9\-_.]+)\[([^\]]+)\]", line):
             tech_name = m.group(1).strip()
-            tech_version = m.group(2).strip()
-            technologies.append(f"{tech_name}/{tech_version}")
-            if tech_name.lower() in {"apache", "nginx", "iis", "lighttpd", "server"}:
-                server_header = f"{tech_name}/{tech_version}"
-            if tech_name.lower() in {"php", "asp.net", "x-powered-by"}:
-                powered_by = f"{tech_name}/{tech_version}"
+            tech_value = m.group(2).strip()
+            tech_lower = tech_name.lower()
+
+            # Captura Allow methods
+            if tech_lower == "allow":
+                for verb in re.split(r"[,\s]+", tech_value):
+                    v = verb.strip().upper()
+                    if v and v not in allowed_methods:
+                        allowed_methods.append(v)
+                continue
+
+            # Captura título
+            if tech_lower == "title":
+                page_title = tech_value
+                continue
+
+            # Detecta headers CDN
+            if tech_lower in _CDN_HEADER_PATTERNS or any(cdn in tech_lower for cdn in _CDN_TECH_NAMES):
+                is_cdn_detected = True
+                cdn_headers_found.append(f"{tech_name}={tech_value}")
+
+            # Servidor
+            if tech_lower in {"apache", "nginx", "iis", "lighttpd", "httpserver", "server"}:
+                server_header = f"{tech_name}/{tech_value}"
+            elif tech_lower in {"php", "asp.net", "x-powered-by"}:
+                powered_by = f"{tech_name}/{tech_value}"
+
+            technologies.append(f"{tech_name}/{tech_value}")
+
+        # whatweb JSON format
         try:
             data = json.loads(line)
             if isinstance(data, dict):
@@ -1567,26 +1635,130 @@ def _extract_whatweb_findings(stdout: str, step_name: str, default_target: str) 
                         name = tech.get("name", "")
                         version = tech.get("version", "")
                         technologies.append(f"{name}/{version}" if version else name)
+                for hdr_name, hdr_val in (data.get("headers") or {}).items():
+                    hdr_lower = hdr_name.lower()
+                    if hdr_lower == "allow":
+                        for verb in re.split(r"[,\s]+", str(hdr_val)):
+                            v = verb.strip().upper()
+                            if v and v not in allowed_methods:
+                                allowed_methods.append(v)
+                    if hdr_lower in _CDN_HEADER_PATTERNS:
+                        is_cdn_detected = True
+                        cdn_headers_found.append(f"{hdr_name}={hdr_val}")
+                if not page_title and data.get("title"):
+                    page_title = str(data["title"])
         except (json.JSONDecodeError, ValueError):
             pass
-    if not technologies:
+
+    if not technologies and not allowed_methods and not page_title:
         return []
+
     tech_unique = sorted(set(technologies))
+    site_class = _classify_site(tech_unique, page_title, allowed_methods)
+
+    # inject_to_state: estrutura que workflow.py consumirá para enriquecer o state
+    inject_to_state: dict[str, Any] = {}
+    if allowed_methods:
+        inject_to_state["allowed_http_methods"] = allowed_methods
+    if is_cdn_detected:
+        inject_to_state["edge_control_detected"] = True
+    if site_class["is_static_demo"]:
+        inject_to_state["site_classes"] = inject_to_state.get("site_classes", []) + ["static_demo"]
+    if site_class["low_priority"]:
+        inject_to_state["low_priority_targets"] = [default_target]
+    if is_cdn_detected and site_class.get("is_cdn_proxied"):
+        inject_to_state["trigger_origin_discovery"] = True
+
+    base_details: dict[str, Any] = {
+        "node": "osint", "step": step_name, "asset": default_target, "tool": "whatweb",
+        "technologies": tech_unique[:100],
+        "allowed_http_methods": allowed_methods,
+        "page_title": page_title,
+        "cdn_headers": cdn_headers_found,
+        "is_cdn_proxied": is_cdn_detected,
+        "site_classification": site_class,
+        "inject_to_state": inject_to_state,
+    }
+
+    # Finding principal: visão ambiental completa
+    env_summary_parts = []
+    if page_title:
+        env_summary_parts.append(f"Título: '{page_title}'")
+    if allowed_methods:
+        env_summary_parts.append(f"Allow: {','.join(allowed_methods)}")
+    if is_cdn_detected:
+        env_summary_parts.append(f"CDN: {', '.join(cdn_headers_found[:3])}")
+    if tech_unique:
+        env_summary_parts.append(f"Tech: {', '.join(tech_unique[:5])}")
+
     findings.append({
-        "title": f"Tecnologias detectadas: {len(tech_unique)} componentes",
+        "title": f"Fingerprint ambiental ({default_target}): {len(tech_unique)} tech, {len(allowed_methods)} verbos HTTP",
         "severity": "info",
         "risk_score": 2,
         "source_worker": "osint",
         "details": {
-            "node": "osint",
-            "step": step_name,
-            "asset": default_target,
-            "tool": "whatweb",
-            "evidence": ", ".join(tech_unique[:30]),
-            "technologies": tech_unique[:100],
+            **base_details,
             "count": len(tech_unique),
+            "evidence": " | ".join(env_summary_parts) or ", ".join(tech_unique[:20]),
         },
     })
+
+    # Finding extra: site demo/placeholder (não atacar — falso positivo alto)
+    if site_class["is_static_demo"]:
+        findings.append({
+            "title": f"Site placeholder detectado: '{page_title}' — baixa prioridade",
+            "severity": "info",
+            "risk_score": 1,
+            "source_worker": "osint",
+            "details": {
+                **base_details,
+                "evidence": (
+                    f"Título '{page_title}' indica site demo/placeholder. "
+                    "Escopo de ataque reduzido — verificar se endpoint é o alvo real."
+                ),
+                "inventory_only": True,
+            },
+        })
+
+    # Finding extra: CDN edge detectado → sugerir origin discovery
+    if is_cdn_detected:
+        findings.append({
+            "title": f"CDN/WAF edge detectado em {default_target} — origem oculta",
+            "severity": "low",
+            "risk_score": 2,
+            "source_worker": "osint",
+            "details": {
+                **base_details,
+                "evidence": (
+                    f"Headers CDN: {', '.join(cdn_headers_found[:5])}. "
+                    "Testes de vulnerabilidade no IP CDN não alcançam a origem. "
+                    "Executar origin discovery: crt.sh, DNS histórico, MX/SPF."
+                ),
+                "edge_control_detected": True,
+                "inventory_only": True,
+            },
+        })
+
+    # Finding extra: verbos HTTP perigosos habilitados
+    dangerous_verbs = {"PUT", "DELETE", "PATCH", "TRACE", "OPTIONS"} & set(allowed_methods)
+    if dangerous_verbs:
+        findings.append({
+            "title": f"Verbos HTTP perigosos habilitados: {', '.join(sorted(dangerous_verbs))}",
+            "severity": "medium",
+            "risk_score": 5,
+            "source_worker": "osint",
+            "details": {
+                **base_details,
+                "evidence": (
+                    f"Allow header reporta: {', '.join(allowed_methods)}. "
+                    f"Verbos {', '.join(sorted(dangerous_verbs))} podem permitir "
+                    "upload não autorizado, deleção de recursos ou CSRF."
+                ),
+                "owasp_category": "A05:2021 Security Misconfiguration",
+            },
+        })
+
+    # Findings legados compatíveis (server/powered-by)
     if server_header:
         findings.append({
             "title": f"Header Server Exposto: {server_header}",
@@ -1594,13 +1766,9 @@ def _extract_whatweb_findings(stdout: str, step_name: str, default_target: str) 
             "risk_score": 3,
             "source_worker": "osint",
             "details": {
-                "node": "osint",
-                "step": step_name,
-                "asset": default_target,
-                "tool": "whatweb",
+                "node": "osint", "step": step_name, "asset": default_target, "tool": "whatweb",
                 "evidence": f"Server header expoe versao: {server_header}",
-                "header_name": "server",
-                "header_value": server_header,
+                "header_name": "server", "header_value": server_header,
             },
         })
     if powered_by:
@@ -1610,13 +1778,9 @@ def _extract_whatweb_findings(stdout: str, step_name: str, default_target: str) 
             "risk_score": 3,
             "source_worker": "osint",
             "details": {
-                "node": "osint",
-                "step": step_name,
-                "asset": default_target,
-                "tool": "whatweb",
+                "node": "osint", "step": step_name, "asset": default_target, "tool": "whatweb",
                 "evidence": f"X-Powered-By expoe tecnologia: {powered_by}",
-                "header_name": "x-powered-by",
-                "header_value": powered_by,
+                "header_name": "x-powered-by", "header_value": powered_by,
             },
         })
     return findings

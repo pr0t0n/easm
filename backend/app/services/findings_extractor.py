@@ -1053,13 +1053,20 @@ def _extract_gitleaks_trufflehog_findings(
 def _extract_waybackurls_gau_findings(
     stdout: str, target: str, tool_name: str
 ) -> list[dict[str, Any]]:
-    """Parse waybackurls / gau URL discovery output."""
+    """Parse waybackurls / gau URL discovery output.
+
+    Além de listar URLs descobertas, extrai nomes de parâmetros encontrados
+    em URLs com padrões sensíveis e emite inject_to_state.known_parameters
+    para que o workflow enfileire fuzzing automático (arjun/ffuf-params).
+    """
     findings: list[dict[str, Any]] = []
     urls: list[str] = []
     interesting: list[str] = []
 
-    interesting_patterns = re.compile(
-        r"(\?|&)(id=|user=|pass|token|key|admin|redirect|debug|test|secret|api)",
+    _SENSITIVE_PARAM_RE = re.compile(
+        r"[?&](id|user|pass(?:word)?|token|key|admin|redirect|debug|test|"
+        r"secret|api|cmd|exec|file|path|url|query|search|q|name|"
+        r"email|phone|code|ref|lang|page|sort|order|format|type)=",
         re.IGNORECASE,
     )
 
@@ -1067,8 +1074,23 @@ def _extract_waybackurls_gau_findings(
         url = line.strip()
         if url.startswith("http"):
             urls.append(url)
-            if interesting_patterns.search(url):
+            if _SENSITIVE_PARAM_RE.search(url):
                 interesting.append(url)
+
+    # Extrai nomes únicos de parâmetros das URLs interessantes
+    discovered_params: list[str] = []
+    if interesting:
+        seen_params: set[str] = set()
+        for url in interesting:
+            parsed_url = url.split("?", 1)
+            if len(parsed_url) < 2:
+                continue
+            for kv in re.split(r"[&;]", parsed_url[1]):
+                param_name = kv.split("=")[0].strip().lower()
+                if param_name and param_name not in seen_params:
+                    seen_params.add(param_name)
+                    discovered_params.append(param_name)
+        discovered_params = discovered_params[:100]
 
     if urls:
         findings.append({
@@ -1087,6 +1109,11 @@ def _extract_waybackurls_gau_findings(
             },
         })
     if interesting:
+        inject_to_state: dict[str, Any] = {}
+        if discovered_params:
+            inject_to_state["known_parameters"] = discovered_params
+            inject_to_state["seed_param_fuzzing"] = True
+
         findings.append({
             "title": f"Parâmetros sensíveis em URLs históricas ({tool_name}): {len(interesting)} URLs",
             "severity": "medium",
@@ -1099,8 +1126,20 @@ def _extract_waybackurls_gau_findings(
                 "tool": tool_name,
                 "evidence": "\n".join(interesting[:10]),
                 "sensitive_urls": interesting[:50],
+                "discovered_parameters": discovered_params,
                 "owasp_category": "A01:2021 Broken Access Control",
-                "impact": "URLs históricas com parâmetros sensíveis podem indicar endpoints legados com controles mais fracos.",
+                "impact": (
+                    "URLs históricas com parâmetros sensíveis podem indicar endpoints legados "
+                    "com controles mais fracos. Parâmetros identificados devem ser fuzzados "
+                    f"com arjun/ffuf-params: {', '.join(discovered_params[:10])}"
+                ),
+                "inject_to_state": inject_to_state,
+                "manual_next_steps": [
+                    f"Fuzzing de parâmetros: arjun -u {target} --include {','.join(discovered_params[:20])}",
+                    f"Ffuf com wordlist focada nos params: {', '.join(discovered_params[:10])}",
+                    "Verificar controle de acesso em endpoints com parâmetros id/user/admin",
+                    "Testar IDOR: variar valores numéricos em parâmetros id/user",
+                ],
             },
         })
 
@@ -2048,8 +2087,37 @@ def _extract_trivy_findings(
 # Port scanners (naabu / masscan)
 # ─────────────────────────────────────────────────────────────────────────────
 
+_CLOUDFLARE_PROXY_PORTS = frozenset({2052, 2053, 2082, 2083, 2086, 2087, 2095, 2096, 8080, 8443, 8880})
+
+
+def _resolve_cdn_context_from_state(scan_state: dict[str, Any] | None, target: str) -> dict[str, Any]:
+    """Extrai contexto CDN/WAF do state do scan para o target dado.
+
+    Consulta preflight (httpx probe) e edge_control_detected global para
+    determinar se o IP do target pertence a um CDN/WAF proxy.
+    """
+    if not scan_state:
+        return {}
+    preflight = dict(scan_state.get("preflight") or {})
+    targets_data = dict(preflight.get("targets") or {})
+    # Normaliza o target para busca (remove esquema, fragmento)
+    host = target.split("#")[0].split("://")[-1].split("/")[0]
+    target_info = targets_data.get(host) or targets_data.get(target) or {}
+    # Consulta flags do httpx probe no preflight
+    is_cdn = bool(target_info.get("cdn")) or bool(scan_state.get("edge_control_detected"))
+    is_cloudflare = any(
+        "cloudflare" in str(t).lower()
+        for t in (target_info.get("tech") or [])
+    ) or is_cdn
+    return {
+        "edge_control_detected": is_cdn,
+        "is_cloudflare_proxy": is_cloudflare,
+    }
+
+
 def _extract_naabu_masscan_findings(
-    stdout: str, target: str, tool_name: str
+    stdout: str, target: str, tool_name: str,
+    cdn_context: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Parse naabu (host:port per line) and masscan (text/JSON) output."""
     findings: list[dict[str, Any]] = []
@@ -2088,23 +2156,77 @@ def _extract_naabu_masscan_findings(
     if not open_ports:
         return findings
 
-    interesting = [p for p in open_ports if p["port"] not in (80, 443, 8080, 8443)]
-    all_ports_str = ", ".join(f"{p['host']}:{p['port']}" for p in open_ports[:20])
+    # Filtrar portas de edge Cloudflare quando o target está atrás de CDN.
+    # Essas portas existem em TODOS os sites proxiados pelo Cloudflare — não
+    # representam superfície do servidor de origem.
+    is_cdn = bool((cdn_context or {}).get("edge_control_detected"))
+    is_cf  = bool((cdn_context or {}).get("is_cloudflare_proxy"))
+    cdn_filtered: list[dict] = []
+    real_ports = open_ports
+    if is_cf:
+        cdn_filtered = [p for p in open_ports if p["port"] in _CLOUDFLARE_PROXY_PORTS]
+        real_ports   = [p for p in open_ports if p["port"] not in _CLOUDFLARE_PROXY_PORTS]
 
-    findings.append({
-        "title": f"Portas abertas ({tool_name}): {len(open_ports)} porta(s) em {target}",
-        "severity": "medium" if interesting else "info",
-        "risk_score": 4 if interesting else 1,
-        "source_worker": "recon",
-        "details": {
-            "node": "recon", "step": tool_name, "asset": target, "tool": tool_name,
-            "evidence": all_ports_str,
-            "open_ports": open_ports[:200],
-            "interesting_ports": interesting[:50],
-            "count": len(open_ports),
-            "owasp_category": "A05:2021 Security Misconfiguration" if interesting else "",
-        },
-    })
+    interesting = [p for p in real_ports if p["port"] not in (80, 443)]
+    all_ports_str = ", ".join(f"{p['host']}:{p['port']}" for p in real_ports[:20])
+
+    cdn_note = ""
+    if cdn_filtered:
+        cdn_note = (
+            f" (portas {', '.join(str(p['port']) for p in cdn_filtered)}"
+            f" são do Cloudflare edge — não testam o servidor de origem)"
+        )
+
+    # Validação simples: se CDN, instruir o analista a verificar cf-ray no header
+    verification_note = None
+    if is_cdn and real_ports:
+        port_sample = real_ports[0]["port"]
+        scheme = "https" if port_sample in (443, 8443) else "http"
+        verification_note = (
+            f"Portas testadas no IP do CDN — confirmar se porta pertence à origem via: "
+            f"curl -sk -D - {scheme}://{target}:{port_sample}/ | grep -i 'cf-ray\\|server'"
+        )
+
+    if real_ports:
+        findings.append({
+            "title": f"Portas abertas ({tool_name}): {len(real_ports)} porta(s) em {target}",
+            "severity": "medium" if interesting else "info",
+            "risk_score": 4 if interesting else 1,
+            "source_worker": "recon",
+            "details": {
+                "node": "recon", "step": tool_name, "asset": target, "tool": tool_name,
+                "evidence": all_ports_str + cdn_note,
+                "open_ports": real_ports[:200],
+                "interesting_ports": interesting[:50],
+                "cdn_filtered_ports": cdn_filtered,
+                "is_cdn_ip": is_cdn,
+                "count": len(real_ports),
+                "owasp_category": "A05:2021 Security Misconfiguration" if interesting else "",
+                "verification_note": verification_note,
+            },
+        })
+    elif cdn_filtered:
+        # Todas as portas eram do Cloudflare edge — finding informacional específico
+        findings.append({
+            "title": f"Portas Cloudflare edge ({tool_name}): {target} — apenas portas CDN visíveis",
+            "severity": "info",
+            "risk_score": 1,
+            "source_worker": "recon",
+            "details": {
+                "node": "recon", "step": tool_name, "asset": target, "tool": tool_name,
+                "evidence": (
+                    f"Portas {', '.join(str(p['port']) for p in cdn_filtered)} "
+                    f"pertencem ao Cloudflare edge — origem real oculta atrás do CDN"
+                ),
+                "cdn_filtered_ports": cdn_filtered,
+                "is_cdn_ip": True,
+                "count": 0,
+                "verification_note": (
+                    "Para descobrir portas da origem: buscar IP real via crt.sh, "
+                    "histórico DNS (MX/TXT/SPF), ou subdomínios sem proxy Cloudflare."
+                ),
+            },
+        })
     return findings
 
 
@@ -2180,6 +2302,7 @@ def extract_findings_from_work_item(
     target: str,
     phase_id: str,
     result: dict[str, Any],
+    cdn_context: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """
     Route a completed work item result to the appropriate parser.
@@ -2349,7 +2472,7 @@ def extract_findings_from_work_item(
 
         # ── Port scanners (modern) ─────────────────────────────────────────
         elif tool in ("naabu", "masscan"):
-            findings = _extract_naabu_masscan_findings(stdout, target, tool)
+            findings = _extract_naabu_masscan_findings(stdout, target, tool, cdn_context=cdn_context)
 
         # ── OOB callback receiver ──────────────────────────────────────────
         elif tool == "interactsh-client":
@@ -3580,13 +3703,39 @@ def persist_findings_from_work_item(
 
     raw_findings = list(result.get("findings_extracted") or [])
     if not raw_findings:
-        raw_findings = extract_findings_from_work_item(tool, target, phase_id, result)
+        _cdn_ctx = _resolve_cdn_context_from_state(dict(job.state_data or {}), target) if job else None
+        raw_findings = extract_findings_from_work_item(tool, target, phase_id, result, cdn_context=_cdn_ctx)
     _try_ingest_spec_from_findings(db, job, raw_findings)
     meta_persisted = _persist_extractor_meta(db, item, result)
     if not raw_findings:
         if meta_persisted:
             db.commit()
         return 0
+
+    # ── Propaga inject_to_state de ferramentas de OSINT para o job.state_data ──
+    # GAU/waybackurls emitem known_parameters quando encontram URLs com parâmetros
+    # sensíveis. Esses parâmetros devem ser preservados no state do job para que
+    # a fase de fuzzing (arjun/ffuf-params) os consuma.
+    if tool in ("gau", "waybackurls") and job:
+        for _rf in raw_findings:
+            _inject = (_rf.get("details") or {}).get("inject_to_state") or {}
+            _new_params = list(_inject.get("known_parameters") or [])
+            if _new_params:
+                try:
+                    _state_data = dict(job.state_data or {})
+                    _existing = list(_state_data.get("known_parameters") or [])
+                    _merged = list(dict.fromkeys(_existing + _new_params))[:200]
+                    _state_data["known_parameters"] = _merged
+                    _state_data["param_fuzzing_pending"] = True
+                    job.state_data = _state_data
+                    import logging as _log
+                    _log.getLogger(__name__).info(
+                        "findings_extractor: %s descobriu %d parâmetros → state.known_parameters",
+                        tool, len(_new_params),
+                    )
+                except Exception:
+                    pass
+                break
 
     # ── P3b: provenance de aprendizado — se o work item foi semeado pelos 10k
     # learnings HackerOne, marca cada finding p/ a UI mostrar a caixa de uso. ──
