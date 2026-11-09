@@ -1043,9 +1043,15 @@ def adjudicate_finding(db: Session, job: Any, finding: Any, *, force: bool = Fal
                 db.flush()
                 persist_attack_paths(db, job)
                 return adjudication_to_dict(latest, wires=_wires_for_adjudication(db, latest.id))
+            # Orçamento de ciclos esgotado: o finding foi INVESTIGADO. O fecho
+            # honesto é o veredito do gate determinístico sobre o dossiê atual
+            # (inconclusive/not_applicable/blocked por identidade...), NUNCA
+            # needs_human_review genérico — humano é exclusivo do guardrail.
+            _final_decision = deterministic_verdict(dossier)
             latest.status = "budget_exhausted"
-            latest.final_verdict = "needs_human_review"
-            latest.reason_code = "adjudication_budget_exhausted"
+            latest.final_verdict = str(_final_decision.get("verdict") or "inconclusive")
+            latest.reason_code = f"validation_exhausted:{_final_decision.get('reason_code')}"
+            latest.confidence = float(_final_decision.get("confidence") or 0.5)
             latest.completed_at = datetime.now()
             project_adjudication_to_finding(db, finding, latest)
             record_adjudication_feedback(db, job, finding, latest)
@@ -1100,9 +1106,11 @@ def adjudicate_finding(db: Session, job: Any, finding: Any, *, force: bool = Fal
     else:
         total_wires = db.query(func.count(ValidationWire.id)).filter(ValidationWire.finding_id == finding.id).scalar() or 0
         if int(total_wires) >= MAX_WIRES_PER_FINDING:
+            # Idem: wires esgotados = investigado; fecha com o gate determinístico.
+            _final_decision = deterministic_verdict(dossier)
             adjudication.status = "budget_exhausted"
-            adjudication.final_verdict = "needs_human_review"
-            adjudication.reason_code = "validation_wire_budget_exhausted"
+            adjudication.final_verdict = str(_final_decision.get("verdict") or "inconclusive")
+            adjudication.reason_code = f"validation_exhausted:{_final_decision.get('reason_code')}"
             adjudication.completed_at = datetime.now()
         else:
             # Shadow mode records/calibrates the model proposal but keeps the
@@ -1204,7 +1212,12 @@ def adjudicate_finding(db: Session, job: Any, finding: Any, *, force: bool = Fal
                 wire.status = "completed"
                 wire.completed_at = datetime.now()
                 adjudication.status = "awaiting_re_evaluation"
-            elif materialize_validation_wire(db, job, finding, wire):
+            elif materialize_validation_wire(db, job, finding, wire) or (
+                wires and str(getattr(wires[0], "status", "") or "") in {"queued", "awaiting_evidence"}
+            ):
+                # Wire reusado já materializado (status queued/awaiting_evidence)
+                # conta como materializado — sem isso, re-ciclos (sweep/re-adjudicação
+                # force) marcavam blocked/wire_not_materializable indevidamente.
                 adjudication.status = "awaiting_evidence"
             else:
                 adjudication.status = "blocked"
@@ -1609,6 +1622,25 @@ def consume_validation_wire_result(
             decision = {"result": "confirmed" if _ok else "refuted", "reason": f"passive_reprobe:{_reason}"}
         else:
             decision = {"result": "candidate", "reason": f"passive_reprobe_item_{status}"}
+    elif str(wire.action_id or "") == "repeat_original_probe":
+        # Re-execução da probe original (zap/nikto/gau...): para achados de
+        # config/observação, re-observar o MESMO sinal (tokens do título na
+        # stdout) É a reprodução positiva — o classificador genérico de PoC
+        # exige "prova de vulnerabilidade" e deixava tudo em candidate.
+        raw_result0 = dict(item.result or {}) if isinstance(item.result, dict) else {}
+        reprobe_stdout = str(raw_result0.get("stdout_full") or raw_result0.get("stdout_preview") or "")
+        stopwords = {"header", "seguranca", "ausente", "missing", "not", "set", "the", "de", "da", "do"}
+        tokens = [
+            t for t in __import__("re").findall(r"[a-z0-9][a-z0-9\-]{4,}", str(finding.title or "").lower())
+            if t not in stopwords
+        ][:8]
+        hits = sum(1 for t in tokens if t in reprobe_stdout.lower())
+        if status in {"completed", "done"} and tokens and hits >= 2:
+            decision = {"result": "confirmed", "reason": f"repeat_original_probe:observation_reproduced({hits}/{len(tokens)} tokens)"}
+        elif status in {"completed", "done"} and reprobe_stdout.strip():
+            decision = {"result": "candidate", "reason": "repeat_original_probe:signal_not_reobserved"}
+        else:
+            decision = {"result": "candidate", "reason": f"repeat_original_probe_item_{status}"}
     else:
         decision = classify_validation_wire_result(wire, item, finding)
     wire.status = "completed" if status in {"completed", "done"} else "failed"

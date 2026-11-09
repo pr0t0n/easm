@@ -1399,6 +1399,13 @@ def _work_item_execution_queue(item, mode: str = "unit") -> str:
     from app.workers.worker_groups import phase_queue
 
     _phase_id = str(getattr(item, "phase_id", "") or "")
+    # P21 (wires de validação/adjudicação) executam na fila paralela: a fila
+    # de reporting teve o consumidor externo corrompido após o blip do Postgres
+    # (scan #7: 8 itens dispatched fantasma; heartbeat publicado externamente
+    # não executa, embora postprocessors do próprio worker rodem). scan.parallel
+    # tem worker dedicado e está saudável (milhares de execuções neste scan).
+    if _phase_id == "P21":
+        return SCAN_PARALLEL_QUEUE
     return phase_queue(_phase_id, mode=mode) if _phase_id else SCAN_PARALLEL_QUEUE
 
 
@@ -8836,10 +8843,44 @@ def sweep_orphan_candidates(self, scan_id: int) -> dict[str, Any]:
                         pass
                     continue
                 from app.services.finding_adjudication import adjudicate_finding
-                result = adjudicate_finding(db, job, finding)
-                adjudicated += 1
-                if result.get("wires"):
-                    wires += len(result["wires"])
+                try:
+                    result = adjudicate_finding(db, job, finding)
+                    adjudicated += 1
+                    if result.get("wires"):
+                        wires += len(result["wires"])
+                except RuntimeError as rerr:
+                    # Orçamento de ciclos esgotado (re-adjudicações): o finding
+                    # foi INVESTIGADO — o fechamento honesto é o veredito
+                    # determinístico do dossiê (inconclusive/not_applicable/...),
+                    # nunca needs_human_review genérico (isso é exclusivo do
+                    # guardrail). Aplica o verdict final diretamente.
+                    if "adjudication_budget_exhausted" not in str(rerr):
+                        raise
+                    from app.services.finding_adjudication import (
+                        build_adjudication_dossier,
+                        deterministic_verdict,
+                        project_adjudication_to_finding,
+                    )
+                    from app.models.models import FindingAdjudication
+                    from datetime import datetime as _dt
+                    _dossier = build_adjudication_dossier(db, job, finding)
+                    _decision = deterministic_verdict(_dossier)
+                    _final = FindingAdjudication(
+                        scan_job_id=job.id,
+                        finding_id=finding.id,
+                        cycle=99,
+                        status="completed",
+                        dossier=_dossier,
+                        final_verdict=str(_decision.get("verdict") or "inconclusive"),
+                        reason_code=f"validation_exhausted:{_decision.get('reason_code')}",
+                        confidence=float(_decision.get("confidence") or 0.5),
+                        completed_at=_dt.now(),
+                        decision_metadata={"single_judge": "deterministic_evidence_gate", "terminal": "budget_exhausted"},
+                    )
+                    db.add(_final)
+                    db.flush()
+                    project_adjudication_to_finding(db, finding, _final)
+                    adjudicated += 1
             except Exception as exc:  # noqa: BLE001 — sweep não derruba o scan
                 errors += 1
                 logger.debug("sweep orphan finding=%s failed: %s", finding.id, exc)
@@ -8920,6 +8961,10 @@ def skill_factory_triage_h1_batch(self, limit: int = 0) -> dict[str, Any]:
                     queued += int(action == "queued_ranked")
                 except Exception as exc:  # noqa: BLE001
                     errors += 1
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
                     logger.warning("skill_factory learning=%s failed: %s", row.id, exc)
             db.commit()
             elapsed = round(_time.time() - t0, 1)
