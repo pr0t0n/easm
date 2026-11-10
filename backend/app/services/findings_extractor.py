@@ -25,6 +25,7 @@ Architecture
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
 from datetime import datetime, timedelta
@@ -2089,6 +2090,29 @@ def _extract_trivy_findings(
 
 _CLOUDFLARE_PROXY_PORTS = frozenset({2052, 2053, 2082, 2083, 2086, 2087, 2095, 2096, 8080, 8443, 8880})
 
+# IP ranges publicados pela Cloudflare (https://www.cloudflare.com/ips-v4).
+# Usado como fallback quando o state_data ainda não tem informação CDN
+# (naabu roda em P02, antes do WhatWeb/httpx em P06 que detectam o CDN).
+_CLOUDFLARE_IP_NETWORKS: list[ipaddress.IPv4Network] = [
+    ipaddress.ip_network(r) for r in (
+        "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22",
+        "104.16.0.0/13", "104.24.0.0/14",
+        "108.162.192.0/18", "131.0.72.0/22", "141.101.64.0/18",
+        "162.158.0.0/15", "172.64.0.0/13", "173.245.48.0/20",
+        "188.114.96.0/20", "190.93.240.0/20",
+        "197.234.240.0/22", "198.41.128.0/17",
+    )
+]
+
+
+def _is_cloudflare_ip(host: str) -> bool:
+    """Retorna True se o host (endereço IPv4) pertence a um range Cloudflare."""
+    try:
+        addr = ipaddress.IPv4Address(host)
+        return any(addr in net for net in _CLOUDFLARE_IP_NETWORKS)
+    except ValueError:
+        return False
+
 
 def _resolve_cdn_context_from_state(scan_state: dict[str, Any] | None, target: str) -> dict[str, Any]:
     """Extrai contexto CDN/WAF do state do scan para o target dado.
@@ -2161,6 +2185,16 @@ def _extract_naabu_masscan_findings(
     # representam superfície do servidor de origem.
     is_cdn = bool((cdn_context or {}).get("edge_control_detected"))
     is_cf  = bool((cdn_context or {}).get("is_cloudflare_proxy"))
+
+    # Fallback: se o state ainda não tem info CDN (naabu corre em P02, antes de
+    # WhatWeb/httpx em P06), checar diretamente se algum IP dos resultados pertence
+    # a ranges Cloudflare publicados. Independente de timing e de state_data.
+    if not is_cf and open_ports:
+        _sample_hosts = {p["host"] for p in open_ports[:10]}
+        if any(_is_cloudflare_ip(h) for h in _sample_hosts):
+            is_cf = True
+            is_cdn = True  # CDN implica edge_control_detected
+
     cdn_filtered: list[dict] = []
     real_ports = open_ports
     if is_cf:
@@ -3713,6 +3747,53 @@ def persist_findings_from_work_item(
         return 0
 
     # ── Propaga inject_to_state de ferramentas de OSINT para o job.state_data ──
+
+    # WhatWeb: propaga edge_control_detected, allowed_http_methods, site_classes,
+    # low_priority_targets e trigger_origin_discovery para o state do job.
+    # Isso alimenta o caminho work-queue (persist_findings_from_work_item) com os
+    # mesmos dados que o workflow.py já propaga no caminho LangGraph (Fix #04B).
+    if tool in ("whatweb", "whatweb-basic") and job:
+        for _rf in raw_findings:
+            _inject = (_rf.get("details") or {}).get("inject_to_state") or {}
+            if not _inject:
+                continue
+            try:
+                _state_data = dict(job.state_data or {})
+                if _inject.get("edge_control_detected"):
+                    _state_data["edge_control_detected"] = True
+                if _inject.get("allowed_http_methods"):
+                    _existing_methods = list(_state_data.get("allowed_http_methods") or [])
+                    for _m in _inject["allowed_http_methods"]:
+                        if _m not in _existing_methods:
+                            _existing_methods.append(_m)
+                    _state_data["allowed_http_methods"] = _existing_methods
+                if _inject.get("site_classes"):
+                    _existing_classes = list(_state_data.get("site_classes") or [])
+                    for _c in _inject["site_classes"]:
+                        if _c not in _existing_classes:
+                            _existing_classes.append(_c)
+                    _state_data["site_classes"] = _existing_classes
+                if _inject.get("low_priority_targets"):
+                    _existing_lp = list(_state_data.get("low_priority_targets") or [])
+                    for _t in _inject["low_priority_targets"]:
+                        if _t not in _existing_lp:
+                            _existing_lp.append(_t)
+                    _state_data["low_priority_targets"] = _existing_lp
+                if _inject.get("trigger_origin_discovery"):
+                    _state_data["trigger_origin_discovery"] = True
+                job.state_data = _state_data
+                import logging as _log
+                _log.getLogger(__name__).info(
+                    "findings_extractor: whatweb inject_to_state → job.state_data: "
+                    "edge=%s methods=%s classes=%s",
+                    _state_data.get("edge_control_detected"),
+                    _state_data.get("allowed_http_methods"),
+                    _state_data.get("site_classes"),
+                )
+            except Exception:
+                pass
+            break  # um finding WhatWeb é suficiente para propagar
+
     # GAU/waybackurls emitem known_parameters quando encontram URLs com parâmetros
     # sensíveis. Esses parâmetros devem ser preservados no state do job para que
     # a fase de fuzzing (arjun/ffuf-params) os consuma.

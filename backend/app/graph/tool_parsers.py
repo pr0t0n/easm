@@ -1613,8 +1613,15 @@ def _extract_whatweb_findings(stdout: str, step_name: str, default_target: str) 
                 page_title = tech_value
                 continue
 
-            # Detecta headers CDN
-            if tech_lower in _CDN_HEADER_PATTERNS or any(cdn in tech_lower for cdn in _CDN_TECH_NAMES):
+            # Detecta headers CDN — checa tech_name E tech_value.
+            # WhatWeb reporta "HTTPServer[cloudflare]" (name=HTTPServer, value=cloudflare)
+            # e "UncommonHeaders[cf-ray,cf-cache-status]" (name=UncommonHeaders, value=cf-ray,...).
+            # Em ambos o CDN está no VALUE, não no name — checar os dois.
+            tech_val_lower = tech_value.lower()
+            _cdn_by_name = tech_lower in _CDN_HEADER_PATTERNS or any(cdn in tech_lower for cdn in _CDN_TECH_NAMES)
+            _cdn_by_val  = any(cdn in tech_val_lower for cdn in _CDN_TECH_NAMES)
+            _cdn_by_hdr  = any(hdr in tech_val_lower for hdr in _CDN_HEADER_PATTERNS)
+            if _cdn_by_name or _cdn_by_val or _cdn_by_hdr:
                 is_cdn_detected = True
                 cdn_headers_found.append(f"{tech_name}={tech_value}")
 
