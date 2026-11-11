@@ -9046,8 +9046,137 @@ def sweep_orphan_candidates(self, scan_id: int) -> dict[str, Any]:
         except Exception as exc_sqli:  # noqa: BLE001
             logger.debug("sweep: sqlmap-discovery seed failed: %s", exc_sqli)
 
+        # Fase 6: segundo ciclo de adjudicação para findings ainda candidate/hypothesis.
+        # O primeiro ciclo pula findings que já têm adjudicação (apenas retenta wire).
+        # Esta fase re-adjudica esses sobreviventes com as evidências acumuladas.
+        second_round = 0
+        try:
+            db.flush()
+            _surviving = (
+                db.query(Finding)
+                .filter(
+                    Finding.scan_job_id == job.id,
+                    Finding.verification_status.in_(["candidate", "hypothesis"]),
+                    Finding.is_false_positive.is_(False),
+                )
+                .all()
+            )
+            from app.services.finding_adjudication import adjudicate_finding as _adj2
+            from app.services.finding_adjudication import (
+                build_adjudication_dossier as _bld2,
+                deterministic_verdict as _dv2,
+                project_adjudication_to_finding as _proj2,
+            )
+            from app.models.models import FindingAdjudication as _FA2
+            from datetime import datetime as _dt2
+            for _sf in _surviving:
+                try:
+                    _result2 = _adj2(db, job, _sf)
+                    second_round += 1
+                    if _result2.get("wires"):
+                        wires += len(_result2["wires"])
+                except RuntimeError as _rerr2:
+                    if "adjudication_budget_exhausted" not in str(_rerr2):
+                        raise
+                    _dossier2 = _bld2(db, job, _sf)
+                    _decision2 = _dv2(_dossier2)
+                    _final2 = _FA2(
+                        scan_job_id=job.id,
+                        finding_id=_sf.id,
+                        cycle=99,
+                        status="completed",
+                        dossier=_dossier2,
+                        final_verdict=str(_decision2.get("verdict") or "inconclusive"),
+                        reason_code=f"validation_exhausted_round2:{_decision2.get('reason_code')}",
+                        confidence=float(_decision2.get("confidence") or 0.5),
+                        completed_at=_dt2.now(),
+                        decision_metadata={
+                            "single_judge": "deterministic_evidence_gate",
+                            "terminal": "budget_exhausted_round2",
+                        },
+                    )
+                    db.add(_final2)
+                    db.flush()
+                    _proj2(db, _sf, _final2)
+                    second_round += 1
+                except Exception:
+                    pass
+            if second_round:
+                db.add(ScanLog(
+                    scan_job_id=job.id,
+                    source="quality-gate",
+                    level="INFO",
+                    message=f"sweep_second_round scan={job.id} re_adjudicated={second_round}",
+                ))
+        except Exception as exc_round2:  # noqa: BLE001
+            logger.debug("sweep: second-round adjudication failed: %s", exc_round2)
+
+        # Fase 7: seed nuclei-cve para CVE hypothesis em alvos não-CDN.
+        # Hypotheses com CVE identificado (nmap-vulscan, shodan) em hosts não-proxy
+        # recebem um work item nuclei-cve para confirmação ativa do CVE.
+        nuclei_cve_seeded = 0
+        try:
+            from app.models.models import Finding as _HF, ScanWorkItem as _SWI_N
+            _hyp_findings = (
+                db.query(_HF)
+                .filter(
+                    _HF.scan_job_id == job.id,
+                    _HF.verification_status == "hypothesis",
+                    _HF.is_false_positive.is_(False),
+                )
+                .all()
+            )
+            for _hf in _hyp_findings:
+                _hf_details = dict(_hf.details or {})
+                _cve = _hf_details.get("cve") or str(getattr(_hf, "cve", None) or "")
+                if not _cve:
+                    continue
+                # Pula se alvo é CDN proxy — nuclei não alcança a origem através do edge
+                if _hf_details.get("is_cdn_proxied"):
+                    continue
+                _target = str(_hf_details.get("asset") or getattr(_hf, "domain", None) or "")
+                if not _target:
+                    continue
+                _existing_nuclei = (
+                    db.query(_SWI_N)
+                    .filter(
+                        _SWI_N.scan_job_id == job.id,
+                        _SWI_N.tool_name.in_(["nuclei-cve", "nuclei-cves"]),
+                        _SWI_N.target == _target,
+                    )
+                    .filter(_SWI_N.status.in_(["pending", "queued", "running", "success"]))
+                    .first()
+                )
+                if _existing_nuclei:
+                    continue
+                _nuclei_item = _SWI_N(
+                    scan_job_id=job.id,
+                    tool_name="nuclei-cve",
+                    target=_target,
+                    phase_id="P11",
+                    status="pending",
+                    item_metadata={
+                        "source": "cve_hypothesis_verification",
+                        "finding_id": _hf.id,
+                        "cve": _cve,
+                        "args": ["-id", str(_cve)],
+                        "purpose": "verify CVE hypothesis from nmap-vulscan/shodan",
+                    },
+                )
+                db.add(_nuclei_item)
+                nuclei_cve_seeded += 1
+            if nuclei_cve_seeded:
+                db.add(ScanLog(
+                    scan_job_id=job.id,
+                    source="quality-gate",
+                    level="INFO",
+                    message=f"nuclei_cve_seeded scan={job.id} items={nuclei_cve_seeded}",
+                ))
+        except Exception as exc_nuclei:  # noqa: BLE001
+            logger.debug("sweep: nuclei-cve seed failed: %s", exc_nuclei)
+
         db.commit()
-        return {"scan_id": job.id, "orphans": len(orphans), "adjudicated": adjudicated, "wires": wires, "errors": errors, "metrics": metrics, "sqli_seeded": sqli_seeded}
+        return {"scan_id": job.id, "orphans": len(orphans), "adjudicated": adjudicated, "wires": wires, "errors": errors, "metrics": metrics, "sqli_seeded": sqli_seeded, "second_round": second_round, "nuclei_cve_seeded": nuclei_cve_seeded}
     except Exception as exc:  # noqa: BLE001
         try:
             db.rollback()

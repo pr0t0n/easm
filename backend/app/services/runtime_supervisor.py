@@ -72,11 +72,18 @@ def diagnose_execution(db: Session, item: Any) -> dict[str, Any]:
     metadata = dict(getattr(item, "item_metadata", None) or {})
     resolution = dict(metadata.get("validation_resolution") or {})
     error = str(getattr(item, "last_error", None) or "").lower()
+    stderr_preview = str(result.get("stderr_preview") or "").lower()
     if resolution.get("status") == "awaiting_evidence":
         category = "data_missing"
     elif "contradict" in error or resolution.get("status") == "contradictory":
         category = "data_contradictory"
     elif "supervisor_review_required" in error or "impossible" in error:
+        category = "impossible_state"
+    elif "hard_ceiling" in stderr_preview or "hard_ceiling" in error:
+        # Ferramenta bateu no limite absoluto de tempo mesmo com atividade.
+        # Retentar não resolve — a ferramenta simplesmente gera mais output do
+        # que o ceiling permite. Categorizar como impossible_state para
+        # interromper a cascata de recovery (external → recovery-1 → recovery-2).
         category = "impossible_state"
     elif "dispatch_not_acknowledged" in error or "timeout" in error or "connection" in error or "temporar" in error:
         category = "transient_error"
